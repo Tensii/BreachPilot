@@ -22,17 +22,18 @@ func LoadReconSummary(path string) (models.ReconSummary, error) {
 	return rs, nil
 }
 
-func GuessTargetFromSummary(path string) string {
-	dir := filepath.Dir(strings.TrimSpace(path))
-	if dir == "." || dir == "" {
+func TargetFromWorkdir(workdir string) string {
+	wd := filepath.Clean(strings.TrimSpace(workdir))
+	if wd == "" || wd == "." {
 		return ""
 	}
-	base := filepath.Base(dir)
-	if base == "reports" || base == "recon" {
-		base = filepath.Base(filepath.Dir(dir))
-	}
-	if base == "outputs" || base == "" {
+	parent := filepath.Dir(wd)
+	if parent == "." || parent == "" {
 		return ""
 	}
-	return base
+	target := filepath.Base(parent)
+	if target == "." || target == "" || target == "outputs" {
+		return ""
+	}
+	return target
 }

@@ -29,9 +29,17 @@ type ReconSummary struct {
 	URLs    struct {
 		All string `json:"all"`
 	} `json:"urls"`
+	Nuclei struct {
+		Phase1JSONL string `json:"phase1_jsonl"`
+	} `json:"nuclei"`
 	Intel struct {
 		EndpointsRankedJSON string `json:"endpoints_ranked_json"`
 		ParamsRankedJSON    string `json:"params_ranked_json"`
+		SecretsJSON         string `json:"secrets_findings_json"`
+		CORSJSON            string `json:"cors_findings_json"`
+		BypassJSON          string `json:"bypass_403_findings_json"`
+		PortScanJSON        string `json:"portscan_results_json"`
+		NucleiPhase1JSONL   string `json:"nuclei.phase1_jsonl"`
 	} `json:"intel"`
 }
 

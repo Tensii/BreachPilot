@@ -29,6 +29,9 @@ type Webhook struct {
 }
 
 func (w *Webhook) Start() {
+	if w.URL == "" {
+		return
+	}
 	w.once.Do(func() {
 		if w.Retries <= 0 {
 			w.Retries = 3

@@ -206,13 +206,20 @@ def score_endpoint_url(url: str) -> int:
     return min(score, 100)
 
 
-def _download_js(url: str, timeout: int = 12) -> str:
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": _JS_USER_AGENTS[0]})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+def _download_js(url: str, out_path: Path, timeout: int = 12) -> bool:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for ua in _JS_USER_AGENTS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            if not raw:
+                continue
+            out_path.write_bytes(raw)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 _JS_USER_AGENTS = [

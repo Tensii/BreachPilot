@@ -15,6 +15,8 @@ import (
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
+	"breachpilot/internal/scope"
+	"github.com/google/shlex"
 )
 
 type Options struct {
@@ -32,6 +34,15 @@ type Options struct {
 func Process(ctx context.Context, job *models.Job, opt Options) error {
 	job.StartedAt = time.Now().UTC()
 	job.Status = models.JobRunning
+	if t := strings.TrimSpace(job.Target); t != "" && t != "from-summary" {
+		if err := scope.ValidateTarget(t); err != nil {
+			job.Status = models.JobFailed
+			job.FinishedAt = time.Now().UTC()
+			job.Error = fmt.Sprintf("target validation failed: %v", err)
+			_ = writeJobReport(job, opt.ArtifactsRoot)
+			return nil
+		}
+	}
 
 	notify := func(s string) {
 		if opt.Progress != nil {
@@ -62,8 +73,17 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return err
 	}
 	if strings.TrimSpace(job.Target) == "" || strings.TrimSpace(job.Target) == "from-summary" {
-		if guessed := ingest.GuessTargetFromSummary(job.ReconPath); guessed != "" {
+		if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
 			job.Target = guessed
+		}
+	}
+	if t := strings.TrimSpace(job.Target); t != "" && t != "from-summary" {
+		if err := scope.ValidateTarget(t); err != nil {
+			job.Status = models.JobFailed
+			job.FinishedAt = time.Now().UTC()
+			job.Error = fmt.Sprintf("target validation failed: %v", err)
+			_ = writeJobReport(job, opt.ArtifactsRoot)
+			return nil
 		}
 	}
 
@@ -121,7 +141,15 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	outLog := filepath.Join(artDir, "nuclei.log")
 	job.EvidencePath = artDir
 
-	args := []string{"-l", hostsPath, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats"}
+	nucleiInput := hostsPath
+	if rankedInput, rankedCount := buildRankedNucleiInput(rs.Intel.EndpointsRankedJSON, artDir); rankedCount > 0 {
+		nucleiInput = rankedInput
+		if opt.Progress != nil {
+			opt.Progress(fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount))
+		}
+	}
+
+	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats"}
 	if len(job.Templates) > 0 {
 		args = append(args, "-t", strings.Join(job.Templates, ","))
 	} else if job.SafeMode {
@@ -149,7 +177,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	cmd.Stdout = mw
 	cmd.Stderr = mw
 
-	if err := cmd.Run(); err != nil {
+	nucleiErr := cmd.Run()
+	if nucleiErr != nil {
 		job.ExploitDurationSec = time.Since(exploitStart).Seconds()
 		if ctx.Err() == context.Canceled {
 			job.Status = models.JobCancelled
@@ -165,8 +194,15 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
 		}
-		_ = writeJobReport(job, opt.ArtifactsRoot)
-		return fmt.Errorf("nuclei execution failed: %w", err)
+		st, statErr := os.Stat(outJSONL)
+		if statErr != nil || st.Size() == 0 {
+			_ = writeJobReport(job, opt.ArtifactsRoot)
+			return fmt.Errorf("nuclei execution failed: %w", nucleiErr)
+		}
+		if opt.Progress != nil {
+			opt.Progress("exploit.warning nuclei exited non-zero with partial results; continuing")
+		}
+		job.Error = fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr)
 	}
 
 	count, err := countLines(outJSONL)
@@ -206,7 +242,10 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 	}
 	defer logFile.Close()
 
-	cmdline := fmt.Sprintf("%s %q --run -o %q", opt.ReconHarvestCmd, job.Target, reconDir)
+	baseArgv, err := shlex.Split(strings.TrimSpace(opt.ReconHarvestCmd))
+	if err != nil || len(baseArgv) == 0 {
+		return "", fmt.Errorf("invalid recon command: %q", opt.ReconHarvestCmd)
+	}
 	attempts := opt.ReconRetries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -217,7 +256,9 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		if opt.ReconTimeoutSec > 0 {
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
-		cmd := exec.CommandContext(reconCtx, "/bin/bash", "-lc", cmdline)
+		argv := append([]string{}, baseArgv...)
+		argv = append(argv, job.Target, "--run", "-o", reconDir)
+		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
 		}
@@ -254,6 +295,71 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	return "", fmt.Errorf("reconHarvest failed")
+}
+
+func buildRankedNucleiInput(path string, artDir string) (string, int) {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return "", 0
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", 0
+	}
+	var data any
+	if err := json.Unmarshal(b, &data); err != nil {
+		return "", 0
+	}
+	items := make([]string, 0, 256)
+	seen := make(map[string]struct{})
+	appendURL := func(v string) {
+		u := strings.TrimSpace(v)
+		if u == "" {
+			return
+		}
+		if _, ok := seen[u]; ok {
+			return
+		}
+		seen[u] = struct{}{}
+		items = append(items, u)
+	}
+
+	switch t := data.(type) {
+	case []any:
+		for _, row := range t {
+			m, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			if u, ok := m["url"].(string); ok {
+				appendURL(u)
+			}
+			if len(items) >= 500 {
+				break
+			}
+		}
+	case map[string]any:
+		if arr, ok := t["items"].([]any); ok {
+			for _, row := range arr {
+				m, ok := row.(map[string]any)
+				if !ok {
+					continue
+				}
+				if u, ok := m["url"].(string); ok {
+					appendURL(u)
+				}
+				if len(items) >= 500 {
+					break
+				}
+			}
+		}
+	}
+	if len(items) == 0 {
+		return "", 0
+	}
+	out := filepath.Join(artDir, "nuclei_targets_ranked.txt")
+	_ = os.WriteFile(out, []byte(strings.Join(items, "\n")+"\n"), 0o644)
+	return out, len(items)
 }
 
 func writeJobReport(job *models.Job, artifactsRoot string) error {

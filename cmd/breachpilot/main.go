@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"strings"
@@ -18,6 +19,7 @@ import (
 )
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	cfg := config.Load()
 	engOpt := engine.Options{
 		NucleiBin:        cfg.NucleiBin,
@@ -79,7 +81,7 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 		target = strings.TrimSpace(args[1])
 	}
 	job := &models.Job{
-		ID:        time.Now().UTC().Format("20060102T150405"),
+		ID:        newJobID(),
 		Target:    target,
 		Mode:      mode,
 		SafeMode:  true,
@@ -94,9 +96,12 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 			return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
 		}
 		if job.Target == "" {
-			if guessed := ingest.GuessTargetFromSummary(job.ReconPath); guessed != "" {
-				job.Target = guessed
-			} else {
+			if rs, err := ingest.LoadReconSummary(job.ReconPath); err == nil {
+				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
+					job.Target = guessed
+				}
+			}
+			if job.Target == "" {
 				job.Target = "from-summary"
 			}
 		}
@@ -191,6 +196,10 @@ func runSetup(opt engine.Options) error {
 	fmt.Printf("[setup] artifacts dir ready: %s\n", opt.ArtifactsRoot)
 	fmt.Println("[setup] done")
 	return nil
+}
+
+func newJobID() string {
+	return fmt.Sprintf("%s_%04x", time.Now().UTC().Format("20060102T150405"), rand.Intn(0x10000))
 }
 
 func printUsage() {
