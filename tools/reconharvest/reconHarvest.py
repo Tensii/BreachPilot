@@ -1201,8 +1201,10 @@ class Runner:
             "stderr_path": result.stderr_path,
         }
         self.append_command_log({"timestamp": now_utc_iso(), "label": label, "command": display, "returncode": result.returncode, "duration_seconds": result.duration_seconds, "attempts": result.attempts, "stdout_path": result.stdout_path, "stderr_path": result.stderr_path})
-        if not allow_failure and result.returncode != 0:
-            raise RuntimeError(f"{label} failed with return code {result.returncode}")
+        if (not allow_failure) and result.returncode != 0:
+            if self.config.stop_on_error:
+                raise RuntimeError(f"{label} failed with return code {result.returncode}")
+            self.record_failure("nonfatal", label, RuntimeError(f"return code {result.returncode}"), tool="run_tool")
         return result
 
     def reuse_previous_artifacts(self) -> int:
@@ -3222,7 +3224,7 @@ class Runner:
 
         if hosts:
             workers = min(20, len(hosts))
-            stage_deadline_s = max(15, int(self.config.graphql_timeout))
+            stage_deadline_s = max(30, int(self.config.graphql_timeout) * min(len(hosts), 10))
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
                 futs = [ex.submit(_scan_host, h) for h in hosts]
                 try:

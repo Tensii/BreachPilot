@@ -1,6 +1,6 @@
 BINARY=breachpilot
 
-.PHONY: build test run setup sync-reconharvest sync-reconharvest-commit
+.PHONY: build test run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
 
 build:
 	go build -o $(BINARY) ./cmd/breachpilot
@@ -16,6 +16,9 @@ setup:
 
 sync-reconharvest:
 	./tools/sync_reconharvest.sh
+
+sync-reconharvest-latest:
+	SYNC_PULL_LATEST=1 ./tools/sync_reconharvest.sh
 
 sync-reconharvest-commit:
 	./tools/sync_reconharvest.sh

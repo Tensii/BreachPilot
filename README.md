@@ -32,6 +32,12 @@ When `reconHarvest-PythonV` is updated, sync into BreachPilot with one command:
 make sync-reconharvest
 ```
 
+If you also want to `git pull --ff-only` latest changes in source repo first:
+
+```bash
+make sync-reconharvest-latest
+```
+
 Optional auto-commit helper:
 
 ```bash

@@ -10,6 +10,11 @@ if [[ ! -f "$SRC/reconHarvest.py" || ! -f "$SRC/installers.py" ]]; then
   exit 1
 fi
 
+if [[ "${SYNC_PULL_LATEST:-0}" == "1" ]]; then
+  echo "[sync] pulling latest from source repo..."
+  git -C "$SRC" pull --ff-only
+fi
+
 echo "[sync] source: $SRC"
 echo "[sync] dest:   $DST"
 
