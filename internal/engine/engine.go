@@ -14,10 +14,12 @@ import (
 
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/filter"
+	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
+	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
 	headers "breachpilot/internal/exploit/modules/headers"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
@@ -45,6 +47,7 @@ type Options struct {
 	MinSeverity      string
 	SkipModules      string
 	OnlyModules      string
+	ValidationOnly   bool
 	Progress         func(string)
 }
 
@@ -234,6 +237,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// --- exploit module phase ---
 	exploitModules := filterModules(registeredModuleInstances(), opt.OnlyModules, opt.SkipModules)
+	if opt.ValidationOnly {
+		exploitModules = filterValidationOnly(exploitModules)
+	}
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot: opt.ArtifactsRoot,
 		Progress:      opt.Progress,
@@ -564,6 +570,39 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+type ModuleInfo struct {
+	Name         string
+	Description  string
+	SafeReadOnly bool
+}
+
+func registeredModuleInfos() []ModuleInfo {
+	return []ModuleInfo{
+		{"security-headers", "Detects missing/weak security headers", true},
+		{"open-redirect", "Detects potential open redirect vectors", true},
+		{"info-disclosure", "Probes common exposed files/endpoints", true},
+		{"cors-poc", "Validates risky CORS findings", true},
+		{"secrets-validator", "Validates leaked key/JWT patterns", true},
+		{"bypass-poc", "Builds PoC from discovered 403 bypasses", true},
+		{"port-service", "Classifies risky exposed network services", true},
+		{"nuclei-triage", "Triages nuclei phase1 results", true},
+		{"subdomain-takeover", "Checks takeover signatures", true},
+		{"api-surface", "Finds exposed API specs/graphql endpoints", true},
+		{"cookie-security", "Checks cookie flag hardening", true},
+		{"http-method-tampering", "Checks dangerous HTTP methods", true},
+		{"js-endpoints", "Scores JS-discovered endpoint risk", true},
+		{"admin-surface", "Finds exposed admin/debug surfaces", true},
+		{"exposed-files", "Finds exposed sensitive files/config", true},
+	}
+}
+
+func RegisteredModuleInfos() []ModuleInfo {
+	infos := registeredModuleInfos()
+	out := make([]ModuleInfo, len(infos))
+	copy(out, infos)
+	return out
+}
+
 func registeredModuleInstances() []exploit.Module {
 	return []exploit.Module{
 		headers.New(),
@@ -579,15 +618,17 @@ func registeredModuleInstances() []exploit.Module {
 		cookiesecurity.New(),
 		httpmethods.New(),
 		jsendpoints.New(),
+		adminsurface.New(),
+		exposedfiles.New(),
 	}
 }
 
 // RegisteredModules returns the names of all exploit modules in registration order.
 func RegisteredModules() []string {
-	mods := registeredModuleInstances()
-	out := make([]string, 0, len(mods))
-	for _, m := range mods {
-		out = append(out, m.Name())
+	infos := registeredModuleInfos()
+	out := make([]string, 0, len(infos))
+	for _, m := range infos {
+		out = append(out, m.Name)
 	}
 	return out
 }
@@ -610,6 +651,21 @@ func filterModules(modules []exploit.Module, onlyModules string, skipList string
 		return out
 	}
 	return filterModulesBySkipList(modules, skipList)
+}
+
+func filterValidationOnly(modules []exploit.Module) []exploit.Module {
+	infos := registeredModuleInfos()
+	safe := map[string]bool{}
+	for _, i := range infos {
+		safe[strings.ToLower(i.Name)] = i.SafeReadOnly
+	}
+	out := make([]exploit.Module, 0, len(modules))
+	for _, m := range modules {
+		if safe[strings.ToLower(m.Name())] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func filterModulesBySkipList(modules []exploit.Module, skipList string) []exploit.Module {

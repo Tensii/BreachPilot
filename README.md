@@ -17,6 +17,9 @@ It ships with a vendored ReconHarvest runner under `tools/reconharvest/` for por
 
 # machine-readable output
 ./breachpilot full example.com --json
+
+# list available exploit modules
+./breachpilot list-modules
 ```
 
 ## Build
@@ -85,6 +88,7 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_MIN_SEVERITY` (optional findings floor; example: `HIGH` keeps only HIGH/CRITICAL)
 - `BREACHPILOT_SKIP_MODULES` (optional comma-separated module skip list; example: `security-headers,cookie-security`)
 - `BREACHPILOT_ONLY_MODULES` (optional comma-separated allow-list; example: `cors-poc,js-endpoints`; overrides skip-list when set)
+- `BREACHPILOT_VALIDATION_ONLY` (optional bool; when true, only safe read-only modules run)
 - `BREACHPILOT_CONFIG` (optional path to env file)
 
 ## Notes

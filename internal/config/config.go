@@ -24,6 +24,7 @@ type Config struct {
 	MinSeverity       string
 	SkipModules       string
 	OnlyModules       string
+	ValidationOnly    bool
 	ConfigPath        string
 }
 
@@ -56,6 +57,7 @@ func Load() Config {
 		MinSeverity:       getEnv("BREACHPILOT_MIN_SEVERITY", ""),
 		SkipModules:       getEnv("BREACHPILOT_SKIP_MODULES", ""),
 		OnlyModules:       getEnv("BREACHPILOT_ONLY_MODULES", ""),
+		ValidationOnly:    getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
 		ConfigPath:        configPath,
 	}
 }
@@ -65,6 +67,21 @@ func getEnv(k, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvBool(k string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func getEnvInt(k string, fallback int) int {
@@ -127,8 +144,8 @@ func (c Config) RedactedSummary() string {
 	if onlyMods == "" {
 		onlyMods = "<none>"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly)
 }
 
 func loadEnvFile(path string) error {

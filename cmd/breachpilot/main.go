@@ -36,6 +36,7 @@ func main() {
 		MinSeverity:      cfg.MinSeverity,
 		SkipModules:      cfg.SkipModules,
 		OnlyModules:      cfg.OnlyModules,
+		ValidationOnly:   cfg.ValidationOnly,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
@@ -245,23 +246,12 @@ func newJobID() string {
 
 func listModules(opt engine.Options) {
 	_ = opt
-	desc := map[string]string{
-		"security-headers":      "Detects missing/weak security headers",
-		"open-redirect":         "Detects potential open redirect vectors",
-		"info-disclosure":       "Probes common exposed files/endpoints",
-		"cors-poc":              "Validates risky CORS findings",
-		"secrets-validator":     "Validates leaked key/JWT patterns",
-		"bypass-poc":            "Builds PoC from discovered 403 bypasses",
-		"port-service":          "Classifies risky exposed network services",
-		"nuclei-triage":         "Triages nuclei phase1 results",
-		"subdomain-takeover":    "Checks takeover signatures",
-		"api-surface":           "Finds exposed API specs/graphql endpoints",
-		"cookie-security":       "Checks cookie flag hardening",
-		"http-method-tampering": "Checks dangerous HTTP methods",
-		"js-endpoints":          "Scores JS-discovered endpoint risk",
-	}
-	for _, name := range engine.RegisteredModules() {
-		fmt.Printf("%s\t%s\n", name, desc[name])
+	for _, mi := range engine.RegisteredModuleInfos() {
+		safety := "read-only"
+		if !mi.SafeReadOnly {
+			safety = "active"
+		}
+		fmt.Printf("%s\t%s\t%s\n", mi.Name, mi.Description, safety)
 	}
 }
 
