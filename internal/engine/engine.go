@@ -20,6 +20,7 @@ import (
 type Options struct {
 	NucleiBin        string
 	ReconHarvestCmd  string
+	ReconWebhookURL  string
 	ReconTimeoutSec  int
 	ReconRetries     int
 	NucleiTimeoutSec int
@@ -217,6 +218,9 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
 		cmd := exec.CommandContext(reconCtx, "/bin/bash", "-lc", cmdline)
+		if opt.ReconWebhookURL != "" {
+			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
+		}
 		mw := io.MultiWriter(logFile, &progressWriter{stage: "recon.log", cb: opt.Progress})
 		cmd.Stdout = mw
 		cmd.Stderr = mw

@@ -3,74 +3,66 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
-	"breachpilot/internal/api"
 	"breachpilot/internal/config"
 	"breachpilot/internal/engine"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/notify"
-	"breachpilot/internal/queue"
-	"breachpilot/internal/store"
 )
 
 func main() {
 	cfg := config.Load()
 	engOpt := engine.Options{
 		NucleiBin:        cfg.NucleiBin,
-		ReconHarvestCmd:  cfg.ReconHarvestCmd,
+		ReconHarvestCmd:  config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
+		ReconWebhookURL:  cfg.ReconWebhookURL,
 		ReconTimeoutSec:  cfg.ReconTimeoutSec,
 		ReconRetries:     cfg.ReconRetries,
 		NucleiTimeoutSec: cfg.NucleiTimeoutSec,
 		ArtifactsRoot:    cfg.ArtifactsRoot,
 	}
-	nf := &notify.Webhook{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
+	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
 
-	// Simple CLI mode:
-	//   breachpilot full <target> [--json]
-	//   breachpilot file <summary.json> [--json]
-	args := flag.Args()
-	if len(args) > 0 {
-		jsonOut := false
-		filtered := make([]string, 0, len(args))
-		for _, a := range args {
-			if a == "--json" {
-				jsonOut = true
-				continue
-			}
-			filtered = append(filtered, a)
-		}
-		if err := runCLIMode(filtered, engOpt, nf, jsonOut); err != nil {
+	args := os.Args[1:]
+	if len(args) == 0 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	if len(args) == 1 && args[0] == "setup" {
+		if err := runSetup(engOpt); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
-	st, err := store.OpenSQLite(cfg.DBPath)
-	if err != nil {
-		log.Fatalf("open sqlite store: %v", err)
+	jsonOut := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+			continue
+		}
+		filtered = append(filtered, a)
 	}
-	defer st.Close()
 
-	q := queue.New(cfg.QueueSize, engOpt, nf, st)
-	q.StartWorkers(cfg.Workers)
-
-	srv := &api.Server{Q: q, Token: cfg.RequireToken, TriggerSecret: cfg.TriggerSecret}
-	log.Printf("breachpilot listening on %s workers=%d queue=%d", cfg.Listen, cfg.Workers, cfg.QueueSize)
-	if err := http.ListenAndServe(cfg.Listen, srv.Router()); err != nil {
+	if err := runCLIMode(filtered, engOpt, nf, jsonOut); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing mode. Use: full <target> OR file <summary.json>")
+	}
 	mode := strings.ToLower(strings.TrimSpace(args[0]))
 	if mode != "full" && mode != "file" {
 		return fmt.Errorf("unknown mode %q. Use: full <target> OR file <summary.json>", mode)
@@ -167,11 +159,43 @@ func printJobJSON(job *models.Job) error {
 	return nil
 }
 
-func init() {
-	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Println("Usage:")
-		fmt.Println("  breachpilot                 # run API server")
-		fmt.Println("  breachpilot full <target> [--json]   # run reconHarvest then exploit stage")
-		fmt.Println("  breachpilot file <summary.json> [--json]  # use existing ReconHarvest summary")
+func runSetup(opt engine.Options) error {
+	fmt.Println("[setup] checking runtime dependencies...")
+	checks := []struct {
+		name string
+		cmd  []string
+	}{
+		{"python3", []string{"python3", "--version"}},
+		{"nuclei", []string{opt.NucleiBin, "-version"}},
 	}
+	for _, c := range checks {
+		out, err := exec.Command(c.cmd[0], c.cmd[1:]...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("[setup] missing or broken %s: %v", c.name, err)
+		}
+		fmt.Printf("[setup] ok %s: %s\n", c.name, strings.TrimSpace(string(out)))
+	}
+
+	reconCmd := strings.TrimSpace(opt.ReconHarvestCmd)
+	if reconCmd == "" {
+		return fmt.Errorf("[setup] recon command is empty")
+	}
+	probe := exec.Command("/bin/bash", "-lc", reconCmd+" --help >/dev/null 2>&1")
+	if err := probe.Run(); err != nil {
+		return fmt.Errorf("[setup] recon command not executable: %s", reconCmd)
+	}
+	fmt.Printf("[setup] ok recon command: %s\n", reconCmd)
+	if err := os.MkdirAll(opt.ArtifactsRoot, 0o755); err != nil {
+		return fmt.Errorf("[setup] artifacts dir failed: %w", err)
+	}
+	fmt.Printf("[setup] artifacts dir ready: %s\n", opt.ArtifactsRoot)
+	fmt.Println("[setup] done")
+	return nil
+}
+
+func printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  breachpilot setup")
+	fmt.Println("  breachpilot full <target> [--json]")
+	fmt.Println("  breachpilot file <summary.json> [--json]")
 }
