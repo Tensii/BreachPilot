@@ -152,6 +152,12 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 	if job.ExploitReportPath != "" {
 		fmt.Printf("Exploit report: %s\n", job.ExploitReportPath)
 	}
+	if job.ExploitHTMLReportPath != "" {
+		fmt.Printf("Exploit HTML report: %s\n", job.ExploitHTMLReportPath)
+	}
+	if job.RiskScore > 0 {
+		fmt.Printf("Risk score: %.1f/10\n", job.RiskScore)
+	}
 	if job.ExploitFindingsCount > 0 {
 		fmt.Printf("Exploit findings: %d (JSONL: %s)\n", job.ExploitFindingsCount, job.ExploitFindingsPath)
 	}

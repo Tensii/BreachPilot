@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"breachpilot/internal/exploit"
+	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cors "breachpilot/internal/exploit/modules/cors"
 	headers "breachpilot/internal/exploit/modules/headers"
@@ -21,6 +22,7 @@ import (
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
+	subt "breachpilot/internal/exploit/modules/subt"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -235,6 +237,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		bypasspoc.New(),
 		portservice.New(),
 		nucleitriage.New(),
+		subt.New(),
+		apisurface.New(),
 	}
 	exploitFindings := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot: opt.ArtifactsRoot,
