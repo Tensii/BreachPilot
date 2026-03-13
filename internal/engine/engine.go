@@ -13,10 +13,13 @@ import (
 	"time"
 
 	"breachpilot/internal/exploit"
+	"breachpilot/internal/exploit/filter"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
+	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
 	headers "breachpilot/internal/exploit/modules/headers"
+	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
@@ -38,6 +41,8 @@ type Options struct {
 	ReconRetries     int
 	NucleiTimeoutSec int
 	ArtifactsRoot    string
+	MinSeverity      string
+	SkipModules      string
 	Progress         func(string)
 }
 
@@ -226,7 +231,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	notify("exploit.completed")
 
 	// --- exploit module phase ---
-	exploitModules := []exploit.Module{
+	exploitModules := filterModulesBySkipList([]exploit.Module{
 		headers.New(),
 		openredirect.New(),
 		infodisclosure.New(),
@@ -237,13 +242,18 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		nucleitriage.New(),
 		subt.New(),
 		apisurface.New(),
-	}
+		cookiesecurity.New(),
+		httpmethods.New(),
+	}, opt.SkipModules)
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot: opt.ArtifactsRoot,
 		Progress:      opt.Progress,
 		SafeMode:      job.SafeMode,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
+	preFilterCount := len(exploitFindings)
+	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
+	job.FilteredCount = preFilterCount - len(exploitFindings)
 
 	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {
 		job.Status = models.JobFailed
@@ -562,6 +572,26 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func filterModulesBySkipList(modules []exploit.Module, skipList string) []exploit.Module {
+	if strings.TrimSpace(skipList) == "" {
+		return modules
+	}
+	skip := make(map[string]struct{})
+	for _, s := range strings.Split(skipList, ",") {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			skip[s] = struct{}{}
+		}
+	}
+	out := make([]exploit.Module, 0, len(modules))
+	for _, m := range modules {
+		if _, blocked := skip[strings.ToLower(m.Name())]; !blocked {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func countLines(path string) (int, error) {

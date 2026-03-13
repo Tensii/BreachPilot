@@ -33,6 +33,8 @@ func main() {
 		ReconRetries:     cfg.ReconRetries,
 		NucleiTimeoutSec: cfg.NucleiTimeoutSec,
 		ArtifactsRoot:    cfg.ArtifactsRoot,
+		MinSeverity:      cfg.MinSeverity,
+		SkipModules:      cfg.SkipModules,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()

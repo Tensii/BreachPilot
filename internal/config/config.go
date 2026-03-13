@@ -21,6 +21,8 @@ type Config struct {
 	ReconRetries      int
 	NucleiTimeoutSec  int
 	ArtifactsRoot     string
+	MinSeverity       string
+	SkipModules       string
 	ConfigPath        string
 }
 
@@ -50,6 +52,8 @@ func Load() Config {
 		ReconRetries:      getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
 		NucleiTimeoutSec:  getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
 		ArtifactsRoot:     getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
+		MinSeverity:       getEnv("BREACHPILOT_MIN_SEVERITY", ""),
+		SkipModules:       getEnv("BREACHPILOT_SKIP_MODULES", ""),
 		ConfigPath:        configPath,
 	}
 }
@@ -91,6 +95,10 @@ func (c Config) Validate() error {
 			return fmt.Errorf("invalid BREACHPILOT_NUCLEI_BIN: %w", err)
 		}
 	}
+	validSevs := map[string]bool{"": true, "INFO": true, "LOW": true, "MEDIUM": true, "HIGH": true, "CRITICAL": true}
+	if !validSevs[strings.ToUpper(strings.TrimSpace(c.MinSeverity))] {
+		return fmt.Errorf("invalid BREACHPILOT_MIN_SEVERITY: %q (valid: INFO LOW MEDIUM HIGH CRITICAL)", c.MinSeverity)
+	}
 	return nil
 }
 
@@ -105,8 +113,16 @@ func (c Config) RedactedSummary() string {
 		}
 		return v[:8] + "...<redacted>"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot)
+	minSev := strings.TrimSpace(c.MinSeverity)
+	if minSev == "" {
+		minSev = "<none>"
+	}
+	skipMods := strings.TrimSpace(c.SkipModules)
+	if skipMods == "" {
+		skipMods = "<none>"
+	}
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods)
 }
 
 func loadEnvFile(path string) error {

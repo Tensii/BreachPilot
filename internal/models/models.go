@@ -95,6 +95,7 @@ type Job struct {
 	ExploitHTMLReportPath string                   `json:"exploit_html_report_path,omitempty"`
 	RiskScore             float64                  `json:"risk_score,omitempty"`
 	ModuleTelemetry       []ExploitModuleTelemetry `json:"module_telemetry,omitempty"`
+	FilteredCount         int                      `json:"filtered_count,omitempty"`
 	ReconDurationSec      float64                  `json:"recon_duration_sec,omitempty"`
 	ExploitDurationSec    float64                  `json:"exploit_duration_sec,omitempty"`
 	ReportPath            string                   `json:"report_path,omitempty"`
