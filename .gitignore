@@ -1,0 +1,9 @@
+# Build artifacts
+breachpilot
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Runtime outputs
+artifacts/
