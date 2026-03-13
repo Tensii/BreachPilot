@@ -1,0 +1,7 @@
+{
+  "mode": "full",
+  "target": "example.com",
+  "safe_mode": true,
+  "approve_intrusive": false,
+  "templates": ["http/misconfiguration/"]
+}
