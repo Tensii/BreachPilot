@@ -35,6 +35,7 @@ func main() {
 		ArtifactsRoot:    cfg.ArtifactsRoot,
 		MinSeverity:      cfg.MinSeverity,
 		SkipModules:      cfg.SkipModules,
+		OnlyModules:      cfg.OnlyModules,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
@@ -49,6 +50,10 @@ func main() {
 		if err := runSetup(engOpt); err != nil {
 			log.Fatal(err)
 		}
+		return
+	}
+	if len(args) == 1 && args[0] == "list-modules" {
+		listModules(engOpt)
 		return
 	}
 
@@ -238,9 +243,32 @@ func newJobID() string {
 	return fmt.Sprintf("%s_%04x", time.Now().UTC().Format("20060102T150405"), rand.Intn(0x10000))
 }
 
+func listModules(opt engine.Options) {
+	_ = opt
+	desc := map[string]string{
+		"security-headers":      "Detects missing/weak security headers",
+		"open-redirect":         "Detects potential open redirect vectors",
+		"info-disclosure":       "Probes common exposed files/endpoints",
+		"cors-poc":              "Validates risky CORS findings",
+		"secrets-validator":     "Validates leaked key/JWT patterns",
+		"bypass-poc":            "Builds PoC from discovered 403 bypasses",
+		"port-service":          "Classifies risky exposed network services",
+		"nuclei-triage":         "Triages nuclei phase1 results",
+		"subdomain-takeover":    "Checks takeover signatures",
+		"api-surface":           "Finds exposed API specs/graphql endpoints",
+		"cookie-security":       "Checks cookie flag hardening",
+		"http-method-tampering": "Checks dangerous HTTP methods",
+		"js-endpoints":          "Scores JS-discovered endpoint risk",
+	}
+	for _, name := range engine.RegisteredModules() {
+		fmt.Printf("%s\t%s\n", name, desc[name])
+	}
+}
+
 func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  breachpilot setup")
+	fmt.Println("  breachpilot list-modules")
 	fmt.Println("  breachpilot full <target> [--json]")
 	fmt.Println("  breachpilot file <summary.json> [--json]")
 }

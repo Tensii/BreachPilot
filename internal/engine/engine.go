@@ -21,6 +21,7 @@ import (
 	headers "breachpilot/internal/exploit/modules/headers"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
+	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
@@ -43,6 +44,7 @@ type Options struct {
 	ArtifactsRoot    string
 	MinSeverity      string
 	SkipModules      string
+	OnlyModules      string
 	Progress         func(string)
 }
 
@@ -231,24 +233,12 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	notify("exploit.completed")
 
 	// --- exploit module phase ---
-	exploitModules := filterModulesBySkipList([]exploit.Module{
-		headers.New(),
-		openredirect.New(),
-		infodisclosure.New(),
-		cors.New(),
-		secretsvalidator.New(),
-		bypasspoc.New(),
-		portservice.New(),
-		nucleitriage.New(),
-		subt.New(),
-		apisurface.New(),
-		cookiesecurity.New(),
-		httpmethods.New(),
-	}, opt.SkipModules)
+	exploitModules := filterModules(registeredModuleInstances(), opt.OnlyModules, opt.SkipModules)
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot: opt.ArtifactsRoot,
 		Progress:      opt.Progress,
 		SafeMode:      job.SafeMode,
+		MaxParallel:   0,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	preFilterCount := len(exploitFindings)
@@ -572,6 +562,54 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func registeredModuleInstances() []exploit.Module {
+	return []exploit.Module{
+		headers.New(),
+		openredirect.New(),
+		infodisclosure.New(),
+		cors.New(),
+		secretsvalidator.New(),
+		bypasspoc.New(),
+		portservice.New(),
+		nucleitriage.New(),
+		subt.New(),
+		apisurface.New(),
+		cookiesecurity.New(),
+		httpmethods.New(),
+		jsendpoints.New(),
+	}
+}
+
+// RegisteredModules returns the names of all exploit modules in registration order.
+func RegisteredModules() []string {
+	mods := registeredModuleInstances()
+	out := make([]string, 0, len(mods))
+	for _, m := range mods {
+		out = append(out, m.Name())
+	}
+	return out
+}
+
+func filterModules(modules []exploit.Module, onlyModules string, skipList string) []exploit.Module {
+	if strings.TrimSpace(onlyModules) != "" {
+		only := make(map[string]struct{})
+		for _, s := range strings.Split(onlyModules, ",") {
+			s = strings.ToLower(strings.TrimSpace(s))
+			if s != "" {
+				only[s] = struct{}{}
+			}
+		}
+		out := make([]exploit.Module, 0, len(modules))
+		for _, m := range modules {
+			if _, ok := only[strings.ToLower(m.Name())]; ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return filterModulesBySkipList(modules, skipList)
 }
 
 func filterModulesBySkipList(modules []exploit.Module, skipList string) []exploit.Module {

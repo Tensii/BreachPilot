@@ -54,7 +54,7 @@ type ReconSummary struct {
 		CORSJSON              string `json:"cors_findings_json"`
 		BypassJSON            string `json:"bypass_403_findings_json"`
 		PortScanJSON          string `json:"portscan_results_json"`
-		NucleiPhase1JSONL     string `json:"nuclei.phase1_jsonl"`
+		NucleiPhase1JSONL     string `json:"nuclei_phase1_jsonl"`
 		SubdomainTakeoverJSON string `json:"subdomain_takeover_json"`
 		JSEndpointsJSON       string `json:"js_endpoints_json"`
 	} `json:"intel"`
