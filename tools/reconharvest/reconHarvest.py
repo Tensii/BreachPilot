@@ -23,7 +23,7 @@ import urllib.request
 import urllib.error
 import zipfile
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -206,20 +206,13 @@ def score_endpoint_url(url: str) -> int:
     return min(score, 100)
 
 
-def _download_js(url: str, out_path: Path, timeout: int = 12) -> bool:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    for ua in _JS_USER_AGENTS:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": ua})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-            if not raw:
-                continue
-            out_path.write_bytes(raw)
-            return True
-        except Exception:
-            continue
-    return False
+def _download_js(url: str, timeout: int = 12) -> str:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _JS_USER_AGENTS[0]})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
 
 
 _JS_USER_AGENTS = [
@@ -659,6 +652,8 @@ class ReconConfig:
     dirsearch_workers: int = 10
     url_workers: int = 10
     katana_timeout: int = 300
+    gospider_timeout: int = 300
+    hakrawler_timeout: int = 300
     katana_depth: int = 3
     katana_js_crawl: bool = True
     gau_timeout: int = 300
@@ -699,7 +694,7 @@ class ReconConfig:
     bypass_403_timeout: int = 300
     bypass_403_workers: int = 30
     skip_bypass_403: bool = False
-    graphql_timeout: int = 300
+    graphql_timeout: int = 8
     skip_graphql: bool = False
     vhost_timeout: int = 300
     vhost_threads: int = 40
@@ -710,7 +705,7 @@ class ReconConfig:
     skip_osint: bool = False
     skip_screenshots: bool = False
     screenshots_threads: int = 8
-    screenshots_timeout: int = 300
+    screenshots_timeout: int = 10
     output_format: str = "md"
     debug_artifacts: bool = False
     max_report_files: int = 12
@@ -1930,7 +1925,7 @@ class Runner:
         elif self.gau_bin:
             self.run_tool("gau", [self.gau_bin, "--subs", self.target, "--blacklist", self.config.gau_blacklist, "--retries", "2", "--timeout", "15"], timeout=self.config.gau_timeout, stdout_path=gau_urls, stderr_path=self.logs / "gau.stderr.log", allow_failure=True)
         if self.gospider_bin and live_hosts.exists() and live_hosts.stat().st_size > 0:
-            self.run_tool("gospider", [self.gospider_bin, "-S", str(live_hosts), "-o", str(self.urls / "gospider_out"), "-t", str(max(1, self.config.url_workers)), "-c", "10", "--no-redirect", "--quiet"], timeout=self.config.katana_timeout, allow_failure=True, stdout_path=gospider_urls, stderr_path=self.logs / "gospider.stderr.log")
+            self.run_tool("gospider", [self.gospider_bin, "-S", str(live_hosts), "-o", str(self.urls / "gospider_out"), "-t", str(max(1, self.config.url_workers)), "-c", "10", "--no-redirect", "--quiet"], timeout=self.config.gospider_timeout, allow_failure=True, stdout_path=gospider_urls, stderr_path=self.logs / "gospider.stderr.log")
         if self.hakrawler_bin and live_hosts.exists() and live_hosts.stat().st_size > 0:
             hk_input_file = self.urls / "hakrawler_input.txt"
             shutil.copy2(str(live_hosts), str(hk_input_file))
@@ -1943,7 +1938,7 @@ class Runner:
                     "-subs",
                     "-url", str(hk_input_file),
                 ],
-                timeout=self.config.katana_timeout,
+                timeout=self.config.hakrawler_timeout,
                 stdout_path=hakrawler_urls,
                 stderr_path=self.logs / "hakrawler.stderr.log",
                 allow_failure=True,
@@ -3024,8 +3019,7 @@ class Runner:
                 "scan", "file",
                 "--file", str(live_hosts),
                 "--screenshot-path", str(out_dir),
-                "--write-db",
-                "--write-db-uri", f"sqlite://{db_path}",
+                "--db-uri", f"sqlite://{db_path}",
                 "--threads", str(self.config.screenshots_threads),
                 "--timeout", str(self.config.screenshots_timeout),
             ],
@@ -3163,10 +3157,17 @@ class Runner:
                     errors += 1
         with ThreadPoolExecutor(max_workers=min(self.config.bypass_403_workers, len(hosts_403))) as ex:
             futs=[ex.submit(_probe,h) for h in hosts_403]
-            for fut in as_completed(futs):
-                if SHUTTING_DOWN: break
-                try: fut.result()
-                except Exception: pass
+            stage_deadline_s = max(15, int(self.config.bypass_403_timeout))
+            try:
+                for fut in as_completed(futs, timeout=stage_deadline_s):
+                    if SHUTTING_DOWN: break
+                    try: fut.result()
+                    except Exception: pass
+            except TimeoutError:
+                errors += 1
+                self.record_stage_status("bypass_403", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
+                for f in futs:
+                    f.cancel()
         out_json=self.cache / "bypass_403_findings.json"
         self.write_json(out_json, findings)
         if hosts_403 and len(findings) == 0:
@@ -3195,12 +3196,16 @@ class Runner:
         attempts = 0
         errors = 0
         q = json.dumps({"query": "{__schema{types{name}}}", "operationName": None, "variables": {}})
-        for host in hosts:
+
+        def _scan_host(host: str) -> tuple[dict | None, int, int]:
+            local_attempts = 0
+            local_errors = 0
             for path in _GRAPHQL_PATHS:
+                if SHUTTING_DOWN:
+                    break
                 url = host.rstrip("/") + path
-                ok = False
                 for attempt in range(1, 3):
-                    attempts += 1
+                    local_attempts += 1
                     try:
                         req = urllib.request.Request(url, data=q.encode("utf-8"), headers={"Content-Type":"application/json","User-Agent":_JS_USER_AGENTS[0]})
                         with urllib.request.urlopen(req, timeout=max(5, int(self.config.graphql_timeout))) as resp:
@@ -3208,15 +3213,35 @@ class Runner:
                             if "__schema" in body or "types" in body:
                                 sf = schema_dir / (safe_name_for_host(url)+".json")
                                 sf.write_text(body, encoding="utf-8")
-                                findings.append({"url":url,"introspection":True,"schema_file":str(sf)})
-                                ok = True
-                                break
+                                return ({"url":url,"introspection":True,"schema_file":str(sf)}, local_attempts, local_errors)
                     except Exception:
-                        errors += 1
+                        local_errors += 1
                         if attempt == 1:
                             _backoff_sleep(0.35, attempt)
-                if ok:
-                    break
+            return (None, local_attempts, local_errors)
+
+        if hosts:
+            workers = min(20, len(hosts))
+            stage_deadline_s = max(15, int(self.config.graphql_timeout))
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+                futs = [ex.submit(_scan_host, h) for h in hosts]
+                try:
+                    for fut in as_completed(futs, timeout=stage_deadline_s):
+                        if SHUTTING_DOWN:
+                            break
+                        try:
+                            item, a, e = fut.result()
+                            attempts += a
+                            errors += e
+                            if item:
+                                findings.append(item)
+                        except Exception:
+                            errors += 1
+                except TimeoutError:
+                    errors += 1
+                    self.record_stage_status("graphql", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
+                    for f in futs:
+                        f.cancel()
         self.write_json(self.cache / "graphql_findings.json", findings)
         if hosts and attempts > 0 and len(findings) == 0:
             self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} errors={errors}")
@@ -3841,6 +3866,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dirsearch-workers", type=int)
     p.add_argument("--url-workers", type=int)
     p.add_argument("--global-request-budget", type=int)
+    p.add_argument("--stop-on-403-ratio", type=float)
+    p.add_argument("--stop-on-error", action="store_true", default=None)
+    p.add_argument("--no-stop-on-error", dest="stop_on_error", action="store_false")
     p.add_argument("--scan-profile", choices=["stealth", "balanced", "aggressive", "full"], default="balanced")
     p.add_argument("--target-profile", choices=["waf-safe", "normal", "aggressive-lab"], default="waf-safe")
     p.add_argument("--dirsearch-threads", type=int)
@@ -3850,6 +3878,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--httpx-timeout", type=int)
     p.add_argument("--httpx-retries", type=int)
     p.add_argument("--subfinder-timeout", type=int)
+    p.add_argument("--assetfinder-timeout", type=int)
     p.add_argument("--dnsx-timeout", type=int)
     p.add_argument("--httpx-stage-timeout", type=int)
     p.add_argument("--nuclei-rate-limit", type=int)
@@ -3861,7 +3890,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--nuclei-tags", type=str, default="")
     p.add_argument("--secrets-timeout", type=int)
     p.add_argument("--secrets-js-cap", type=int)
+    p.add_argument("--secrets-sf-cap", type=int)
+    p.add_argument("--secrets-download-delay", type=float)
+    p.add_argument("--cors-timeout", type=int)
     p.add_argument("--katana-timeout", type=int)
+    p.add_argument("--gospider-timeout", type=int)
+    p.add_argument("--hakrawler-timeout", type=int)
     p.add_argument("--katana-depth", type=int)
     p.add_argument("--no-katana-js-crawl", dest="katana_js_crawl", action="store_false")
     p.add_argument("--gau-timeout", type=int)
@@ -3880,7 +3914,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug-artifacts", action="store_true")
     p.add_argument("--doctor", action="store_true", help="Run environment/tool diagnostics and exit")
     p.add_argument("--max-report-files", type=int, default=12)
-    p.set_defaults(katana_js_crawl=True)
+    p.set_defaults(katana_js_crawl=True, stop_on_error=None)
     return p.parse_args()
 
 def ensure_default_config(path: str) -> None:
@@ -3964,6 +3998,8 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "dirsearch_workers": args.dirsearch_workers,
         "url_workers": args.url_workers,
         "global_request_budget": args.global_request_budget,
+        "stop_on_403_ratio": args.stop_on_403_ratio,
+        "stop_on_error": args.stop_on_error,
         "scan_profile": args.scan_profile,
         "target_profile": args.target_profile,
         "dirsearch_threads": args.dirsearch_threads,
@@ -3973,6 +4009,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "httpx_timeout": args.httpx_timeout,
         "httpx_retries": args.httpx_retries,
         "subfinder_timeout": args.subfinder_timeout,
+        "assetfinder_timeout": args.assetfinder_timeout,
         "dnsx_timeout": args.dnsx_timeout,
         "httpx_stage_timeout": args.httpx_stage_timeout,
         "nuclei_rate_limit": args.nuclei_rate_limit,
@@ -3982,7 +4019,12 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "nuclei_retries": args.nuclei_retries,
         "secrets_timeout": args.secrets_timeout,
         "secrets_js_cap": args.secrets_js_cap,
+        "secrets_sf_cap": args.secrets_sf_cap,
+        "secrets_download_delay": args.secrets_download_delay,
+        "cors_timeout": args.cors_timeout,
         "katana_timeout": args.katana_timeout,
+        "gospider_timeout": args.gospider_timeout,
+        "hakrawler_timeout": args.hakrawler_timeout,
         "katana_depth": args.katana_depth,
         "katana_js_crawl": args.katana_js_crawl,
         "gau_timeout": args.gau_timeout,

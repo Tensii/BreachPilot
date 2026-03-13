@@ -25,6 +25,28 @@ make build
 make test
 ```
 
+## Sync vendored ReconHarvest
+When `reconHarvest-PythonV` is updated, sync into BreachPilot with one command:
+
+```bash
+make sync-reconharvest
+```
+
+Optional auto-commit helper:
+
+```bash
+make sync-reconharvest-commit
+```
+
+Source repo path defaults to:
+`/home/ubuntu/.openclaw/workspace/reconHarvest-PythonV`
+
+You can override source path per run:
+
+```bash
+RECONHARVEST_SRC=/custom/path/to/reconHarvest-PythonV make sync-reconharvest
+```
+
 ## Config file (recommended)
 BreachPilot automatically loads `./breachpilot.env` (or path from `BREACHPILOT_CONFIG`).
 
