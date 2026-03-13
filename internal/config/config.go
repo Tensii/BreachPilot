@@ -2,7 +2,9 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -69,6 +71,42 @@ func getEnvInt(k string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func (c Config) Validate() error {
+	if c.WebhookRetries < 0 {
+		return fmt.Errorf("invalid BREACHPILOT_WEBHOOK_RETRIES: must be >= 0")
+	}
+	if c.ReconTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_RECON_TIMEOUT_SEC: must be > 0")
+	}
+	if c.ReconRetries < 0 {
+		return fmt.Errorf("invalid BREACHPILOT_RECON_RETRIES: must be >= 0")
+	}
+	if c.NucleiTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_NUCLEI_TIMEOUT_SEC: must be > 0")
+	}
+	if strings.TrimSpace(c.NucleiBin) != "" {
+		if _, err := exec.LookPath(c.NucleiBin); err != nil {
+			return fmt.Errorf("invalid BREACHPILOT_NUCLEI_BIN: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c Config) RedactedSummary() string {
+	redact := func(v string) string {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return "<empty>"
+		}
+		if len(v) <= 12 {
+			return "<set>"
+		}
+		return v[:8] + "...<redacted>"
+	}
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot)
 }
 
 func loadEnvFile(path string) error {

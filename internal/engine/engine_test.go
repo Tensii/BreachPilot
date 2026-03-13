@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"breachpilot/internal/models"
@@ -49,6 +50,10 @@ func TestProcessFileModeWritesReport(t *testing.T) {
 	if _, err := os.Stat(job.ReportPath); err != nil {
 		t.Fatalf("report missing: %v", err)
 	}
+	b, _ := os.ReadFile(job.ReportPath)
+	if !strings.Contains(string(b), "\"schema_version\": \"1\"") {
+		t.Fatalf("schema version missing in job report")
+	}
 }
 
 func TestProcessFailsWhenExploitFindingsWriteFails(t *testing.T) {
@@ -81,5 +86,43 @@ func TestProcessFailsWhenExploitFindingsWriteFails(t *testing.T) {
 	}
 	if job.ExploitReportPath != "" || job.ExploitHTMLReportPath != "" {
 		t.Fatalf("expected no exploit report paths on failure")
+	}
+}
+
+func TestValidateReconSummarySchemaMismatch(t *testing.T) {
+	dir := t.TempDir()
+	summary := filepath.Join(dir, "summary.json")
+	live := filepath.Join(dir, "live_hosts.txt")
+	_ = os.WriteFile(live, []byte("https://example.com\n"), 0o644)
+	_ = os.WriteFile(summary, []byte(`{"schema_version":"999","workdir":"`+dir+`","live_hosts":"`+live+`","urls":{"all":""},"intel":{"endpoints_ranked_json":"","params_ranked_json":""}}`), 0o644)
+	_, err := validateReconSummary(summary, "example.com")
+	if err == nil {
+		t.Fatal("expected schema mismatch error")
+	}
+}
+
+func TestFileAndFullProduceCompatibleCounts(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live_hosts.txt")
+	_ = os.WriteFile(live, []byte("http://127.0.0.1:9\n"), 0o644)
+	summary := filepath.Join(dir, "summary.json")
+	_ = os.WriteFile(summary, []byte(`{"workdir":"`+dir+`","live_hosts":"`+live+`","urls":{"all":""},"intel":{"endpoints_ranked_json":"","params_ranked_json":""}}`), 0o644)
+
+	jobFile := &models.Job{ID: "c1", Target: "example.com", Mode: "ingest", SafeMode: true, ReconPath: summary}
+	opt := Options{NucleiBin: "true", ArtifactsRoot: dir}
+	if err := Process(context.Background(), jobFile, opt); err != nil {
+		t.Fatalf("ingest failed: %v", err)
+	}
+
+	reconScript := filepath.Join(dir, "fake_recon.sh")
+	script := "#!/usr/bin/env bash\nset -e\nout=\"\"\nfor ((i=1;i<=$#;i++)); do if [[ \"${!i}\" == '-o' ]]; then j=$((i+1)); out=\"${!j}\"; fi; done\nmkdir -p \"$out\"\ncp \"" + summary + "\" \"$out/summary.json\"\n"
+	_ = os.WriteFile(reconScript, []byte(script), 0o755)
+	jobFull := &models.Job{ID: "c2", Target: "example.com", Mode: "full", SafeMode: true}
+	opt2 := Options{NucleiBin: "true", ReconHarvestCmd: reconScript, ArtifactsRoot: dir}
+	if err := Process(context.Background(), jobFull, opt2); err != nil {
+		t.Fatalf("full failed: %v", err)
+	}
+	if jobFile.ExploitFindingsCount != jobFull.ExploitFindingsCount {
+		t.Fatalf("incompatible exploit counts: %d vs %d", jobFile.ExploitFindingsCount, jobFull.ExploitFindingsCount)
 	}
 }

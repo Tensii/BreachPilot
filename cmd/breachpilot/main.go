@@ -21,6 +21,10 @@ import (
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
+	log.Println(cfg.RedactedSummary())
 	engOpt := engine.Options{
 		NucleiBin:        cfg.NucleiBin,
 		ReconHarvestCmd:  config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),

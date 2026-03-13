@@ -78,7 +78,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		notify("recon.completed")
 	}
 
-	rs, err := ingest.LoadReconSummary(job.ReconPath)
+	rs, err := validateReconSummary(job.ReconPath, job.Target)
 	if err != nil {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
@@ -238,11 +238,12 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		subt.New(),
 		apisurface.New(),
 	}
-	exploitFindings := exploit.RunModules(ctx, job, &rs, exploit.Options{
+	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot: opt.ArtifactsRoot,
 		Progress:      opt.Progress,
 		SafeMode:      job.SafeMode,
 	}, exploitModules)
+	job.ModuleTelemetry = telemetry
 
 	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {
 		job.Status = models.JobFailed
@@ -282,6 +283,9 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 	}
 	summaryPath := filepath.Join(reconDir, "summary.json")
 	if st, err := os.Stat(summaryPath); err == nil && st.Size() > 0 {
+		if _, vErr := validateReconSummary(summaryPath, job.Target); vErr != nil {
+			return "", fmt.Errorf("resume validation failed: %w", vErr)
+		}
 		if opt.Progress != nil {
 			opt.Progress("recon.resume existing summary found; skipping recon rerun")
 		}
@@ -467,7 +471,8 @@ func writeJobReport(job *models.Job, artifactsRoot string) error {
 		return err
 	}
 	report := filepath.Join(dir, "job_report.json")
-	b, err := json.MarshalIndent(job, "", "  ")
+	payload := map[string]any{"schema_version": models.SchemaVersion, "job": job}
+	b, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -507,6 +512,44 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSummary, error) {
+	var rs models.ReconSummary
+	st, err := os.Stat(summaryPath)
+	if err != nil {
+		return rs, fmt.Errorf("resume summary missing: %w", err)
+	}
+	if st.Size() == 0 {
+		return rs, fmt.Errorf("resume summary empty")
+	}
+	b, err := os.ReadFile(summaryPath)
+	if err != nil {
+		return rs, fmt.Errorf("read summary: %w", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return rs, fmt.Errorf("parse summary json: %w", err)
+	}
+	if sv, ok := raw["schema_version"].(string); ok && sv != "" && sv != models.SchemaVersion {
+		return rs, fmt.Errorf("incompatible schema_version: %s", sv)
+	}
+	if err := json.Unmarshal(b, &rs); err != nil {
+		return rs, fmt.Errorf("decode summary struct: %w", err)
+	}
+	live := strings.TrimSpace(rs.Live)
+	if live == "" {
+		live = filepath.Join(rs.Workdir, "live_hosts.txt")
+	}
+	if lst, lerr := os.Stat(live); lerr != nil || lst.Size() == 0 {
+		return rs, fmt.Errorf("resume live hosts invalid: %s", live)
+	}
+	if rt := strings.TrimSpace(requestedTarget); rt != "" && rt != "from-summary" {
+		if tgt := ingest.TargetFromWorkdir(rs.Workdir); tgt != "" && strings.Contains(tgt, ".") && !strings.EqualFold(tgt, rt) {
+			return rs, fmt.Errorf("resume target mismatch: summary=%s requested=%s", tgt, rt)
+		}
+	}
+	return rs, nil
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {

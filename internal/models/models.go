@@ -2,6 +2,8 @@ package models
 
 import "time"
 
+const SchemaVersion = "1"
+
 type JobStatus string
 
 const (
@@ -58,29 +60,42 @@ type ReconSummary struct {
 	} `json:"intel"`
 }
 
+type ExploitModuleTelemetry struct {
+	Module        string `json:"module"`
+	StartedAt     string `json:"started_at"`
+	FinishedAt    string `json:"finished_at"`
+	DurationMs    int64  `json:"duration_ms"`
+	FindingsCount int    `json:"findings_count"`
+	ErrorCount    int    `json:"error_count"`
+	Skipped       bool   `json:"skipped"`
+	SkippedReason string `json:"skipped_reason,omitempty"`
+	Canceled      bool   `json:"canceled"`
+}
+
 type Job struct {
-	ID                    string    `json:"id"`
-	Target                string    `json:"target"`
-	Mode                  string    `json:"mode,omitempty"`
-	SafeMode              bool      `json:"safe_mode"`
-	ApproveIntrusive      bool      `json:"approve_intrusive"`
-	Templates             []string  `json:"templates,omitempty"`
-	ApprovalTicket        string    `json:"approval_ticket,omitempty"`
-	ReconPath             string    `json:"recon_summary"`
-	Status                JobStatus `json:"status"`
-	CreatedAt             time.Time `json:"created_at"`
-	StartedAt             time.Time `json:"started_at,omitempty"`
-	FinishedAt            time.Time `json:"finished_at,omitempty"`
-	Error                 string    `json:"error,omitempty"`
-	PlanPreview           []string  `json:"plan_preview,omitempty"`
-	EvidencePath          string    `json:"evidence_path,omitempty"`
-	FindingsCount         int       `json:"findings_count,omitempty"`
-	ExploitFindingsCount  int       `json:"exploit_findings_count,omitempty"`
-	ExploitFindingsPath   string    `json:"exploit_findings_path,omitempty"`
-	ExploitReportPath     string    `json:"exploit_report_path,omitempty"`
-	ExploitHTMLReportPath string    `json:"exploit_html_report_path,omitempty"`
-	RiskScore             float64   `json:"risk_score,omitempty"`
-	ReconDurationSec      float64   `json:"recon_duration_sec,omitempty"`
-	ExploitDurationSec    float64   `json:"exploit_duration_sec,omitempty"`
-	ReportPath            string    `json:"report_path,omitempty"`
+	ID                    string                   `json:"id"`
+	Target                string                   `json:"target"`
+	Mode                  string                   `json:"mode,omitempty"`
+	SafeMode              bool                     `json:"safe_mode"`
+	ApproveIntrusive      bool                     `json:"approve_intrusive"`
+	Templates             []string                 `json:"templates,omitempty"`
+	ApprovalTicket        string                   `json:"approval_ticket,omitempty"`
+	ReconPath             string                   `json:"recon_summary"`
+	Status                JobStatus                `json:"status"`
+	CreatedAt             time.Time                `json:"created_at"`
+	StartedAt             time.Time                `json:"started_at,omitempty"`
+	FinishedAt            time.Time                `json:"finished_at,omitempty"`
+	Error                 string                   `json:"error,omitempty"`
+	PlanPreview           []string                 `json:"plan_preview,omitempty"`
+	EvidencePath          string                   `json:"evidence_path,omitempty"`
+	FindingsCount         int                      `json:"findings_count,omitempty"`
+	ExploitFindingsCount  int                      `json:"exploit_findings_count,omitempty"`
+	ExploitFindingsPath   string                   `json:"exploit_findings_path,omitempty"`
+	ExploitReportPath     string                   `json:"exploit_report_path,omitempty"`
+	ExploitHTMLReportPath string                   `json:"exploit_html_report_path,omitempty"`
+	RiskScore             float64                  `json:"risk_score,omitempty"`
+	ModuleTelemetry       []ExploitModuleTelemetry `json:"module_telemetry,omitempty"`
+	ReconDurationSec      float64                  `json:"recon_duration_sec,omitempty"`
+	ExploitDurationSec    float64                  `json:"exploit_duration_sec,omitempty"`
+	ReportPath            string                   `json:"report_path,omitempty"`
 }
