@@ -8,7 +8,7 @@ import (
 )
 
 func TestFormatCLISummaryCounts(t *testing.T) {
-	job := &models.Job{Target: "example.com", Mode: "full", FindingsCount: 5, ExploitFindingsCount: 3}
+	job := &models.Job{Target: "example.com", Mode: "full", FindingsCount: 5, ExploitFindingsCount: 3, FilteredCount: 2}
 	lines := formatCLISummary(job, "full")
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "Nuclei findings: 5") {
@@ -19,5 +19,8 @@ func TestFormatCLISummaryCounts(t *testing.T) {
 	}
 	if !strings.Contains(joined, "Total findings: 8") {
 		t.Fatalf("missing total count: %s", joined)
+	}
+	if !strings.Contains(joined, "Filtered findings: 2") {
+		t.Fatalf("missing filtered count: %s", joined)
 	}
 }

@@ -82,6 +82,8 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_RECON_RETRIES` (default `1`)
 - `BREACHPILOT_NUCLEI_TIMEOUT_SEC` (default `1800`)
 - `BREACHPILOT_ARTIFACTS` (default `./artifacts`)
+- `BREACHPILOT_MIN_SEVERITY` (optional findings floor; example: `HIGH` keeps only HIGH/CRITICAL)
+- `BREACHPILOT_SKIP_MODULES` (optional comma-separated module skip list; example: `security-headers,cookie-security`)
 - `BREACHPILOT_CONFIG` (optional path to env file)
 
 ## Notes

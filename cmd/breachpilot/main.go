@@ -167,6 +167,9 @@ func formatCLISummary(job *models.Job, mode string) []string {
 		fmt.Sprintf("Total findings: %d", job.FindingsCount+job.ExploitFindingsCount),
 		fmt.Sprintf("Durations: recon=%.1fs exploit=%.1fs", job.ReconDurationSec, job.ExploitDurationSec),
 	}
+	if job.FilteredCount > 0 {
+		lines = append(lines, fmt.Sprintf("Filtered findings: %d", job.FilteredCount))
+	}
 	if job.ReportPath != "" {
 		lines = append(lines, fmt.Sprintf("Job report: %s", job.ReportPath))
 	}
