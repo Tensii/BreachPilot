@@ -223,8 +223,6 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 	job.ExploitDurationSec = time.Since(exploitStart).Seconds()
 	job.FindingsCount = count
-	job.Status = models.JobDone
-	job.FinishedAt = time.Now().UTC()
 	notify("exploit.completed")
 
 	// --- exploit module phase ---
@@ -246,24 +244,31 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		SafeMode:      job.SafeMode,
 	}, exploitModules)
 
-	exploitFindingsPath := filepath.Join(artDir, "exploit_findings.jsonl")
-	if len(exploitFindings) > 0 {
-		efFile, efErr := os.Create(exploitFindingsPath)
-		if efErr == nil {
-			enc := json.NewEncoder(efFile)
-			for _, f := range exploitFindings {
-				_ = enc.Encode(f)
-			}
-			efFile.Close()
-		}
+	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {
+		job.Status = models.JobFailed
+		job.FinishedAt = time.Now().UTC()
+		job.Error = err.Error()
+		_ = writeJobReport(job, opt.ArtifactsRoot)
+		return err
 	}
-	job.ExploitFindingsCount = len(exploitFindings)
-	job.ExploitFindingsPath = exploitFindingsPath
-	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir); rpErr == nil {
+	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir); rpErr != nil {
+		job.Status = models.JobFailed
+		job.FinishedAt = time.Now().UTC()
+		job.Error = fmt.Sprintf("write exploit report: %v", rpErr)
+		_ = writeJobReport(job, opt.ArtifactsRoot)
+		return rpErr
+	} else {
 		job.ExploitReportPath = reportPath
 	}
 
-	_ = writeJobReport(job, opt.ArtifactsRoot)
+	job.Status = models.JobDone
+	job.FinishedAt = time.Now().UTC()
+	if err := writeJobReport(job, opt.ArtifactsRoot); err != nil {
+		job.Status = models.JobFailed
+		job.FinishedAt = time.Now().UTC()
+		job.Error = fmt.Sprintf("write job report: %v", err)
+		return err
+	}
 	return nil
 }
 
@@ -410,6 +415,46 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 	return out, len(items)
 }
 
+func writeExploitFindingsJSONL(findings []models.ExploitFinding, artDir string, job *models.Job) error {
+	if job == nil {
+		return nil
+	}
+	if len(findings) == 0 {
+		job.ExploitFindingsCount = 0
+		job.ExploitFindingsPath = ""
+		return nil
+	}
+	path := filepath.Join(artDir, "exploit_findings.jsonl")
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		job.ExploitFindingsPath = ""
+		return fmt.Errorf("write exploit findings jsonl: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	for _, it := range findings {
+		if err := enc.Encode(it); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			job.ExploitFindingsPath = ""
+			return fmt.Errorf("encode exploit finding: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		job.ExploitFindingsPath = ""
+		return fmt.Errorf("close exploit findings jsonl: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		job.ExploitFindingsPath = ""
+		return fmt.Errorf("rename temp exploit findings file: %w", err)
+	}
+	job.ExploitFindingsCount = len(findings)
+	job.ExploitFindingsPath = path
+	return nil
+}
+
 func writeJobReport(job *models.Job, artifactsRoot string) error {
 	if job == nil {
 		return nil
@@ -422,14 +467,14 @@ func writeJobReport(job *models.Job, artifactsRoot string) error {
 		return err
 	}
 	report := filepath.Join(dir, "job_report.json")
-	job.ReportPath = report
 	b, err := json.MarshalIndent(job, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(report, b, 0o644); err != nil {
-		return err
+	if err := atomicWriteFile(report, b, 0o644); err != nil {
+		return fmt.Errorf("write job report: %w", err)
 	}
+	job.ReportPath = report
 	return nil
 }
 
@@ -462,6 +507,18 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func countLines(path string) (int, error) {

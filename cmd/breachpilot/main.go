@@ -144,27 +144,42 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 	if jsonOut {
 		return printJobJSON(job)
 	}
-	fmt.Printf("Done. target=%s mode=%s findings=%d evidence=%s\n", job.Target, job.Mode, job.FindingsCount, job.EvidencePath)
-	fmt.Printf("Durations: recon=%.1fs exploit=%.1fs\n", job.ReconDurationSec, job.ExploitDurationSec)
-	if job.ReportPath != "" {
-		fmt.Printf("Job report: %s\n", job.ReportPath)
-	}
-	if job.ExploitReportPath != "" {
-		fmt.Printf("Exploit report: %s\n", job.ExploitReportPath)
-	}
-	if job.ExploitHTMLReportPath != "" {
-		fmt.Printf("Exploit HTML report: %s\n", job.ExploitHTMLReportPath)
-	}
-	if job.RiskScore > 0 {
-		fmt.Printf("Risk score: %.1f/10\n", job.RiskScore)
-	}
-	if job.ExploitFindingsCount > 0 {
-		fmt.Printf("Exploit findings: %d (JSONL: %s)\n", job.ExploitFindingsCount, job.ExploitFindingsPath)
-	}
-	if mode == "full" {
-		fmt.Printf("Recon summary used: %s\n", job.ReconPath)
+	for _, ln := range formatCLISummary(job, mode) {
+		fmt.Println(ln)
 	}
 	return nil
+}
+
+func formatCLISummary(job *models.Job, mode string) []string {
+	if job == nil {
+		return nil
+	}
+	lines := []string{
+		fmt.Sprintf("Done. target=%s mode=%s evidence=%s", job.Target, job.Mode, job.EvidencePath),
+		fmt.Sprintf("Nuclei findings: %d", job.FindingsCount),
+		fmt.Sprintf("Exploit-module findings: %d", job.ExploitFindingsCount),
+		fmt.Sprintf("Total findings: %d", job.FindingsCount+job.ExploitFindingsCount),
+		fmt.Sprintf("Durations: recon=%.1fs exploit=%.1fs", job.ReconDurationSec, job.ExploitDurationSec),
+	}
+	if job.ReportPath != "" {
+		lines = append(lines, fmt.Sprintf("Job report: %s", job.ReportPath))
+	}
+	if job.ExploitReportPath != "" {
+		lines = append(lines, fmt.Sprintf("Exploit report: %s", job.ExploitReportPath))
+	}
+	if job.ExploitHTMLReportPath != "" {
+		lines = append(lines, fmt.Sprintf("Exploit HTML report: %s", job.ExploitHTMLReportPath))
+	}
+	if job.RiskScore > 0 {
+		lines = append(lines, fmt.Sprintf("Risk score: %.1f/10", job.RiskScore))
+	}
+	if job.ExploitFindingsCount > 0 {
+		lines = append(lines, fmt.Sprintf("Exploit findings: %d (JSONL: %s)", job.ExploitFindingsCount, job.ExploitFindingsPath))
+	}
+	if mode == "full" {
+		lines = append(lines, fmt.Sprintf("Recon summary used: %s", job.ReconPath))
+	}
+	return lines
 }
 
 func printJobJSON(job *models.Job) error {
