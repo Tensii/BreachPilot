@@ -149,6 +149,12 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 	if job.ReportPath != "" {
 		fmt.Printf("Job report: %s\n", job.ReportPath)
 	}
+	if job.ExploitReportPath != "" {
+		fmt.Printf("Exploit report: %s\n", job.ExploitReportPath)
+	}
+	if job.ExploitFindingsCount > 0 {
+		fmt.Printf("Exploit findings: %d (JSONL: %s)\n", job.ExploitFindingsCount, job.ExploitFindingsPath)
+	}
 	if mode == "full" {
 		fmt.Printf("Recon summary used: %s\n", job.ReconPath)
 	}

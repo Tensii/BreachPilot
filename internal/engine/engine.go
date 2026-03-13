@@ -12,6 +12,15 @@ import (
 	"strings"
 	"time"
 
+	"breachpilot/internal/exploit"
+	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
+	cors "breachpilot/internal/exploit/modules/cors"
+	headers "breachpilot/internal/exploit/modules/headers"
+	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
+	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
+	openredirect "breachpilot/internal/exploit/modules/openredirect"
+	portservice "breachpilot/internal/exploit/modules/portservice"
+	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -215,6 +224,41 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	job.Status = models.JobDone
 	job.FinishedAt = time.Now().UTC()
 	notify("exploit.completed")
+
+	// --- exploit module phase ---
+	exploitModules := []exploit.Module{
+		headers.New(),
+		openredirect.New(),
+		infodisclosure.New(),
+		cors.New(),
+		secretsvalidator.New(),
+		bypasspoc.New(),
+		portservice.New(),
+		nucleitriage.New(),
+	}
+	exploitFindings := exploit.RunModules(ctx, job, &rs, exploit.Options{
+		ArtifactsRoot: opt.ArtifactsRoot,
+		Progress:      opt.Progress,
+		SafeMode:      job.SafeMode,
+	}, exploitModules)
+
+	exploitFindingsPath := filepath.Join(artDir, "exploit_findings.jsonl")
+	if len(exploitFindings) > 0 {
+		efFile, efErr := os.Create(exploitFindingsPath)
+		if efErr == nil {
+			enc := json.NewEncoder(efFile)
+			for _, f := range exploitFindings {
+				_ = enc.Encode(f)
+			}
+			efFile.Close()
+		}
+	}
+	job.ExploitFindingsCount = len(exploitFindings)
+	job.ExploitFindingsPath = exploitFindingsPath
+	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir); rpErr == nil {
+		job.ExploitReportPath = reportPath
+	}
+
 	_ = writeJobReport(job, opt.ArtifactsRoot)
 	return nil
 }
