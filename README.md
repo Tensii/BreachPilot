@@ -91,7 +91,9 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_VALIDATION_ONLY` (optional bool; when true, only safe read-only modules run)
 - `BREACHPILOT_CONFIG` (optional path to env file)
 - `BREACHPILOT_PREVIOUS_REPORT` (optional path to previous `exploit_report.json` for diff/delta comparison)
-- `BREACHPILOT_REPORT_FORMATS` (comma-separated output formats: `json`, `md`, `html`; default: all three)
+- `BREACHPILOT_REPORT_FORMATS` (comma-separated output formats: `json`, `md`, `html`, `sarif`; default: `json,md,html`)
+- `BREACHPILOT_SCAN_PROFILE` (optional preset: `quick`, `standard`, `deep`)
+- `BREACHPILOT_RATE_LIMIT_RPS` (max requests/sec across all modules; `0` = unlimited)
 
 ## Notes
 - CLI streams stage/log progress.
@@ -123,4 +125,41 @@ Set `BREACHPILOT_PREVIOUS_REPORT` to a previous `exploit_report.json` path. The 
 Reports now include a **Tag Index** section with a table of all tags and their counts, sorted by frequency. Available in JSON (`by_tag` field), Markdown, and HTML reports.
 
 ## Configurable Report Formats
-Set `BREACHPILOT_REPORT_FORMATS` to select which report formats to generate. Default is `json,md,html`. Example: `json,md` to skip HTML generation.
+Set `BREACHPILOT_REPORT_FORMATS` to select which report formats to generate. Default is `json,md,html`. Example: `json,md` to skip HTML generation. Use `sarif` for GitHub Code Scanning integration.
+
+## New Modules (Phase 9)
+
+### `csp-audit`
+Validates Content Security Policy headers. Detects:
+- Missing CSP header
+- `unsafe-inline` in CSP
+- `unsafe-eval` in CSP
+- Wildcard source directives (`*`)
+- Missing `default-src` fallback
+
+### `http-response`
+Detects HTTP response anomalies and information leaks:
+- Server header version disclosure
+- X-Powered-By technology exposure
+- Verbose error pages with stack traces
+- Directory listing enabled
+
+## Scan Profiles
+Set `BREACHPILOT_SCAN_PROFILE` for preset configurations:
+- `quick` — Fast surface scan (4 modules, 8 parallel workers)
+- `standard` — Balanced scan (all modules, 4 parallel)
+- `deep` — Thorough scan (all modules, 2 parallel for less pressure)
+
+Explicit `BREACHPILOT_ONLY_MODULES` / `BREACHPILOT_SKIP_MODULES` override profile settings.
+
+## Rate Limiting
+Set `BREACHPILOT_RATE_LIMIT_RPS` to throttle requests per second across all modules. `0` = unlimited.
+
+## CWE Enrichment
+Findings are automatically enriched with CWE identifiers (e.g. CWE-942 for CORS, CWE-295 for TLS). Displayed in report tables and JSON.
+
+## SARIF Export
+Add `sarif` to `BREACHPILOT_REPORT_FORMATS` to generate `exploit_report.sarif` for GitHub Code Scanning and other SARIF-compatible tools.
+
+## Circuit Breaker
+Module circuit breaker auto-skips remaining modules after consecutive failures. Controlled via engine configuration.

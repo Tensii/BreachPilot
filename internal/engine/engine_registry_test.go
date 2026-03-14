@@ -4,7 +4,7 @@ import "testing"
 
 func TestRegistryIncludesNewModules(t *testing.T) {
 	names := RegisteredModules()
-	want := []string{"admin-surface", "exposed-files", "tls-audit", "dns-check"}
+	want := []string{"admin-surface", "exposed-files", "tls-audit", "dns-check", "csp-audit", "http-response"}
 	for _, w := range want {
 		ok := false
 		for _, n := range names {

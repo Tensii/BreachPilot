@@ -39,6 +39,8 @@ func main() {
 		ValidationOnly:     cfg.ValidationOnly,
 		PreviousReportPath: cfg.PreviousReportPath,
 		ReportFormats:      cfg.ReportFormats,
+		ScanProfile:        cfg.ScanProfile,
+		RateLimitRPS:       cfg.RateLimitRPS,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()

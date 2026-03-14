@@ -788,6 +788,8 @@ class Runner:
         self.force_update_templates = bool(force_update_templates)
         self.nuclei_severity = nuclei_severity
         self.nuclei_tags = nuclei_tags
+        self.resume_mode: bool = False
+        self._resume_notice_sent: bool = False
         self.state = workdir / ".state"
         self.logs = workdir / "logs"
         self.ffuf = workdir / "ffuf"
@@ -879,6 +881,8 @@ class Runner:
         (self.state / f"{name}.done").write_text("", encoding="utf-8")
 
     def record_stage_status(self, stage: str, status: str, detail: str = "", metrics: dict | None = None, duration_seconds: float | None = None) -> None:
+        if self.resume_mode and status in {"started", "completed", "skipped"}:
+            return
         row = {
             "schema_version": SCHEMA_VERSION,
             "timestamp": now_utc_iso(),
@@ -4166,10 +4170,13 @@ def _setup_runner(
 def _execute_runner(r: Runner, args: argparse.Namespace, script_name: str) -> None:
     workdir = r.workdir
     target = r.target
+    r.resume_mode = bool(args.resume)
     r.write_run_commands_script(sys.argv, script_name)
     log(f"[*] Generated: {workdir / 'run_commands.sh'}")
     if args.run:
         log(f"[*] Running recon for {target}…")
+        if args.resume:
+            r._notify("🟢 Resume mode enabled — continuing from existing run state", status="completed", stage="pipeline", severity="HIGH", log_file=str(r.logs / "stage_status.jsonl"))
         try:
             r.execute()
             log(f"[*] Done (validated). Summary: {workdir / 'reports' / 'summary.md'}")

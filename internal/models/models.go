@@ -36,6 +36,7 @@ type ExploitFinding struct {
 	Evidence   string   `json:"evidence,omitempty"`
 	PoCHint    string   `json:"poc_hint,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	CWE        string   `json:"cwe,omitempty"`
 	Timestamp  string   `json:"timestamp"`
 }
 

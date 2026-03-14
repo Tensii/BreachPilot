@@ -28,6 +28,8 @@ type Config struct {
 	ConfigPath         string
 	PreviousReportPath string
 	ReportFormats      string
+	ScanProfile        string
+	RateLimitRPS       int
 }
 
 func Load() Config {
@@ -63,6 +65,8 @@ func Load() Config {
 		ConfigPath:         configPath,
 		PreviousReportPath: getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
 		ReportFormats:      getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
+		ScanProfile:        getEnv("BREACHPILOT_SCAN_PROFILE", ""),
+		RateLimitRPS:       getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
 	}
 }
 
@@ -156,8 +160,8 @@ func (c Config) RedactedSummary() string {
 	if reportFormats == "" {
 		reportFormats = "json,md,html"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t previousReport=%s reportFormats=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, prevReport, reportFormats)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
 }
 
 func loadEnvFile(path string) error {

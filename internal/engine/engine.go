@@ -19,9 +19,11 @@ import (
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
+	cspaudit "breachpilot/internal/exploit/modules/cspaudit"
 	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
 	headers "breachpilot/internal/exploit/modules/headers"
+	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
@@ -54,6 +56,8 @@ type Options struct {
 	Notifier           Notifier
 	PreviousReportPath string
 	ReportFormats      string
+	ScanProfile        string
+	RateLimitRPS       int
 }
 
 // Notifier sends structured events.
@@ -63,6 +67,17 @@ type Notifier interface {
 
 // Process executes safe planning and optional nuclei validation with approval gates.
 func Process(ctx context.Context, job *models.Job, opt Options) error {
+	// Resolve scan profile if set
+	if opt.ScanProfile != "" {
+		if p, ok := GetProfile(opt.ScanProfile); ok {
+			if opt.OnlyModules == "" {
+				opt.OnlyModules = p.OnlyModules
+			}
+			if opt.SkipModules == "" {
+				opt.SkipModules = p.SkipModules
+			}
+		}
+	}
 	job.StartedAt = time.Now().UTC()
 	job.Status = models.JobRunning
 	if t := strings.TrimSpace(job.Target); t != "" && t != "from-summary" {
@@ -622,6 +637,8 @@ func registeredModuleInfos() []ModuleInfo {
 		{"exposed-files", "Finds exposed sensitive files/config", true},
 		{"tls-audit", "Validates TLS certificate and handshake security", true},
 		{"dns-check", "Validates DNS/email security configuration", true},
+		{"csp-audit", "Validates Content Security Policy headers", true},
+		{"http-response", "Detects HTTP response anomalies and information leaks", true},
 	}
 }
 
@@ -651,6 +668,8 @@ func registeredModuleInstances() []exploit.Module {
 		exposedfiles.New(),
 		tlsaudit.New(),
 		dnscheck.New(),
+		cspaudit.New(),
+		httpresponse.New(),
 	}
 }
 
