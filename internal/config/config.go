@@ -36,6 +36,8 @@ type Config struct {
 	ModuleTimeoutSec           int
 	ModuleRetries              int
 	AggressiveMode             bool
+	AuthUserCookie             string
+	AuthAdminCookie            string
 }
 
 func Load() Config {
@@ -79,6 +81,8 @@ func Load() Config {
 		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
 		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
 		AggressiveMode:             getEnvBool("BREACHPILOT_AGGRESSIVE", false),
+		AuthUserCookie:             getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
+		AuthAdminCookie:            getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
 	}
 }
 
@@ -181,8 +185,15 @@ func (c Config) RedactedSummary() string {
 	if reportFormats == "" {
 		reportFormats = "json,md,html"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
+	ctxCount := 0
+	if strings.TrimSpace(c.AuthUserCookie) != "" {
+		ctxCount++
+	}
+	if strings.TrimSpace(c.AuthAdminCookie) != "" {
+		ctxCount++
+	}
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
 }
 
 func loadEnvFile(path string) error {

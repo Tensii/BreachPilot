@@ -52,6 +52,8 @@ func main() {
 		ModuleTimeoutSec:           cfg.ModuleTimeoutSec,
 		ModuleRetries:              cfg.ModuleRetries,
 		AggressiveMode:             cfg.AggressiveMode,
+		AuthUserCookie:             cfg.AuthUserCookie,
+		AuthAdminCookie:            cfg.AuthAdminCookie,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
 	nf.Start()
@@ -88,11 +90,12 @@ func main() {
 	aggressiveFlag := false
 	filtered := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "--json" {
+		n := strings.ToLower(strings.TrimSpace(a))
+		if n == "--json" || n == "json" {
 			jsonOut = true
 			continue
 		}
-		if a == "--aggressive" {
+		if n == "--aggressive" || n == "aggressive" {
 			aggressiveFlag = true
 			continue
 		}
@@ -589,16 +592,17 @@ func renderStage(stage string) string {
 func printUsage() {
 	fmt.Println(`Usage:
 	  breachpilot setup
-	  breachpilot full <target> [--json] [--aggressive]
-	  breachpilot file <summary.json> [--json] [--aggressive]
-	  breachpilot resume <path/to/.breachpilot.state> [--json] [--aggressive]
+	  breachpilot full <target> [json] [aggressive]
+	  breachpilot file <summary.json> [json] [aggressive]
+	  breachpilot resume <path/to/.breachpilot.state> [json] [aggressive]
 	  breachpilot list-modules
 	  breachpilot doctor
 
 	Examples:
-	  breachpilot full example.com
-	  breachpilot file recon/summary.json --json
-	  breachpilot resume artifacts/example.com/1/.breachpilot.state
+	  breachpilot full example.com aggressive
+	  breachpilot aggressive full example.com
+	  breachpilot file recon/summary.json json aggressive
+	  breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive
 	`)
 }
 

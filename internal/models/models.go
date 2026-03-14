@@ -45,7 +45,7 @@ type ExploitFinding struct {
 	Confidence int      `json:"confidence"` // 0–100
 	Target     string   `json:"target"`
 	Title      string   `json:"title"`
-	Validation string   `json:"validation,omitempty"` // signal / verified / confirmed
+	Validation string   `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
 	Evidence   string   `json:"evidence,omitempty"`
 	PoCHint    string   `json:"poc_hint,omitempty"`
 	Tags       []string `json:"tags,omitempty"`

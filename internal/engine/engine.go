@@ -31,8 +31,10 @@ import (
 	headers "breachpilot/internal/exploit/modules/headers"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
+	idorplaybook "breachpilot/internal/exploit/modules/idorplaybook"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
+	mutationengine "breachpilot/internal/exploit/modules/mutationengine"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
@@ -83,6 +85,8 @@ type Options struct {
 	ModuleTimeoutSec           int
 	ModuleRetries              int
 	AggressiveMode             bool
+	AuthUserCookie             string
+	AuthAdminCookie            string
 }
 
 // Notifier sends structured events.
@@ -334,6 +338,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		ModuleTimeoutSec: opt.ModuleTimeoutSec,
 		ModuleRetries:    opt.ModuleRetries,
 		Aggressive:       opt.AggressiveMode,
+		AuthUserCookie:   opt.AuthUserCookie,
+		AuthAdminCookie:  opt.AuthAdminCookie,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
@@ -871,6 +877,8 @@ func registeredModuleInfos() []ModuleInfo {
 		{"state-change", "Detects risky state-changing endpoint patterns", true},
 		{"upload-abuse", "Detects upload attack surface and retrieval risks", true},
 		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true},
+		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true},
+		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true},
 	}
 }
 
@@ -908,6 +916,8 @@ func registeredModuleInstances() []exploit.Module {
 		statechange.New(),
 		uploadabuse.New(),
 		authbypass.New(),
+		mutationengine.New(),
+		idorplaybook.New(),
 	}
 }
 
