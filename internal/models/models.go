@@ -50,6 +50,22 @@ type ExploitFinding struct {
 	Timestamp  string   `json:"timestamp"`
 }
 
+// SecretsFinding represents an exposed secret string discovered by ReconHarvest.
+type SecretsFinding struct {
+	Target  string `json:"target"`
+	Match   string `json:"match"`
+	Type    string `json:"type"`
+	Context string `json:"context"`
+}
+
+// CORSFinding represents an insecure CORS misconfiguration discovered by ReconHarvest.
+type CORSFinding struct {
+	URL           string `json:"url"`
+	MirrorHeaders string `json:"mirror_headers"`
+	Credentials   string `json:"credentials"`
+	Origin        string `json:"origin"`
+}
+
 type ReconSummary struct {
 	Workdir string `json:"workdir"`
 	Live    string `json:"live_hosts"`

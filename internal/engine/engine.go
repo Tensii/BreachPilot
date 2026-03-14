@@ -322,6 +322,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	rptOpts := exploit.ReportOptions{
 		Formats:            opt.ReportFormats,
 		PreviousReportPath: opt.PreviousReportPath,
+		Secrets:            loadSecretsIntel(rs.Intel.SecretsJSON),
+		CORS:               loadCORSIntel(rs.Intel.CORSJSON),
 	}
 	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir, rptOpts); rpErr != nil {
 		job.Status = models.JobFailed
@@ -385,7 +387,7 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
 		argv := append([]string{}, baseArgv...)
-		argv = append(argv, job.Target, "--run", "-o", reconDir)
+		argv = append(argv, job.Target, "--run", "-o", reconDir, "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
 		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
@@ -621,6 +623,34 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 		}
 	}
 	return rs, nil
+}
+
+func loadSecretsIntel(path string) []models.SecretsFinding {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []models.SecretsFinding
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func loadCORSIntel(path string) []models.CORSFinding {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []models.CORSFinding
+	_ = json.Unmarshal(b, &out)
+	return out
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
