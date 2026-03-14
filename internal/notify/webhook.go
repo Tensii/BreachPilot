@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -177,8 +176,11 @@ func (w *Webhook) sendNowGeneric(eventName string, payload any) {
 
 func (w *Webhook) postJSON(body map[string]any) {
 	payload := body
-	if isDiscordWebhookURL(w.URL) {
-		payload = toDiscordPayload(body)
+	for _, p := range defaultProviders {
+		if p.Matches(w.URL) {
+			payload = p.Format(body)
+			break
+		}
 	}
 	b, _ := json.Marshal(payload)
 
@@ -247,161 +249,7 @@ func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, st
 	_, _ = f.Write(append(b, '\n'))
 }
 
-func isDiscordWebhookURL(u string) bool {
-	u = strings.ToLower(strings.TrimSpace(u))
-	return strings.Contains(u, "discord.com/api/webhooks/") || strings.Contains(u, "discordapp.com/api/webhooks/")
-}
 
-func toDiscordPayload(body map[string]any) map[string]any {
-	event, _ := body["event"].(string)
-	if event == "" {
-		event = "event"
-	}
-
-	mentionHere := false
-	content := ""
-	embed := map[string]any{
-		"title":       fmt.Sprintf("BreachPilot • %s", event),
-		"description": "",
-		"color":       0x95a5a6, // default gray
-	}
-
-	if job, ok := body["job"].(*models.Job); ok && job != nil {
-		desc := fmt.Sprintf("id=%s\ntarget=%s\nstatus=%s", job.ID, job.Target, job.Status)
-		if job.Error != "" && (event == "job.failed" || job.Status == "failed") {
-			desc += fmt.Sprintf("\nerror=%s", job.Error)
-		}
-		embed["description"] = desc
-		switch event {
-		case "job.started":
-			mentionHere = true
-			embed["color"] = 0x95a5a6 // gray
-			content = "@here BreachPilot exploit started"
-		case "job.completed":
-			mentionHere = true
-			embed["color"] = 0x2ecc71 // green
-			content = "@here BreachPilot exploit finished"
-		case "job.cancelled":
-			mentionHere = true
-			embed["color"] = 0xe74c3c // red
-			content = "@here BreachPilot exploit interrupted"
-		case "job.failed":
-			mentionHere = true
-			embed["color"] = 0xe74c3c // red
-			content = "@here BreachPilot exploit failed"
-		default:
-			embed["color"] = 0x95a5a6
-		}
-		return discordMessage(content, embed, mentionHere)
-	}
-
-	p, _ := body["payload"].(map[string]any)
-	if p == nil {
-		embed["description"] = fmt.Sprintf("event=%s", event)
-		return discordMessage(content, embed, false)
-	}
-
-	switch event {
-	case "job.resumed":
-		jobID, _ := p["job_id"].(string)
-		target, _ := p["target"].(string)
-		reconDone := p["recon_completed"]
-		nucleiDone := p["nuclei_completed"]
-		modsDone := p["modules_finished"]
-		embed["title"] = "Job resumed"
-		embed["color"] = 0x95a5a6
-		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nrecon_completed=%v\nnuclei_completed=%v\nmodules_finished=%v", jobID, target, reconDone, nucleiDone, modsDone)
-	case "exploit.started":
-		jobID, _ := p["job_id"].(string)
-		target, _ := p["target"].(string)
-		mode, _ := p["mode"].(string)
-		embed["title"] = "Exploit phase started"
-		embed["color"] = 0x95a5a6
-		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nmode=%s", jobID, target, mode)
-		content = "@here BreachPilot exploit started"
-		return discordMessage(content, embed, true)
-	case "exploit.finding":
-		sev, _ := p["severity"].(string)
-		module, _ := p["module"].(string)
-		title, _ := p["title"].(string)
-		target, _ := p["target"].(string)
-		validation, _ := p["validation"].(string)
-		embed["title"] = fmt.Sprintf("Finding • %s", strings.ToUpper(strings.TrimSpace(sev)))
-		embed["color"] = severityColor(sev)
-		embed["description"] = fmt.Sprintf("target=%s\nmodule=%s\n%s\nvalidation=%s", target, module, title, validation)
-	case "exploit.module.progress":
-		module, _ := p["module"].(string)
-		stage, _ := p["stage"].(string)
-		detail, _ := p["detail"].(string)
-		jobID, _ := p["job_id"].(string)
-		target, _ := p["target"].(string)
-		embed["title"] = "Exploit module progress"
-		embed["color"] = 0x95a5a6
-		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nstage=%s\nmodule=%s\n%s", jobID, target, stage, module, detail)
-	case "exploit.modules.completed":
-		jobID, _ := p["job_id"].(string)
-		target, _ := p["target"].(string)
-		findings := p["findings_count"]
-		filtered := p["filtered_count"]
-		risk := p["risk_score"]
-		modules := p["module_count"]
-		sevCounts, _ := p["severity_counts"].(map[string]any)
-		topFindings, _ := p["top_findings"].([]any)
-		topLine := ""
-		if len(topFindings) > 0 {
-			topLine = "\ntop_high_critical:"
-			for i, tf := range topFindings {
-				if i >= 3 {
-					break
-				}
-				if m, ok := tf.(map[string]any); ok {
-					topLine += fmt.Sprintf("\n- [%v] %v", m["severity"], m["title"])
-				}
-			}
-		}
-		sevLine := ""
-		if sevCounts != nil {
-			sevLine = fmt.Sprintf("\nsev: C=%v H=%v M=%v L=%v I=%v", sevCounts["CRITICAL"], sevCounts["HIGH"], sevCounts["MEDIUM"], sevCounts["LOW"], sevCounts["INFO"])
-		}
-		embed["title"] = "Exploit modules completed"
-		embed["color"] = 0x2ecc71
-		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nfindings=%v\nfiltered=%v\nrisk=%v\nmodules=%v%s%s", jobID, target, findings, filtered, risk, modules, sevLine, topLine)
-	default:
-		if id, _ := p["job_id"].(string); id != "" {
-			embed["description"] = fmt.Sprintf("event=%s\njob_id=%s", event, id)
-		} else {
-			embed["description"] = fmt.Sprintf("event=%s", event)
-		}
-	}
-
-	return discordMessage(content, embed, false)
-}
-
-func discordMessage(content string, embed map[string]any, mentionHere bool) map[string]any {
-	msg := map[string]any{"embeds": []map[string]any{embed}}
-	if content != "" {
-		msg["content"] = content
-	}
-	if mentionHere {
-		msg["allowed_mentions"] = map[string]any{"parse": []string{"everyone"}}
-	}
-	return msg
-}
-
-func severityColor(sev string) int {
-	switch strings.ToUpper(strings.TrimSpace(sev)) {
-	case "CRITICAL":
-		return 0xe74c3c // red
-	case "HIGH":
-		return 0xe67e22 // orange
-	case "MEDIUM":
-		return 0xf1c40f // yellow
-	case "LOW":
-		return 0x3498db // blue
-	default:
-		return 0x95a5a6 // gray/info
-	}
-}
 
 func signHMACSHA256(payload []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
