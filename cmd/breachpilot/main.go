@@ -51,6 +51,7 @@ func main() {
 		WebhookFindingsMinSeverity: cfg.WebhookFindingsMinSeverity,
 		ModuleTimeoutSec:           cfg.ModuleTimeoutSec,
 		ModuleRetries:              cfg.ModuleRetries,
+		AggressiveMode:             cfg.AggressiveMode,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
 	nf.Start()
@@ -84,13 +85,21 @@ func main() {
 	}
 
 	jsonOut := false
+	aggressiveFlag := false
 	filtered := make([]string, 0, len(args))
 	for _, a := range args {
 		if a == "--json" {
 			jsonOut = true
 			continue
 		}
+		if a == "--aggressive" {
+			aggressiveFlag = true
+			continue
+		}
 		filtered = append(filtered, a)
+	}
+	if aggressiveFlag {
+		engOpt.AggressiveMode = true
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -541,7 +550,10 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s validation_only=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	if cfg.AggressiveMode {
+		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ☠️ AGGRESSIVE MODE ENABLED — active verification probes ON\n")
+	}
 }
 
 func emptyAs(v, fallback string) string {
@@ -577,9 +589,9 @@ func renderStage(stage string) string {
 func printUsage() {
 	fmt.Println(`Usage:
 	  breachpilot setup
-	  breachpilot full <target> [--json]
-	  breachpilot file <summary.json> [--json]
-	  breachpilot resume <path/to/.breachpilot.state> [--json]
+	  breachpilot full <target> [--json] [--aggressive]
+	  breachpilot file <summary.json> [--json] [--aggressive]
+	  breachpilot resume <path/to/.breachpilot.state> [--json] [--aggressive]
 	  breachpilot list-modules
 	  breachpilot doctor
 

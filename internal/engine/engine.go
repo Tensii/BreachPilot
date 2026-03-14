@@ -20,6 +20,7 @@ import (
 	"breachpilot/internal/exploit/filter"
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
+	authbypass "breachpilot/internal/exploit/modules/authbypass"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
@@ -81,6 +82,7 @@ type Options struct {
 	WebhookFindingsMinSeverity string
 	ModuleTimeoutSec           int
 	ModuleRetries              int
+	AggressiveMode             bool
 }
 
 // Notifier sends structured events.
@@ -331,6 +333,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		StateManager:     sm,
 		ModuleTimeoutSec: opt.ModuleTimeoutSec,
 		ModuleRetries:    opt.ModuleRetries,
+		Aggressive:       opt.AggressiveMode,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
@@ -867,6 +870,7 @@ func registeredModuleInfos() []ModuleInfo {
 		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true},
 		{"state-change", "Detects risky state-changing endpoint patterns", true},
 		{"upload-abuse", "Detects upload attack surface and retrieval risks", true},
+		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true},
 	}
 }
 
@@ -903,6 +907,7 @@ func registeredModuleInstances() []exploit.Module {
 		graphqlabuse.New(),
 		statechange.New(),
 		uploadabuse.New(),
+		authbypass.New(),
 	}
 }
 

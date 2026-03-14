@@ -35,6 +35,7 @@ type Config struct {
 	WebhookFindingsMinSeverity string
 	ModuleTimeoutSec           int
 	ModuleRetries              int
+	AggressiveMode             bool
 }
 
 func Load() Config {
@@ -77,6 +78,7 @@ func Load() Config {
 		WebhookFindingsMinSeverity: getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
 		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
 		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
+		AggressiveMode:             getEnvBool("BREACHPILOT_AGGRESSIVE", false),
 	}
 }
 
@@ -179,8 +181,8 @@ func (c Config) RedactedSummary() string {
 	if reportFormats == "" {
 		reportFormats = "json,md,html"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
 }
 
 func loadEnvFile(path string) error {
