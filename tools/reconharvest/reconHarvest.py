@@ -578,7 +578,7 @@ def log(message: str) -> None:
 
 
 def is_valid_output_name(name: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", name))
+    return True
 
 
 def normalize_target(value: str) -> str:
@@ -4212,10 +4212,11 @@ def process_target(target: str, args: argparse.Namespace, recon_config: ReconCon
     if not validate_target(target):
         raise SystemExit(f"[!] Invalid target: {target}")
     target_dir = out_base / safe_target_dirname(target)
-    run_name = args.output or next_run_name(target_dir)
-    if args.output and not is_valid_output_name(run_name):
-        raise SystemExit("[!] Output name may contain only letters, numbers, dots, underscores, and hyphens.")
-    workdir = target_dir / run_name
+    if args.output:
+        workdir = Path(args.output)
+    else:
+        workdir = target_dir / next_run_name(target_dir)
+
     if workdir.exists():
         if args.overwrite:
             log(f"[*] Overwriting existing output directory: {workdir}")
@@ -4227,12 +4228,12 @@ def process_target(target: str, args: argparse.Namespace, recon_config: ReconCon
             (workdir / "run_commands.sh").unlink(missing_ok=True)
             workdir.mkdir(parents=True, exist_ok=True)
         elif args.auto_suffix:
-            base_name = run_name
+            base_name = workdir.name
+            parent_dir = workdir.parent
             i = 2
-            while (target_dir / f"{base_name}-{i}").exists():
+            while (parent_dir / f"{base_name}-{i}").exists():
                 i += 1
-            run_name = f"{base_name}-{i}"
-            workdir = target_dir / run_name
+            workdir = parent_dir / f"{base_name}-{i}"
             log(f"[*] Output exists, using auto-suffixed directory: {workdir}")
             workdir.mkdir(parents=True, exist_ok=True)
         else:

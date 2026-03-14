@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,7 +22,6 @@ import (
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
@@ -152,6 +151,11 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		}
 	}
 
+	// Persist job config so `resume` can reload it later
+	if err := saveJobConfig(job, cliOpt.ArtifactsRoot); err != nil {
+		log.Printf("warning: could not save job.json: %v", err)
+	}
+
 	nf.Send("job.started", job)
 	if err := engine.Process(ctx, job, cliOpt); err != nil {
 		job.Status = models.JobFailed
@@ -267,7 +271,9 @@ func runSetup(opt engine.Options) error {
 }
 
 func newJobID() string {
-	return fmt.Sprintf("%s_%04x", time.Now().UTC().Format("20060102T150405"), rand.Intn(0x10000))
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%s_%04x", time.Now().UTC().Format("20060102T150405"), int(b[0])<<8|int(b[1]))
 }
 
 func listModules(opt engine.Options) {
@@ -293,7 +299,7 @@ func printUsage() {
 	  breachpilot setup
 	  breachpilot full example.com
 	  breachpilot file recon/summary.json --json
-	  breachpilot resume c016195d-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+	  breachpilot resume 20260314T032654_48b3
 	`)
 }
 
@@ -303,14 +309,10 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	}
 	jobID := strings.TrimSpace(args[0])
 
-	jobPath := filepath.Join(opt.ArtifactsRoot, jobID, "job.json")
-	data, err := os.ReadFile(jobPath)
+	// Try job.json first, then fall back to job_report.json (embedded job object)
+	job, err := loadJobForResume(opt.ArtifactsRoot, jobID)
 	if err != nil {
-		return fmt.Errorf("failed to read previous job config %s: %w", jobPath, err)
-	}
-	var job models.Job
-	if err := json.Unmarshal(data, &job); err != nil {
-		return fmt.Errorf("failed to parse job.json: %w", err)
+		return err
 	}
 
 	statePath := filepath.Join(opt.ArtifactsRoot, jobID, ".breachpilot_state.json")
@@ -321,7 +323,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	if !jsonOut {
 		fmt.Printf("\n[BREACHPILOT] Engine Resuming Job: %s\n", job.ID)
 	}
-	
+
 	job.Status = models.JobRunning
 
 	cliOpt := opt
@@ -331,37 +333,77 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		}
 	}
 
-	nf.Send("job.started", &job)
-	if err := engine.Process(ctx, &job, cliOpt); err != nil {
+	nf.Send("job.started", job)
+	if err := engine.Process(ctx, job, cliOpt); err != nil {
 		job.Status = models.JobFailed
 		job.Error = err.Error()
-		nf.Send("job.failed", &job)
+		nf.Send("job.failed", job)
 		return err
 	}
 
 	switch job.Status {
 	case models.JobRejected:
-		nf.Send("job.rejected", &job)
+		nf.Send("job.rejected", job)
 		if jsonOut {
-			return printJobJSON(&job)
+			return printJobJSON(job)
 		}
 		fmt.Printf("Job rejected: %s\n", job.Error)
 		return nil
 	case models.JobCancelled:
-		nf.Send("job.cancelled", &job)
+		nf.Send("job.cancelled", job)
 		if jsonOut {
-			return printJobJSON(&job)
+			return printJobJSON(job)
 		}
 		fmt.Printf("Job cancelled\n")
 		return nil
 	default:
-		nf.Send("job.completed", &job)
+		nf.Send("job.completed", job)
 	}
 
 	if jsonOut {
-		return printJobJSON(&job)
+		return printJobJSON(job)
 	}
-
-	fmt.Printf("\n[BREACHPILOT] Resume Complete. Output: %s/%s\n", cliOpt.ArtifactsRoot, job.ID)
+	for _, ln := range formatCLISummary(job, job.Mode) {
+		fmt.Println(ln)
+	}
 	return nil
+}
+
+// loadJobForResume tries job.json first, then extracts from job_report.json.
+func loadJobForResume(artifactsRoot, jobID string) (*models.Job, error) {
+	jobDir := filepath.Join(artifactsRoot, jobID)
+	// Try standalone job.json
+	jobPath := filepath.Join(jobDir, "job.json")
+	if data, err := os.ReadFile(jobPath); err == nil {
+		var job models.Job
+		if err := json.Unmarshal(data, &job); err == nil {
+			return &job, nil
+		}
+	}
+	// Fallback: extract from job_report.json
+	reportPath := filepath.Join(jobDir, "job_report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		return nil, fmt.Errorf("no job.json or job_report.json found in %s", jobDir)
+	}
+	var wrapper struct {
+		Job models.Job `json:"job"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to parse job_report.json: %w", err)
+	}
+	return &wrapper.Job, nil
+}
+
+// saveJobConfig persists the job config to job.json for later resumption.
+func saveJobConfig(job *models.Job, artifactsRoot string) error {
+	dir := filepath.Join(artifactsRoot, job.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "job.json"), b, 0o644)
 }

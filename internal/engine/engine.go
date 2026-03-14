@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -238,11 +239,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			return err
 		}
 		defer logFile.Close()
-		mw := io.MultiWriter(logFile, &progressWriter{stage: "exploit.log", cb: opt.Progress})
+		nucleiPW := &progressWriter{stage: "exploit.log", cb: opt.Progress}
+		mw := io.MultiWriter(logFile, nucleiPW)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
 
 		nucleiErr := cmd.Run()
+		nucleiPW.Flush()
 		if nucleiErr != nil {
 			job.ExploitDurationSec = time.Since(exploitStart).Seconds()
 			if ctx.Err() == context.Canceled {
@@ -387,20 +390,27 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
 		argv := append([]string{}, baseArgv...)
-		argv = append(argv, job.Target, "--run", "-o", reconDir, "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+		argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite", "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
 		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
 		}
-		mw := io.MultiWriter(logFile, &progressWriter{stage: "recon.log", cb: opt.Progress})
+		pw := &progressWriter{stage: "recon.log", cb: opt.Progress}
+		mw := io.MultiWriter(logFile, pw)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
 		err := cmd.Run()
+		pw.Flush() // Flush any partial output left in the progress writer buffer
 		cancelRecon()
 		if err == nil {
 			if _, statErr := os.Stat(summaryPath); statErr == nil {
 				job.EvidencePath = filepath.Join(opt.ArtifactsRoot, job.ID)
 				return summaryPath, nil
+			}
+			// Fallback: search for summary.json inside recon subdirectories
+			if alt := findSummaryJSON(reconDir); alt != "" {
+				job.EvidencePath = filepath.Join(opt.ArtifactsRoot, job.ID)
+				return alt, nil
 			}
 			return "", fmt.Errorf("recon summary missing after successful run")
 		}
@@ -425,6 +435,22 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	return "", fmt.Errorf("reconHarvest failed")
+}
+
+// findSummaryJSON walks reconDir looking for any summary.json file.
+func findSummaryJSON(reconDir string) string {
+	var found string
+	_ = filepath.Walk(reconDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && info.Name() == "summary.json" && info.Size() > 0 {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 func buildRankedNucleiInput(path string, artDir string) (string, int) {
@@ -587,6 +613,18 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Flush emits any remaining partial line still in the buffer.
+func (w *progressWriter) Flush() {
+	if w.cb == nil || len(w.buf) == 0 {
+		return
+	}
+	line := strings.TrimSpace(string(w.buf))
+	w.buf = nil
+	if line != "" {
+		w.cb(fmt.Sprintf("%s %s", w.stage, line))
+	}
+}
+
 func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSummary, error) {
 	var rs models.ReconSummary
 	st, err := os.Stat(summaryPath)
@@ -632,10 +670,14 @@ func loadSecretsIntel(path string) []models.SecretsFinding {
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
+		log.Printf("warning: secrets intel not loaded: %v", err)
 		return nil
 	}
 	var out []models.SecretsFinding
-	_ = json.Unmarshal(b, &out)
+	if err := json.Unmarshal(b, &out); err != nil {
+		log.Printf("warning: secrets intel JSON parse failed: %v", err)
+		return nil
+	}
 	return out
 }
 
@@ -646,10 +688,14 @@ func loadCORSIntel(path string) []models.CORSFinding {
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
+		log.Printf("warning: CORS intel not loaded: %v", err)
 		return nil
 	}
 	var out []models.CORSFinding
-	_ = json.Unmarshal(b, &out)
+	if err := json.Unmarshal(b, &out); err != nil {
+		log.Printf("warning: CORS intel JSON parse failed: %v", err)
+		return nil
+	}
 	return out
 }
 
