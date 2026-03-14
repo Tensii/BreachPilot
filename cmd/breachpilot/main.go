@@ -46,6 +46,9 @@ func main() {
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
 	defer nf.Stop()
+	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
+	rf.Start()
+	defer rf.Stop()
 	engOpt.Notifier = nf
 
 	args := os.Args[1:]
@@ -89,18 +92,18 @@ func main() {
 	}()
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
-		if err := resumeJob(ctx, filtered[1:], engOpt, nf, jsonOut); err != nil {
+		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, jsonOut); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
-	if err := runCLIMode(ctx, filtered, engOpt, nf, jsonOut); err != nil {
+	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
+func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing mode. Use: full <target> OR file <summary.json>")
 	}
@@ -156,6 +159,13 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if !jsonOut {
 			fmt.Printf("[stage] %s\n", stage)
 		}
+		if stage == "exploit.started" {
+			nf.SendGeneric("exploit.started", map[string]any{
+				"job_id": job.ID,
+				"target": job.Target,
+				"mode":   job.Mode,
+			})
+		}
 		// Forward exploit module progress to webhook for per-module visibility.
 		if strings.HasPrefix(stage, "exploit.module.") {
 			parts := strings.Fields(stage)
@@ -174,7 +184,9 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		}
 	}
 
-	nf.Send("job.started", job)
+	if mode != "full" {
+		nf.Send("job.started", job)
+	}
 	if err := engine.Process(ctx, job, cliOpt); err != nil {
 		job.Status = models.JobFailed
 		job.Error = err.Error()
@@ -192,6 +204,9 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		return nil
 	case models.JobCancelled:
 		nf.Send("job.cancelled", job)
+		if strings.EqualFold(job.Mode, "full") {
+			rf.Send("job.cancelled", job)
+		}
 		if jsonOut {
 			return printJobJSON(job)
 		}
@@ -366,7 +381,7 @@ func printUsage() {
 	`)
 }
 
-func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
+func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing state file path. Use: breachpilot resume <path/to/.breachpilot.state>")
 	}
@@ -441,6 +456,9 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		return nil
 	case models.JobCancelled:
 		nf.Send("job.cancelled", job)
+		if strings.EqualFold(job.Mode, "full") {
+			rf.Send("job.cancelled", job)
+		}
 		if jsonOut {
 			return printJobJSON(job)
 		}

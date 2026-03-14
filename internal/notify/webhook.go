@@ -224,6 +224,15 @@ func toDiscordPayload(body map[string]any) map[string]any {
 	}
 
 	switch event {
+	case "exploit.started":
+		jobID, _ := p["job_id"].(string)
+		target, _ := p["target"].(string)
+		mode, _ := p["mode"].(string)
+		embed["title"] = "Exploit phase started"
+		embed["color"] = 0x95a5a6
+		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nmode=%s", jobID, target, mode)
+		content = "@here BreachPilot exploit started"
+		return discordMessage(content, embed, true)
 	case "exploit.finding":
 		sev, _ := p["severity"].(string)
 		module, _ := p["module"].(string)
