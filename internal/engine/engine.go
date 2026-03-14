@@ -42,23 +42,26 @@ import (
 )
 
 type Options struct {
-	NucleiBin          string
-	ReconHarvestCmd    string
-	ReconWebhookURL    string
-	ReconTimeoutSec    int
-	ReconRetries       int
-	NucleiTimeoutSec   int
-	ArtifactsRoot      string
-	MinSeverity        string
-	SkipModules        string
-	OnlyModules        string
-	ValidationOnly     bool
-	Progress           func(string)
-	Notifier           Notifier
-	PreviousReportPath string
-	ReportFormats      string
-	ScanProfile        string
-	RateLimitRPS       int
+	NucleiBin                  string
+	ReconHarvestCmd            string
+	ReconWebhookURL            string
+	ReconTimeoutSec            int
+	ReconRetries               int
+	NucleiTimeoutSec           int
+	ArtifactsRoot              string
+	MinSeverity                string
+	SkipModules                string
+	OnlyModules                string
+	ValidationOnly             bool
+	Progress                   func(string)
+	Notifier                   Notifier
+	PreviousReportPath         string
+	ReportFormats              string
+	ScanProfile                string
+	RateLimitRPS               int
+	WebhookFindings            bool
+	WebhookModuleProgress      bool
+	WebhookFindingsMinSeverity string
 }
 
 // Notifier sends structured events.
@@ -312,27 +315,47 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// Send exploit.modules.completed webhook
 	if opt.Notifier != nil {
-		opt.Notifier.SendGeneric("exploit.modules.completed", map[string]any{
-			"job_id":         job.ID,
-			"target":         job.Target,
-			"findings_count": len(exploitFindings),
-			"filtered_count": job.FilteredCount,
-			"risk_score":     job.RiskScore,
-			"module_count":   len(exploitModules),
-			"duration_sec":   job.ExploitDurationSec,
-		})
+		severityCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+		topFindings := make([]map[string]any, 0, 5)
 		for _, f := range exploitFindings {
-			opt.Notifier.SendGeneric("exploit.finding", map[string]any{
-				"job_id":      job.ID,
-				"target":      f.Target,
-				"module":      f.Module,
-				"severity":    f.Severity,
-				"title":       f.Title,
-				"confidence":  f.Confidence,
-				"validation":  f.Validation,
-				"evidence":    f.Evidence,
-				"report_path": job.ExploitReportPath,
-			})
+			sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+			if _, ok := severityCounts[sev]; ok {
+				severityCounts[sev]++
+			}
+			if len(topFindings) < 5 && (sev == "CRITICAL" || sev == "HIGH") {
+				topFindings = append(topFindings, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": f.Target})
+			}
+		}
+
+		opt.Notifier.SendGeneric("exploit.modules.completed", map[string]any{
+			"job_id":          job.ID,
+			"target":          job.Target,
+			"findings_count":  len(exploitFindings),
+			"filtered_count":  job.FilteredCount,
+			"risk_score":      job.RiskScore,
+			"module_count":    len(exploitModules),
+			"duration_sec":    job.ExploitDurationSec,
+			"severity_counts": severityCounts,
+			"top_findings":    topFindings,
+		})
+
+		if opt.WebhookFindings {
+			for _, f := range exploitFindings {
+				if !severityAtLeast(f.Severity, opt.WebhookFindingsMinSeverity) {
+					continue
+				}
+				opt.Notifier.SendGeneric("exploit.finding", map[string]any{
+					"job_id":      job.ID,
+					"target":      f.Target,
+					"module":      f.Module,
+					"severity":    f.Severity,
+					"title":       f.Title,
+					"confidence":  f.Confidence,
+					"validation":  f.Validation,
+					"evidence":    f.Evidence,
+					"report_path": job.ExploitReportPath,
+				})
+			}
 		}
 	}
 
@@ -881,6 +904,13 @@ func filterModulesBySkipList(modules []exploit.Module, skipList string) []exploi
 		}
 	}
 	return out
+}
+
+func severityAtLeast(sev, min string) bool {
+	rank := map[string]int{"": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
+	s := strings.ToUpper(strings.TrimSpace(sev))
+	m := strings.ToUpper(strings.TrimSpace(min))
+	return rank[s] >= rank[m]
 }
 
 func countLines(path string) (int, error) {

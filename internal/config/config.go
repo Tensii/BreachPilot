@@ -10,26 +10,29 @@ import (
 )
 
 type Config struct {
-	WebhookURL         string
-	ReconWebhookURL    string
-	ExploitWebhookURL  string
-	WebhookSecret      string
-	WebhookRetries     int
-	NucleiBin          string
-	ReconHarvestCmd    string
-	ReconTimeoutSec    int
-	ReconRetries       int
-	NucleiTimeoutSec   int
-	ArtifactsRoot      string
-	MinSeverity        string
-	SkipModules        string
-	OnlyModules        string
-	ValidationOnly     bool
-	ConfigPath         string
-	PreviousReportPath string
-	ReportFormats      string
-	ScanProfile        string
-	RateLimitRPS       int
+	WebhookURL                 string
+	ReconWebhookURL            string
+	ExploitWebhookURL          string
+	WebhookSecret              string
+	WebhookRetries             int
+	NucleiBin                  string
+	ReconHarvestCmd            string
+	ReconTimeoutSec            int
+	ReconRetries               int
+	NucleiTimeoutSec           int
+	ArtifactsRoot              string
+	MinSeverity                string
+	SkipModules                string
+	OnlyModules                string
+	ValidationOnly             bool
+	ConfigPath                 string
+	PreviousReportPath         string
+	ReportFormats              string
+	ScanProfile                string
+	RateLimitRPS               int
+	WebhookFindings            bool
+	WebhookModuleProgress      bool
+	WebhookFindingsMinSeverity string
 }
 
 func Load() Config {
@@ -47,26 +50,29 @@ func Load() Config {
 	}
 
 	return Config{
-		WebhookURL:         legacyWH,
-		ReconWebhookURL:    reconWH,
-		ExploitWebhookURL:  exploitWH,
-		WebhookSecret:      os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
-		WebhookRetries:     getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
-		NucleiBin:          getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
-		ReconHarvestCmd:    getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
-		ReconTimeoutSec:    getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
-		ReconRetries:       getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
-		NucleiTimeoutSec:   getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
-		ArtifactsRoot:      getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
-		MinSeverity:        getEnv("BREACHPILOT_MIN_SEVERITY", ""),
-		SkipModules:        getEnv("BREACHPILOT_SKIP_MODULES", ""),
-		OnlyModules:        getEnv("BREACHPILOT_ONLY_MODULES", ""),
-		ValidationOnly:     getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
-		ConfigPath:         configPath,
-		PreviousReportPath: getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
-		ReportFormats:      getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
-		ScanProfile:        getEnv("BREACHPILOT_SCAN_PROFILE", ""),
-		RateLimitRPS:       getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
+		WebhookURL:                 legacyWH,
+		ReconWebhookURL:            reconWH,
+		ExploitWebhookURL:          exploitWH,
+		WebhookSecret:              os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
+		WebhookRetries:             getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
+		NucleiBin:                  getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
+		ReconHarvestCmd:            getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
+		ReconTimeoutSec:            getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
+		ReconRetries:               getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
+		NucleiTimeoutSec:           getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
+		ArtifactsRoot:              getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
+		MinSeverity:                getEnv("BREACHPILOT_MIN_SEVERITY", ""),
+		SkipModules:                getEnv("BREACHPILOT_SKIP_MODULES", ""),
+		OnlyModules:                getEnv("BREACHPILOT_ONLY_MODULES", ""),
+		ValidationOnly:             getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
+		ConfigPath:                 configPath,
+		PreviousReportPath:         getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
+		ReportFormats:              getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
+		ScanProfile:                getEnv("BREACHPILOT_SCAN_PROFILE", ""),
+		RateLimitRPS:               getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
+		WebhookFindings:            getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
+		WebhookModuleProgress:      getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", true),
+		WebhookFindingsMinSeverity: getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
 	}
 }
 
@@ -125,6 +131,9 @@ func (c Config) Validate() error {
 	validSevs := map[string]bool{"": true, "INFO": true, "LOW": true, "MEDIUM": true, "HIGH": true, "CRITICAL": true}
 	if !validSevs[strings.ToUpper(strings.TrimSpace(c.MinSeverity))] {
 		return fmt.Errorf("invalid BREACHPILOT_MIN_SEVERITY: %q (valid: INFO LOW MEDIUM HIGH CRITICAL)", c.MinSeverity)
+	}
+	if !validSevs[strings.ToUpper(strings.TrimSpace(c.WebhookFindingsMinSeverity))] {
+		return fmt.Errorf("invalid BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY: %q (valid: INFO LOW MEDIUM HIGH CRITICAL)", c.WebhookFindingsMinSeverity)
 	}
 	return nil
 }

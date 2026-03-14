@@ -27,26 +27,29 @@ func main() {
 	}
 	log.Println(cfg.RedactedSummary())
 	engOpt := engine.Options{
-		NucleiBin:          cfg.NucleiBin,
-		ReconHarvestCmd:    config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
-		ReconWebhookURL:    cfg.ReconWebhookURL,
-		ReconTimeoutSec:    cfg.ReconTimeoutSec,
-		ReconRetries:       cfg.ReconRetries,
-		NucleiTimeoutSec:   cfg.NucleiTimeoutSec,
-		ArtifactsRoot:      cfg.ArtifactsRoot,
-		MinSeverity:        cfg.MinSeverity,
-		SkipModules:        cfg.SkipModules,
-		OnlyModules:        cfg.OnlyModules,
-		ValidationOnly:     cfg.ValidationOnly,
-		PreviousReportPath: cfg.PreviousReportPath,
-		ReportFormats:      cfg.ReportFormats,
-		ScanProfile:        cfg.ScanProfile,
-		RateLimitRPS:       cfg.RateLimitRPS,
+		NucleiBin:                  cfg.NucleiBin,
+		ReconHarvestCmd:            config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
+		ReconWebhookURL:            cfg.ReconWebhookURL,
+		ReconTimeoutSec:            cfg.ReconTimeoutSec,
+		ReconRetries:               cfg.ReconRetries,
+		NucleiTimeoutSec:           cfg.NucleiTimeoutSec,
+		ArtifactsRoot:              cfg.ArtifactsRoot,
+		MinSeverity:                cfg.MinSeverity,
+		SkipModules:                cfg.SkipModules,
+		OnlyModules:                cfg.OnlyModules,
+		ValidationOnly:             cfg.ValidationOnly,
+		PreviousReportPath:         cfg.PreviousReportPath,
+		ReportFormats:              cfg.ReportFormats,
+		ScanProfile:                cfg.ScanProfile,
+		RateLimitRPS:               cfg.RateLimitRPS,
+		WebhookFindings:            cfg.WebhookFindings,
+		WebhookModuleProgress:      cfg.WebhookModuleProgress,
+		WebhookFindingsMinSeverity: cfg.WebhookFindingsMinSeverity,
 	}
-	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
+	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
 	nf.Start()
 	defer nf.Stop()
-	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
+	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl")}
 	rf.Start()
 	defer rf.Stop()
 	engOpt.Notifier = nf
@@ -129,6 +132,12 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if reconPath == "" {
 			return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
 		}
+		if strings.Contains(filepath.ToSlash(reconPath), "/recon/reports/summary.json") {
+			return fmt.Errorf("invalid summary path for file mode: %s (use recon/summary.json, not recon/reports/summary.json)", reconPath)
+		}
+		if _, err := os.Stat(reconPath); err != nil {
+			return fmt.Errorf("summary path not accessible: %w", err)
+		}
 		// Derive target from summary for directory naming
 		if target == "" {
 			if rs, err := ingest.LoadReconSummary(reconPath); err == nil {
@@ -167,7 +176,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 			})
 		}
 		// Forward exploit module progress to webhook for per-module visibility.
-		if strings.HasPrefix(stage, "exploit.module.") {
+		if opt.WebhookModuleProgress && strings.HasPrefix(stage, "exploit.module.") {
 			parts := strings.Fields(stage)
 			if len(parts) >= 2 {
 				payload := map[string]any{
@@ -411,6 +420,14 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		fmt.Printf("[BREACHPILOT] State: recon=%v nuclei=%v modules=%d\n",
 			st.ReconCompleted, st.NucleiCompleted, len(st.ModulesFinished))
 	}
+	nf.SendGeneric("job.resumed", map[string]any{
+		"job_id":               job.ID,
+		"target":               job.Target,
+		"recon_completed":      st.ReconCompleted,
+		"nuclei_completed":     st.NucleiCompleted,
+		"modules_finished":     len(st.ModulesFinished),
+		"modules_finished_ids": st.ModulesFinished,
+	})
 
 	// Derive artifacts root from job dir path
 	// jobDir = artifactsRoot/domain/N → artifactsRoot = jobDir minus the last 2 path components
@@ -421,7 +438,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 			fmt.Printf("[stage] %s\n", stage)
 		}
 		// Forward exploit module progress to webhook for per-module visibility.
-		if strings.HasPrefix(stage, "exploit.module.") {
+		if opt.WebhookModuleProgress && strings.HasPrefix(stage, "exploit.module.") {
 			parts := strings.Fields(stage)
 			if len(parts) >= 2 {
 				payload := map[string]any{

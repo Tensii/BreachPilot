@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,15 +24,18 @@ type webhookEvent struct {
 }
 
 type Webhook struct {
-	URL     string
-	Secret  string
-	Retries int
+	URL          string
+	Secret       string
+	Retries      int
+	DebugLogPath string
 
-	ch       chan webhookEvent
-	once     sync.Once
-	stopOnce sync.Once
-	wg       sync.WaitGroup
-	client   *http.Client
+	criticalCh chan webhookEvent
+	normalCh   chan webhookEvent
+	once       sync.Once
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
+	client     *http.Client
+	logMu      sync.Mutex
 }
 
 func (w *Webhook) Start() {
@@ -41,7 +46,8 @@ func (w *Webhook) Start() {
 		if w.Retries <= 0 {
 			w.Retries = 3
 		}
-		w.ch = make(chan webhookEvent, 200)
+		w.criticalCh = make(chan webhookEvent, 64)
+		w.normalCh = make(chan webhookEvent, 512)
 		w.client = &http.Client{Timeout: 6 * time.Second}
 		w.wg.Add(1)
 		go w.loop()
@@ -50,7 +56,35 @@ func (w *Webhook) Start() {
 
 func (w *Webhook) loop() {
 	defer w.wg.Done()
-	for ev := range w.ch {
+	criticalCh := w.criticalCh
+	normalCh := w.normalCh
+	for criticalCh != nil || normalCh != nil {
+		var (
+			ev webhookEvent
+			ok bool
+		)
+		// Always try critical first.
+		select {
+		case ev, ok = <-criticalCh:
+			if !ok {
+				criticalCh = nil
+				continue
+			}
+		default:
+			select {
+			case ev, ok = <-criticalCh:
+				if !ok {
+					criticalCh = nil
+					continue
+				}
+			case ev, ok = <-normalCh:
+				if !ok {
+					normalCh = nil
+					continue
+				}
+			}
+		}
+
 		if ev.Payload != nil {
 			w.sendNowGeneric(ev.Name, ev.Payload)
 		} else {
@@ -65,22 +99,20 @@ func (w *Webhook) Send(event string, job *models.Job) {
 	}
 	w.Start()
 
-	// Never drop terminal job events (started/completed/failed/cancelled/rejected)
-	// even when the queue is saturated by noisy finding events.
+	// Never drop terminal job events.
 	if strings.HasPrefix(event, "job.") {
 		select {
-		case w.ch <- webhookEvent{Name: event, Job: job}:
+		case w.criticalCh <- webhookEvent{Name: event, Job: job}:
 		case <-time.After(2 * time.Second):
-			// Fallback: send synchronously to avoid missing critical state transitions.
 			w.sendNow(event, job)
 		}
 		return
 	}
 
 	select {
-	case w.ch <- webhookEvent{Name: event, Job: job}:
+	case w.normalCh <- webhookEvent{Name: event, Job: job}:
 	default:
-		// drop non-critical events when saturated; queue protection
+		// drop non-critical events when saturated
 	}
 }
 
@@ -92,7 +124,7 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 	}
 	w.Start()
 	select {
-	case w.ch <- webhookEvent{Name: eventType, Payload: payload}:
+	case w.normalCh <- webhookEvent{Name: eventType, Payload: payload}:
 	default:
 	}
 }
@@ -104,10 +136,15 @@ func (w *Webhook) Stop() {
 		return
 	}
 	w.stopOnce.Do(func() {
-		if w.ch == nil {
+		if w.criticalCh == nil && w.normalCh == nil {
 			return
 		}
-		close(w.ch)
+		if w.criticalCh != nil {
+			close(w.criticalCh)
+		}
+		if w.normalCh != nil {
+			close(w.normalCh)
+		}
 		done := make(chan struct{})
 		go func() {
 			w.wg.Wait()
@@ -148,6 +185,7 @@ func (w *Webhook) postJSON(body map[string]any) {
 	for attempt := 1; attempt <= w.Retries; attempt++ {
 		req, err := http.NewRequest(http.MethodPost, w.URL, bytes.NewReader(b))
 		if err != nil {
+			w.logDelivery("request_error", body, attempt, 0, err.Error(), "")
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -160,13 +198,53 @@ func (w *Webhook) postJSON(body map[string]any) {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
+			w.logDelivery("ok", body, attempt, resp.StatusCode, "", "")
 			return
 		}
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		w.logDelivery("retry", body, attempt, status, errMsg, "")
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		time.Sleep(time.Duration(attempt*attempt) * 200 * time.Millisecond)
+		// Exponential backoff with a little jitter.
+		base := time.Duration(attempt*attempt) * 200 * time.Millisecond
+		jitter := time.Duration((attempt*37)%120) * time.Millisecond
+		time.Sleep(base + jitter)
 	}
+	w.logDelivery("failed", body, w.Retries, 0, "max retries exceeded", "")
+}
+
+func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, status int, errMsg string, respBody string) {
+	if strings.TrimSpace(w.DebugLogPath) == "" {
+		return
+	}
+	entry := map[string]any{
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+		"state":   state,
+		"event":   body["event"],
+		"attempt": attempt,
+		"status":  status,
+		"error":   errMsg,
+		"url":     w.URL,
+		"resp":    respBody,
+	}
+	b, _ := json.Marshal(entry)
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	_ = os.MkdirAll(filepath.Dir(w.DebugLogPath), 0o755)
+	f, err := os.OpenFile(w.DebugLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(b, '\n'))
 }
 
 func isDiscordWebhookURL(u string) bool {
@@ -224,6 +302,15 @@ func toDiscordPayload(body map[string]any) map[string]any {
 	}
 
 	switch event {
+	case "job.resumed":
+		jobID, _ := p["job_id"].(string)
+		target, _ := p["target"].(string)
+		reconDone := p["recon_completed"]
+		nucleiDone := p["nuclei_completed"]
+		modsDone := p["modules_finished"]
+		embed["title"] = "Job resumed"
+		embed["color"] = 0x95a5a6
+		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nrecon_completed=%v\nnuclei_completed=%v\nmodules_finished=%v", jobID, target, reconDone, nucleiDone, modsDone)
 	case "exploit.started":
 		jobID, _ := p["job_id"].(string)
 		target, _ := p["target"].(string)
@@ -258,9 +345,27 @@ func toDiscordPayload(body map[string]any) map[string]any {
 		filtered := p["filtered_count"]
 		risk := p["risk_score"]
 		modules := p["module_count"]
+		sevCounts, _ := p["severity_counts"].(map[string]any)
+		topFindings, _ := p["top_findings"].([]any)
+		topLine := ""
+		if len(topFindings) > 0 {
+			topLine = "\ntop_high_critical:"
+			for i, tf := range topFindings {
+				if i >= 3 {
+					break
+				}
+				if m, ok := tf.(map[string]any); ok {
+					topLine += fmt.Sprintf("\n- [%v] %v", m["severity"], m["title"])
+				}
+			}
+		}
+		sevLine := ""
+		if sevCounts != nil {
+			sevLine = fmt.Sprintf("\nsev: C=%v H=%v M=%v L=%v I=%v", sevCounts["CRITICAL"], sevCounts["HIGH"], sevCounts["MEDIUM"], sevCounts["LOW"], sevCounts["INFO"])
+		}
 		embed["title"] = "Exploit modules completed"
 		embed["color"] = 0x2ecc71
-		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nfindings=%v\nfiltered=%v\nrisk=%v\nmodules=%v", jobID, target, findings, filtered, risk, modules)
+		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nfindings=%v\nfiltered=%v\nrisk=%v\nmodules=%v%s%s", jobID, target, findings, filtered, risk, modules, sevLine, topLine)
 	default:
 		if id, _ := p["job_id"].(string); id != "" {
 			embed["description"] = fmt.Sprintf("event=%s\njob_id=%s", event, id)
