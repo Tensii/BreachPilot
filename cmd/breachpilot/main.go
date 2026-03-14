@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -80,10 +79,12 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		fmt.Println("\n[!] Interrupt received, safely stopping (waiting 1s for state flush)...")
+		fmt.Println("\n[!] Interrupt received, safely stopping... Waiting for active tasks and webhooks to finish.")
 		cancel()
-		time.Sleep(1 * time.Second)
-		os.Exit(1)
+		// We purposefully do not call os.Exit(1) here.
+		// Canceling the context will cause the engine to unroll safely and return models.JobCancelled.
+		// The main routine will then hit the switch job.Status case to send the job.cancelled webhook,
+		// and the application will naturally exit cleanly.
 	}()
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
@@ -117,31 +118,36 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 	if mode == "full" {
 		target = strings.TrimSpace(args[1])
 	}
+
+	var reconPath string
+	if mode == "file" {
+		reconPath = strings.TrimSpace(args[1])
+		if reconPath == "" {
+			return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
+		}
+		// Derive target from summary for directory naming
+		if target == "" {
+			if rs, err := ingest.LoadReconSummary(reconPath); err == nil {
+				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
+					target = guessed
+				}
+			}
+			if target == "" {
+				target = "from-summary"
+			}
+		}
+		mode = "ingest"
+	}
+
+	jobID := nextRunID(opt.ArtifactsRoot, target)
 	job := &models.Job{
-		ID:        newJobID(),
+		ID:        jobID,
 		Target:    target,
 		Mode:      mode,
+		ReconPath: reconPath,
 		SafeMode:  true,
 		Status:    models.JobQueued,
 		CreatedAt: time.Now().UTC(),
-	}
-
-	if mode == "file" {
-		job.ReconPath = strings.TrimSpace(args[1])
-		job.Mode = "ingest"
-		if job.ReconPath == "" {
-			return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
-		}
-		if job.Target == "" {
-			if rs, err := ingest.LoadReconSummary(job.ReconPath); err == nil {
-				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
-					job.Target = guessed
-				}
-			}
-			if job.Target == "" {
-				job.Target = "from-summary"
-			}
-		}
 	}
 
 	cliOpt := opt
@@ -149,11 +155,6 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if !jsonOut {
 			fmt.Printf("[stage] %s\n", stage)
 		}
-	}
-
-	// Persist job config so `resume` can reload it later
-	if err := saveJobConfig(job, cliOpt.ArtifactsRoot); err != nil {
-		log.Printf("warning: could not save job.json: %v", err)
 	}
 
 	nf.Send("job.started", job)
@@ -270,10 +271,49 @@ func runSetup(opt engine.Options) error {
 	return nil
 }
 
-func newJobID() string {
-	b := make([]byte, 2)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s_%04x", time.Now().UTC().Format("20060102T150405"), int(b[0])<<8|int(b[1]))
+// nextRunID creates a human-friendly job ID: "<domain>/<N>" with auto-incrementing run number.
+func nextRunID(artifactsRoot, target string) string {
+	safeDomain := safeDirName(target)
+	domainDir := filepath.Join(artifactsRoot, safeDomain)
+	_ = os.MkdirAll(domainDir, 0o755)
+	run := 1
+	for {
+		candidate := filepath.Join(domainDir, fmt.Sprintf("%d", run))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			break
+		}
+		run++
+	}
+	return fmt.Sprintf("%s/%d", safeDomain, run)
+}
+
+// safeDirName sanitises a target into a safe directory name.
+func safeDirName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "unknown"
+	}
+	// Remove protocol prefix if present
+	for _, pfx := range []string{"https://", "http://"} {
+		s = strings.TrimPrefix(s, pfx)
+	}
+	// Remove trailing slashes
+	s = strings.TrimRight(s, "/")
+	// Replace disallowed characters
+	var out strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			out.WriteRune(r)
+		default:
+			out.WriteRune('_')
+		}
+	}
+	result := out.String()
+	if result == "" {
+		return "unknown"
+	}
+	return result
 }
 
 func listModules(opt engine.Options) {
@@ -292,41 +332,51 @@ func printUsage() {
 	  breachpilot setup
 	  breachpilot full <target> [--json]
 	  breachpilot file <summary.json> [--json]
-	  breachpilot resume <job_id> [--json]
+	  breachpilot resume <path/to/.breachpilot.state> [--json]
 	  breachpilot list-modules
 
 	Examples:
-	  breachpilot setup
 	  breachpilot full example.com
 	  breachpilot file recon/summary.json --json
-	  breachpilot resume 20260314T032654_48b3
+	  breachpilot resume artifacts/example.com/1/.breachpilot.state
 	`)
 }
 
 func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
 	if len(args) == 0 {
-		return fmt.Errorf("missing job_id. Use: breachpilot resume <job_id>")
+		return fmt.Errorf("missing state file path. Use: breachpilot resume <path/to/.breachpilot.state>")
 	}
-	jobID := strings.TrimSpace(args[0])
+	statePath := strings.TrimSpace(args[0])
 
-	// Try job.json first, then fall back to job_report.json (embedded job object)
-	job, err := loadJobForResume(opt.ArtifactsRoot, jobID)
+	// Load state from the .breachpilot.state file
+	sm, err := engine.NewStateManagerFromPath(statePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load state: %w", err)
 	}
+	st := sm.State()
 
-	statePath := filepath.Join(opt.ArtifactsRoot, jobID, ".breachpilot_state.json")
-	if _, err := os.Stat(statePath); os.IsNotExist(err) {
-		return fmt.Errorf("no state found for job %q. Job cannot be resumed from %s", jobID, statePath)
+	// Reconstruct job from state
+	jobDir := filepath.Dir(statePath)
+	job := &models.Job{
+		ID:        st.JobID,
+		Target:    st.Target,
+		Mode:      st.Mode,
+		ReconPath: st.ReconPath,
+		SafeMode:  true,
+		Status:    models.JobRunning,
+		CreatedAt: time.Now().UTC(),
 	}
 
 	if !jsonOut {
-		fmt.Printf("\n[BREACHPILOT] Engine Resuming Job: %s\n", job.ID)
+		fmt.Printf("\n[BREACHPILOT] Resuming: %s (target=%s)\n", job.ID, job.Target)
+		fmt.Printf("[BREACHPILOT] State: recon=%v nuclei=%v modules=%d\n",
+			st.ReconCompleted, st.NucleiCompleted, len(st.ModulesFinished))
 	}
 
-	job.Status = models.JobRunning
-
+	// Derive artifacts root from job dir path
+	// jobDir = artifactsRoot/domain/N → artifactsRoot = jobDir minus the last 2 path components
 	cliOpt := opt
+	cliOpt.ArtifactsRoot = filepath.Dir(filepath.Dir(jobDir))
 	cliOpt.Progress = func(stage string) {
 		if !jsonOut {
 			fmt.Printf("[stage] %s\n", stage)
@@ -367,43 +417,4 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		fmt.Println(ln)
 	}
 	return nil
-}
-
-// loadJobForResume tries job.json first, then extracts from job_report.json.
-func loadJobForResume(artifactsRoot, jobID string) (*models.Job, error) {
-	jobDir := filepath.Join(artifactsRoot, jobID)
-	// Try standalone job.json
-	jobPath := filepath.Join(jobDir, "job.json")
-	if data, err := os.ReadFile(jobPath); err == nil {
-		var job models.Job
-		if err := json.Unmarshal(data, &job); err == nil {
-			return &job, nil
-		}
-	}
-	// Fallback: extract from job_report.json
-	reportPath := filepath.Join(jobDir, "job_report.json")
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		return nil, fmt.Errorf("no job.json or job_report.json found in %s", jobDir)
-	}
-	var wrapper struct {
-		Job models.Job `json:"job"`
-	}
-	if err := json.Unmarshal(data, &wrapper); err != nil {
-		return nil, fmt.Errorf("failed to parse job_report.json: %w", err)
-	}
-	return &wrapper.Job, nil
-}
-
-// saveJobConfig persists the job config to job.json for later resumption.
-func saveJobConfig(job *models.Job, artifactsRoot string) error {
-	dir := filepath.Join(artifactsRoot, job.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(job, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, "job.json"), b, 0o644)
 }

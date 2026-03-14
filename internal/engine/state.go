@@ -11,6 +11,9 @@ import (
 	"breachpilot/internal/models"
 )
 
+// StateFile is the name of the state checkpoint inside a job directory.
+const StateFile = ".breachpilot.state"
+
 // StateManager persists the execution state of a job to allow resumption.
 type StateManager struct {
 	path  string
@@ -18,20 +21,22 @@ type StateManager struct {
 	mu    sync.Mutex
 }
 
-// NewStateManager creates or loads a state manager.
-func NewStateManager(artifactsRoot, jobID string) (*StateManager, error) {
-	if artifactsRoot == "" || jobID == "" {
-		return nil, fmt.Errorf("artifactsRoot and jobID are required")
+// NewStateManager creates or loads a state manager for a job directory.
+func NewStateManager(jobDir string, job *models.Job) (*StateManager, error) {
+	if jobDir == "" {
+		return nil, fmt.Errorf("jobDir is required")
 	}
-	dir := filepath.Join(artifactsRoot, jobID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create artifacts dir: %w", err)
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create job dir: %w", err)
 	}
 
 	sm := &StateManager{
-		path: filepath.Join(dir, ".breachpilot_state.json"),
+		path: filepath.Join(jobDir, StateFile),
 		state: models.JobState{
-			JobID:           jobID,
+			JobID:           job.ID,
+			Target:          job.Target,
+			Mode:            job.Mode,
+			ReconPath:       job.ReconPath,
 			StartedAt:       time.Now().UTC().Format(time.RFC3339),
 			ModulesFinished: []string{},
 		},
@@ -47,6 +52,17 @@ func NewStateManager(artifactsRoot, jobID string) (*StateManager, error) {
 		return nil, fmt.Errorf("failed to save initial state: %w", err)
 	}
 
+	return sm, nil
+}
+
+// NewStateManagerFromPath loads an existing state from a .breachpilot.state file.
+func NewStateManagerFromPath(statePath string) (*StateManager, error) {
+	sm := &StateManager{
+		path: statePath,
+	}
+	if err := sm.Load(); err != nil {
+		return nil, fmt.Errorf("failed to load state from %s: %w", statePath, err)
+	}
 	return sm, nil
 }
 
@@ -151,4 +167,11 @@ func (sm *StateManager) IsModuleCompleted(moduleName string) bool {
 		}
 	}
 	return false
+}
+
+// State returns a copy of the current job state.
+func (sm *StateManager) State() models.JobState {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state
 }

@@ -82,7 +82,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	job.StartedAt = time.Now().UTC()
 	job.Status = models.JobRunning
 
-	sm, err := NewStateManager(opt.ArtifactsRoot, job.ID)
+	artDir := filepath.Join(opt.ArtifactsRoot, job.ID)
+	sm, err := NewStateManager(artDir, job)
 	if err != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
@@ -195,7 +196,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return fmt.Errorf("live hosts file not accessible: %w", err)
 	}
 
-	artDir := filepath.Join(opt.ArtifactsRoot, job.ID)
+	artDir = filepath.Join(opt.ArtifactsRoot, job.ID)
 	if err := os.MkdirAll(artDir, 0o755); err != nil {
 		return err
 	}
@@ -390,7 +391,14 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
 		argv := append([]string{}, baseArgv...)
-		argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite", "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+		// If the recon dir already has partial work (e.g. from a previous interrupted run),
+		// pass --resume so reconHarvest picks up where it left off.
+		// On a fresh run the dir was just created empty, so --overwrite is safe.
+		if hasPartialRecon(reconDir) {
+			argv = append(argv, job.Target, "--run", "-o", reconDir, "--resume", filepath.Join(reconDir, "run.log"), "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+		} else {
+			argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite", "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+		}
 		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
@@ -435,6 +443,19 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	return "", fmt.Errorf("reconHarvest failed")
+}
+
+// hasPartialRecon returns true if the recon dir already has work files from a
+// previous (interrupted) run. This determines whether we pass --resume vs
+// --overwrite to reconHarvest.py.
+func hasPartialRecon(reconDir string) bool {
+	markers := []string{"run.log", "workspace_meta.json", "live_hosts.txt", "run_commands.sh"}
+	for _, m := range markers {
+		if st, err := os.Stat(filepath.Join(reconDir, m)); err == nil && st.Size() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // findSummaryJSON walks reconDir looking for any summary.json file.

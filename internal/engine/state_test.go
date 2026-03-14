@@ -5,20 +5,23 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
 	"breachpilot/internal/models"
 )
 
 func TestStateManager(t *testing.T) {
 	tempDir := t.TempDir()
 	jobID := "test-job-id"
+	job := &models.Job{ID: jobID, Target: "example.com", Mode: "full"}
 
 	// 1. Creation
-	sm, err := NewStateManager(tempDir, jobID)
+	jobDir := filepath.Join(tempDir, jobID)
+	sm, err := NewStateManager(jobDir, job)
 	if err != nil {
 		t.Fatalf("failed to create state manager: %v", err)
 	}
 
-	statePath := filepath.Join(tempDir, jobID, ".breachpilot_state.json")
+	statePath := filepath.Join(jobDir, StateFile)
 	if _, err := os.Stat(statePath); os.IsNotExist(err) {
 		t.Fatalf("expected state file at %s but not found", statePath)
 	}
@@ -54,7 +57,7 @@ func TestStateManager(t *testing.T) {
 	}
 
 	// 5. Reload from disk
-	sm2, err := NewStateManager(tempDir, jobID)
+	sm2, err := NewStateManager(jobDir, job)
 	if err != nil {
 		t.Fatalf("failed to reload state manager: %v", err)
 	}
@@ -80,5 +83,17 @@ func TestStateManager(t *testing.T) {
 	}
 	if state.JobID != jobID {
 		t.Fatalf("unexpected job id in json: %v", state.JobID)
+	}
+	if state.Target != "example.com" {
+		t.Fatalf("unexpected target in state: %v", state.Target)
+	}
+
+	// 6. Test NewStateManagerFromPath
+	sm3, err := NewStateManagerFromPath(statePath)
+	if err != nil {
+		t.Fatalf("failed to load state from path: %v", err)
+	}
+	if !sm3.IsReconCompleted() {
+		t.Fatalf("state loaded from path lost recon completion")
 	}
 }

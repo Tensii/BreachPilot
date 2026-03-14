@@ -28,6 +28,9 @@ type CreateJobRequest struct {
 // JobState tracks the resumable execution state of a job on disk.
 type JobState struct {
 	JobID           string   `json:"job_id"`
+	Target          string   `json:"target"`
+	Mode            string   `json:"mode"`
+	ReconPath       string   `json:"recon_path,omitempty"`
 	StartedAt       string   `json:"started_at"`
 	LastUpdatedAt   string   `json:"last_updated_at"`
 	ReconCompleted  bool     `json:"recon_completed"`
