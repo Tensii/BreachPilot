@@ -15,14 +15,51 @@ if [[ "${SYNC_PULL_LATEST:-0}" == "1" ]]; then
   if ! git -C "$SRC" pull --ff-only; then
     CURRENT_URL=$(git -C "$SRC" remote get-url origin 2>/dev/null || true)
     BRANCH=$(git -C "$SRC" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
-    if [[ "$CURRENT_URL" == git@github.com:* ]]; then
-      HTTPS_URL="https://github.com/${CURRENT_URL#git@github.com:}"
-      echo "[sync] SSH pull failed, retrying read-only HTTPS: $HTTPS_URL ($BRANCH)"
-      if ! git -C "$SRC" pull --ff-only "$HTTPS_URL" "$BRANCH"; then
-        echo "[sync] WARN: could not pull latest (SSH/HTTPS failed). Continuing with local source state in $SRC." >&2
+
+    # Try authenticated HTTPS via gh token when available.
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+      REPO_PATH=""
+      case "$CURRENT_URL" in
+        git@github.com:*)
+          REPO_PATH="${CURRENT_URL#git@github.com:}"
+          ;;
+        https://github.com/*)
+          REPO_PATH="${CURRENT_URL#https://github.com/}"
+          ;;
+      esac
+      REPO_PATH="${REPO_PATH%.git}"
+      if [[ -n "$REPO_PATH" ]]; then
+        GH_TOKEN=$(gh auth token 2>/dev/null || true)
+        if [[ -n "$GH_TOKEN" ]]; then
+          AUTH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO_PATH}.git"
+          echo "[sync] SSH pull failed, retrying authenticated HTTPS via gh (${REPO_PATH}, ${BRANCH})"
+          if git -C "$SRC" pull --ff-only "$AUTH_URL" "$BRANCH"; then
+            GH_TOKEN=""
+          else
+            GH_TOKEN=""
+            echo "[sync] WARN: gh-authenticated pull failed." >&2
+          fi
+        fi
       fi
-    else
-      echo "[sync] WARN: could not pull latest. Continuing with local source state in $SRC." >&2
+    fi
+
+    # Final fallback: read-only HTTPS fetch/pull.
+    if ! git -C "$SRC" pull --ff-only; then
+      if [[ "$CURRENT_URL" == git@github.com:* ]]; then
+        HTTPS_URL="https://github.com/${CURRENT_URL#git@github.com:}"
+      elif [[ "$CURRENT_URL" == https://github.com/* ]]; then
+        HTTPS_URL="$CURRENT_URL"
+      else
+        HTTPS_URL=""
+      fi
+      if [[ -n "$HTTPS_URL" ]]; then
+        echo "[sync] retrying read-only HTTPS: $HTTPS_URL ($BRANCH)"
+        if ! git -C "$SRC" pull --ff-only "$HTTPS_URL" "$BRANCH"; then
+          echo "[sync] WARN: could not pull latest (SSH/gh/HTTPS failed). Continuing with local source state in $SRC." >&2
+        fi
+      else
+        echo "[sync] WARN: could not pull latest. Continuing with local source state in $SRC." >&2
+      fi
     fi
   fi
 fi
