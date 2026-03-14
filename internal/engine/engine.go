@@ -19,6 +19,7 @@ import (
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
+	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
 	headers "breachpilot/internal/exploit/modules/headers"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
@@ -29,6 +30,7 @@ import (
 	portservice "breachpilot/internal/exploit/modules/portservice"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
 	subt "breachpilot/internal/exploit/modules/subt"
+	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -37,18 +39,26 @@ import (
 )
 
 type Options struct {
-	NucleiBin        string
-	ReconHarvestCmd  string
-	ReconWebhookURL  string
-	ReconTimeoutSec  int
-	ReconRetries     int
-	NucleiTimeoutSec int
-	ArtifactsRoot    string
-	MinSeverity      string
-	SkipModules      string
-	OnlyModules      string
-	ValidationOnly   bool
-	Progress         func(string)
+	NucleiBin          string
+	ReconHarvestCmd    string
+	ReconWebhookURL    string
+	ReconTimeoutSec    int
+	ReconRetries       int
+	NucleiTimeoutSec   int
+	ArtifactsRoot      string
+	MinSeverity        string
+	SkipModules        string
+	OnlyModules        string
+	ValidationOnly     bool
+	Progress           func(string)
+	Notifier           Notifier
+	PreviousReportPath string
+	ReportFormats      string
+}
+
+// Notifier sends structured events.
+type Notifier interface {
+	SendGeneric(eventType string, payload any)
 }
 
 // Process executes safe planning and optional nuclei validation with approval gates.
@@ -251,6 +261,19 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
 
+	// Send exploit.modules.completed webhook
+	if opt.Notifier != nil {
+		opt.Notifier.SendGeneric("exploit.modules.completed", map[string]any{
+			"job_id":         job.ID,
+			"target":         job.Target,
+			"findings_count": len(exploitFindings),
+			"filtered_count": job.FilteredCount,
+			"risk_score":     job.RiskScore,
+			"module_count":   len(exploitModules),
+			"duration_sec":   job.ExploitDurationSec,
+		})
+	}
+
 	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
@@ -258,7 +281,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
 	}
-	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir); rpErr != nil {
+	rptOpts := exploit.ReportOptions{
+		Formats:            opt.ReportFormats,
+		PreviousReportPath: opt.PreviousReportPath,
+	}
+	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir, rptOpts); rpErr != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
 		job.Error = fmt.Sprintf("write exploit report: %v", rpErr)
@@ -593,6 +620,8 @@ func registeredModuleInfos() []ModuleInfo {
 		{"js-endpoints", "Scores JS-discovered endpoint risk", true},
 		{"admin-surface", "Finds exposed admin/debug surfaces", true},
 		{"exposed-files", "Finds exposed sensitive files/config", true},
+		{"tls-audit", "Validates TLS certificate and handshake security", true},
+		{"dns-check", "Validates DNS/email security configuration", true},
 	}
 }
 
@@ -620,6 +649,8 @@ func registeredModuleInstances() []exploit.Module {
 		jsendpoints.New(),
 		adminsurface.New(),
 		exposedfiles.New(),
+		tlsaudit.New(),
+		dnscheck.New(),
 	}
 }
 

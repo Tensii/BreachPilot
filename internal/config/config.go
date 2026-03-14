@@ -10,22 +10,24 @@ import (
 )
 
 type Config struct {
-	WebhookURL        string
-	ReconWebhookURL   string
-	ExploitWebhookURL string
-	WebhookSecret     string
-	WebhookRetries    int
-	NucleiBin         string
-	ReconHarvestCmd   string
-	ReconTimeoutSec   int
-	ReconRetries      int
-	NucleiTimeoutSec  int
-	ArtifactsRoot     string
-	MinSeverity       string
-	SkipModules       string
-	OnlyModules       string
-	ValidationOnly    bool
-	ConfigPath        string
+	WebhookURL         string
+	ReconWebhookURL    string
+	ExploitWebhookURL  string
+	WebhookSecret      string
+	WebhookRetries     int
+	NucleiBin          string
+	ReconHarvestCmd    string
+	ReconTimeoutSec    int
+	ReconRetries       int
+	NucleiTimeoutSec   int
+	ArtifactsRoot      string
+	MinSeverity        string
+	SkipModules        string
+	OnlyModules        string
+	ValidationOnly     bool
+	ConfigPath         string
+	PreviousReportPath string
+	ReportFormats      string
 }
 
 func Load() Config {
@@ -43,22 +45,24 @@ func Load() Config {
 	}
 
 	return Config{
-		WebhookURL:        legacyWH,
-		ReconWebhookURL:   reconWH,
-		ExploitWebhookURL: exploitWH,
-		WebhookSecret:     os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
-		WebhookRetries:    getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
-		NucleiBin:         getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
-		ReconHarvestCmd:   getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
-		ReconTimeoutSec:   getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
-		ReconRetries:      getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
-		NucleiTimeoutSec:  getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
-		ArtifactsRoot:     getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
-		MinSeverity:       getEnv("BREACHPILOT_MIN_SEVERITY", ""),
-		SkipModules:       getEnv("BREACHPILOT_SKIP_MODULES", ""),
-		OnlyModules:       getEnv("BREACHPILOT_ONLY_MODULES", ""),
-		ValidationOnly:    getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
-		ConfigPath:        configPath,
+		WebhookURL:         legacyWH,
+		ReconWebhookURL:    reconWH,
+		ExploitWebhookURL:  exploitWH,
+		WebhookSecret:      os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
+		WebhookRetries:     getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
+		NucleiBin:          getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
+		ReconHarvestCmd:    getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
+		ReconTimeoutSec:    getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
+		ReconRetries:       getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
+		NucleiTimeoutSec:   getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
+		ArtifactsRoot:      getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
+		MinSeverity:        getEnv("BREACHPILOT_MIN_SEVERITY", ""),
+		SkipModules:        getEnv("BREACHPILOT_SKIP_MODULES", ""),
+		OnlyModules:        getEnv("BREACHPILOT_ONLY_MODULES", ""),
+		ValidationOnly:     getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
+		ConfigPath:         configPath,
+		PreviousReportPath: getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
+		ReportFormats:      getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
 	}
 }
 
@@ -144,8 +148,16 @@ func (c Config) RedactedSummary() string {
 	if onlyMods == "" {
 		onlyMods = "<none>"
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly)
+	prevReport := strings.TrimSpace(c.PreviousReportPath)
+	if prevReport == "" {
+		prevReport = "<empty>"
+	}
+	reportFormats := strings.TrimSpace(c.ReportFormats)
+	if reportFormats == "" {
+		reportFormats = "json,md,html"
+	}
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t previousReport=%s reportFormats=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, prevReport, reportFormats)
 }
 
 func loadEnvFile(path string) error {

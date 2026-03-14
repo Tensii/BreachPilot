@@ -26,20 +26,23 @@ func main() {
 	}
 	log.Println(cfg.RedactedSummary())
 	engOpt := engine.Options{
-		NucleiBin:        cfg.NucleiBin,
-		ReconHarvestCmd:  config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
-		ReconWebhookURL:  cfg.ReconWebhookURL,
-		ReconTimeoutSec:  cfg.ReconTimeoutSec,
-		ReconRetries:     cfg.ReconRetries,
-		NucleiTimeoutSec: cfg.NucleiTimeoutSec,
-		ArtifactsRoot:    cfg.ArtifactsRoot,
-		MinSeverity:      cfg.MinSeverity,
-		SkipModules:      cfg.SkipModules,
-		OnlyModules:      cfg.OnlyModules,
-		ValidationOnly:   cfg.ValidationOnly,
+		NucleiBin:          cfg.NucleiBin,
+		ReconHarvestCmd:    config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
+		ReconWebhookURL:    cfg.ReconWebhookURL,
+		ReconTimeoutSec:    cfg.ReconTimeoutSec,
+		ReconRetries:       cfg.ReconRetries,
+		NucleiTimeoutSec:   cfg.NucleiTimeoutSec,
+		ArtifactsRoot:      cfg.ArtifactsRoot,
+		MinSeverity:        cfg.MinSeverity,
+		SkipModules:        cfg.SkipModules,
+		OnlyModules:        cfg.OnlyModules,
+		ValidationOnly:     cfg.ValidationOnly,
+		PreviousReportPath: cfg.PreviousReportPath,
+		ReportFormats:      cfg.ReportFormats,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
+	engOpt.Notifier = nf
 
 	args := os.Args[1:]
 	if len(args) == 0 {

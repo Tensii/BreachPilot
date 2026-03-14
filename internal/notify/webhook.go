@@ -14,8 +14,9 @@ import (
 )
 
 type webhookEvent struct {
-	Name string
-	Job  *models.Job
+	Name    string
+	Job     *models.Job
+	Payload any // non-nil for generic events
 }
 
 type Webhook struct {
@@ -44,7 +45,11 @@ func (w *Webhook) Start() {
 
 func (w *Webhook) loop() {
 	for ev := range w.ch {
-		w.sendNow(ev.Name, ev.Job)
+		if ev.Payload != nil {
+			w.sendNowGeneric(ev.Name, ev.Payload)
+		} else {
+			w.sendNow(ev.Name, ev.Job)
+		}
 	}
 }
 
@@ -60,12 +65,38 @@ func (w *Webhook) Send(event string, job *models.Job) {
 	}
 }
 
+// SendGeneric sends an arbitrary payload as a webhook event.
+// Satisfies the engine.Notifier interface.
+func (w *Webhook) SendGeneric(eventType string, payload any) {
+	if w.URL == "" || payload == nil {
+		return
+	}
+	w.Start()
+	select {
+	case w.ch <- webhookEvent{Name: eventType, Payload: payload}:
+	default:
+	}
+}
+
 func (w *Webhook) sendNow(eventName string, job *models.Job) {
 	body := map[string]any{
 		"event": eventName,
 		"job":   job,
 		"ts":    time.Now().UTC().Format(time.RFC3339),
 	}
+	w.postJSON(body)
+}
+
+func (w *Webhook) sendNowGeneric(eventName string, payload any) {
+	body := map[string]any{
+		"event":   eventName,
+		"payload": payload,
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+	}
+	w.postJSON(body)
+}
+
+func (w *Webhook) postJSON(body map[string]any) {
 	b, _ := json.Marshal(body)
 
 	for attempt := 1; attempt <= w.Retries; attempt++ {

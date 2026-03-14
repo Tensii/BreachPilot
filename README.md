@@ -90,8 +90,37 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_ONLY_MODULES` (optional comma-separated allow-list; example: `cors-poc,js-endpoints`; overrides skip-list when set)
 - `BREACHPILOT_VALIDATION_ONLY` (optional bool; when true, only safe read-only modules run)
 - `BREACHPILOT_CONFIG` (optional path to env file)
+- `BREACHPILOT_PREVIOUS_REPORT` (optional path to previous `exploit_report.json` for diff/delta comparison)
+- `BREACHPILOT_REPORT_FORMATS` (comma-separated output formats: `json`, `md`, `html`; default: all three)
 
 ## Notes
 - CLI streams stage/log progress.
 - Full mode supports resume if recon summary already exists in the same job artifact path.
 - Each run writes `job_report.json` in the evidence directory.
+
+## New Modules (Phase 8)
+
+### `tls-audit`
+Validates TLS certificate and handshake security. Detects:
+- Expired certificates
+- Certificates expiring within 30 days
+- Self-signed certificates
+- Weak TLS versions (< TLS 1.2)
+- Certificate hostname mismatches
+
+### `dns-check`
+Validates DNS and email security configuration. Detects:
+- Missing SPF records
+- Overly permissive SPF (`+all`)
+- Missing DMARC records
+- DMARC policy set to `none`
+- Potentially dangling nameservers
+
+## Diff/Delta Comparison
+Set `BREACHPILOT_PREVIOUS_REPORT` to a previous `exploit_report.json` path. The report will include a **Changes Since Last Run** section showing new, resolved, and unchanged finding counts.
+
+## Tag Index
+Reports now include a **Tag Index** section with a table of all tags and their counts, sorted by frequency. Available in JSON (`by_tag` field), Markdown, and HTML reports.
+
+## Configurable Report Formats
+Set `BREACHPILOT_REPORT_FORMATS` to select which report formats to generate. Default is `json,md,html`. Example: `json,md` to skip HTML generation.
