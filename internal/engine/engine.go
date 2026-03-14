@@ -299,6 +299,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		StateManager:  sm,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
+	if ctx.Err() == context.Canceled {
+		job.Status = models.JobCancelled
+		job.FinishedAt = time.Now().UTC()
+		job.Error = "job cancelled"
+		_ = writeJobReport(job, opt.ArtifactsRoot)
+		return nil
+	}
 	preFilterCount := len(exploitFindings)
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
