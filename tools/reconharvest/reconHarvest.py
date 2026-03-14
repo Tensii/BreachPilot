@@ -3545,7 +3545,7 @@ class Runner:
                     continue
                 self._deliver_webhook_event(item)
 
-        self._webhook_worker = threading.Thread(target=_worker, name="recon-webhook", daemon=True)
+        self._webhook_worker = threading.Thread(target=_worker, name="recon-webhook", daemon=False)
         self._webhook_worker.start()
 
     def _next_retry_delay(self, attempt: int, headers: dict | None = None) -> float:
@@ -3635,7 +3635,7 @@ class Runner:
         self._webhook_stop.set()
         self._webhook_signal.set()
         if self._webhook_worker and self._webhook_worker.is_alive():
-            self._webhook_worker.join(timeout=1.0)
+            self._webhook_worker.join(timeout=12.0)
 
     def _notify(self, message: str, *, status: str = "info", stage: str = "", severity: str = "INFO", log_file: str = "") -> None:
         st = (status or "info").lower()
@@ -3763,24 +3763,30 @@ class Runner:
             prof = f"scan:{self.config.ffuf_rate}/thr:{self.config.ffuf_threads}"
             self.dashboard.set_context(output_dir=str(self.workdir), run_mode="--run", log_file=str(RUN_LOG_FILE) if RUN_LOG_FILE else "run.log", profile=prof)
             self.dashboard.set_stats(self.collect_stats())
-            self._notify(f"Run started | profile={prof}", status="info", stage="startup", severity="INFO", log_file=str(self.logs / "stage_status.jsonl"))
+            if not self.resume_mode:
+                self._notify(f"Run started | profile={prof}", status="info", stage="startup", severity="INFO", log_file=str(self.logs / "stage_status.jsonl"))
             for stage_name, fn in pipeline:
                 if SHUTTING_DOWN:
                     interrupted = True
                     break
+                # Record whether this stage was already done BEFORE running it.
+                # On resume, stages that were previously completed return immediately
+                # via is_done(); we suppress their "done" webhook to avoid spam.
+                already_done = self.resume_mode and self.is_done(stage_name)
                 self.dashboard.stage_start(stage_name)
                 self.dashboard.set_context(current_host="-", queue_depth=0, active_jobs=0, failed_jobs=0)
                 t0 = time.perf_counter()
                 fn()
                 dt = time.perf_counter() - t0
                 self.record_stage_status("pipeline", "completed", f"{stage_name} complete", duration_seconds=dt)
-                self._notify(
-                    f"Stage done | duration={dt:.1f}s",
-                    status="completed",
-                    stage=stage_name,
-                    severity="INFO",
-                    log_file=str(self.logs / "stage_status.jsonl"),
-                )
+                if not already_done:
+                    self._notify(
+                        f"Stage done | duration={dt:.1f}s",
+                        status="completed",
+                        stage=stage_name,
+                        severity="INFO",
+                        log_file=str(self.logs / "stage_status.jsonl"),
+                    )
                 stats = self.collect_stats()
                 self.dashboard.set_stats(stats)
                 self.dashboard.set_context(httpx_buckets=f"2xx={stats.get('httpx_2xx',0)} 3xx={stats.get('httpx_3xx',0)} 401={stats.get('httpx_401',0)} 403={stats.get('httpx_403',0)}")

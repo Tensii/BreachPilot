@@ -78,6 +78,23 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 	}
 }
 
+// Stop drains the pending webhook queue and shuts down the background worker.
+// Call this before the process exits to ensure queued events are delivered.
+func (w *Webhook) Stop() {
+	if w.URL == "" || w.ch == nil {
+		return
+	}
+	close(w.ch)
+	// Give the worker up to 10 seconds to flush remaining events.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(w.ch) == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func (w *Webhook) sendNow(eventName string, job *models.Job) {
 	body := map[string]any{
 		"event": eventName,

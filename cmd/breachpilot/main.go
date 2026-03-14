@@ -45,6 +45,7 @@ func main() {
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries}
 	nf.Start()
+	defer nf.Stop()
 	engOpt.Notifier = nf
 
 	args := os.Args[1:]

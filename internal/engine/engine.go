@@ -395,9 +395,14 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		// pass --resume so reconHarvest picks up where it left off.
 		// On a fresh run the dir was just created empty, so --overwrite is safe.
 		if hasPartialRecon(reconDir) {
-			argv = append(argv, job.Target, "--run", "-o", reconDir, "--resume", filepath.Join(reconDir, "run.log"), "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+			// Pass --resume <workdir> so reconHarvest picks up its existing state.
+			// Do NOT pass -o or the target positional arg; reconHarvest derives both
+			// from workspace_meta.json when --resume is used.
+			argv = append(argv, "--run", "--resume", reconDir,
+				"--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
 		} else {
-			argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite", "--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+			argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite",
+				"--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
 		}
 		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
 		if opt.ReconWebhookURL != "" {
