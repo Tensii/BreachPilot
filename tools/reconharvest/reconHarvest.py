@@ -1065,13 +1065,13 @@ class Runner:
 
         # Core report copies/merges
         self.write_md_report(reports / "osint_report.md", f"OSINT Report — {self.target}", [_read(self.intel / "osint_report.md")])
-        self.write_md_report(reports / "discovery.md", f"Discovery — {self.target}", [_read(self.intel / "endpoints_ranked.md"), _json_lines(self.cache / "dirsearch_normalized.json", "Dirsearch Normalized")])
+        self.write_md_report(reports / "discovery.md", f"Discovery — {self.target}", [_read(self.intel / "endpoints_ranked.md"), _json_lines(self.intel / "dirsearch_normalized.json", "Dirsearch Normalized")])
         self.write_md_report(reports / "urls_params.md", f"URLs & Params — {self.target}", [_read(self.intel / "params_ranked.md"), _read(self.urls / "urls_params.txt")])
         self.write_md_report(reports / "tech_summary.md", f"Tech Summary — {self.target}", [_read(self.intel / "tech_summary.md"), _read(self.intel / "tech_to_hosts.md"), _read(self.intel / "webserver_to_hosts.md")])
         self.write_md_report(reports / "secrets.md", f"Secrets — {self.target}", [_read(self.intel / "secrets_findings.md")])
         self.write_md_report(reports / "takeover.md", f"Takeover — {self.target}", [_read(self.workdir / "takeover_readable.md")])
         self.write_md_report(reports / "nuclei.md", f"Nuclei — {self.target}", [_read(self.workdir / "nuclei_readable.md"), _read(self.workdir / "nuclei_phase2_readable.md")])
-        self.write_md_report(reports / "vuln_surface.md", f"Vulnerability Surface — {self.target}", [_read(self.intel / "cors_findings.md"), _json_lines(self.cache / "bypass_403_findings.json", "403 Bypass"), _json_lines(self.cache / "xss_findings.json", "XSS"), _json_lines(self.cache / "graphql_findings.json", "GraphQL")])
+        self.write_md_report(reports / "vuln_surface.md", f"Vulnerability Surface — {self.target}", [_read(self.intel / "cors_findings.md"), _json_lines(self.intel / "bypass_403_findings.json", "403 Bypass"), _json_lines(self.intel / "xss_findings.json", "XSS"), _json_lines(self.intel / "graphql_findings.json", "GraphQL")])
 
         ranked_findings = self.prioritize_findings(self.dedup_findings(self.findings))
         findings_lines = []
@@ -1315,7 +1315,7 @@ class Runner:
         self.dashboard.set_context(source_running="dnsx", subtask_done=0, subtask_total=1)
         resolved = self.workdir / "resolved_subdomains.txt"
         dnsx_raw = self.workdir / "dnsx_raw.txt"
-        host_ip_map = self.cache / "dns_host_ip_map.json"
+        host_ip_map = self.intel / "dns_host_ip_map.json"
         self.touch_files(resolved, dnsx_raw)
         if self.dnsx_bin:
             # Prefer A-record output for host->IP mapping; keep host-only output as compatibility fallback.
@@ -1522,7 +1522,7 @@ class Runner:
             self.mark_done("cors")
             return
         live_hosts = self.workdir / "live_hosts.txt"
-        out_json = self.cache / "cors_findings.json"
+        out_json = self.intel / "cors_findings.json"
         out_md = self.intel / "cors_findings.md"
         hosts = [x.strip() for x in live_hosts.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if live_hosts.exists() else []
         findings: list[dict] = []
@@ -1818,7 +1818,7 @@ class Runner:
                 if not m:
                     continue
                 out.append({"source_file": p.name, "url": normalize_url_for_output(m.group("url")), "status": m.group("status"), "raw": line})
-        self.write_json(self.cache / "dirsearch_normalized.json", {"items": out})
+        self.write_json(self.intel / "dirsearch_normalized.json", {"items": out})
 
     def stage_discovery(self):
         global SHUTTING_DOWN
@@ -1994,7 +1994,7 @@ class Runner:
                 if len(examples[k]) < 3:
                     examples[k].append(u)
         out_md = self.intel / "params_ranked.md"
-        out_json = self.cache / "params_ranked.json"
+        out_json = self.intel / "params_ranked.json"
         if not cnt:
             out_md.write_text("# Parameter Ranking (Readable)\n\n_No param URLs found._\n", encoding="utf-8")
             self.write_json(out_json, {"total_unique_params": 0, "top": []})
@@ -2023,7 +2023,7 @@ class Runner:
             return
         jpath = self.workdir / "httpx_results.json"
         out_md = self.intel / "tech_summary.md"
-        out_json = self.cache / "tech_summary.json"
+        out_json = self.intel / "tech_summary.json"
         if not jpath.exists() or jpath.stat().st_size == 0:
             out_md.write_text("# Tech Summary\n\n_No httpx_results.json found._\n", encoding="utf-8")
             self.write_json(out_json, {"error": "no httpx json"})
@@ -2087,8 +2087,8 @@ class Runner:
                 if ws:
                     ws_to_hosts.setdefault(ws, set()).add(host)
                 host_rows.append({"host": host, "status_code": sc, "webserver": ws, "tech": techs})
-        (self.cache / "tech_to_hosts.json").write_text(json.dumps({k: sorted(v) for k, v in sorted(tech_to_hosts.items(), key=lambda x: (-len(x[1]), x[0].lower()))}, indent=2), encoding="utf-8")
-        (self.cache / "webserver_to_hosts.json").write_text(json.dumps({k: sorted(v) for k, v in sorted(ws_to_hosts.items(), key=lambda x: (-len(x[1]), x[0].lower()))}, indent=2), encoding="utf-8")
+        (self.intel / "tech_to_hosts.json").write_text(json.dumps({k: sorted(v) for k, v in sorted(tech_to_hosts.items(), key=lambda x: (-len(x[1]), x[0].lower()))}, indent=2), encoding="utf-8")
+        (self.intel / "webserver_to_hosts.json").write_text(json.dumps({k: sorted(v) for k, v in sorted(ws_to_hosts.items(), key=lambda x: (-len(x[1]), x[0].lower()))}, indent=2), encoding="utf-8")
         tech_md = ["# Technology → Hosts\n\n"]
         for tech, hosts in sorted(tech_to_hosts.items(), key=lambda x: (-len(x[1]), x[0].lower())):
             tech_md.append(f"## {tech} ({len(hosts)})\n")
@@ -2116,7 +2116,7 @@ class Runner:
             for row in sorted(legacy, key=lambda x: x["host"]):
                 legacy_md.append(f"- {row['host']} | webserver={row.get('webserver') or "-"} | tech={', '.join(row.get('tech') or [])}\n")
         (self.intel / "hosts_with_legacy_versions.md").write_text("".join(legacy_md), encoding="utf-8")
-        self.write_json(self.cache / "hosts_with_legacy_versions.json", {"count": len(legacy), "hosts": sorted([r["host"] for r in legacy])})
+        self.write_json(self.intel / "hosts_with_legacy_versions.json", {"count": len(legacy), "hosts": sorted([r["host"] for r in legacy])})
         self.record_stage_status("tech_host_mapping", "completed", "generated tech/webserver to host mapping")
         self.mark_done("tech_host_mapping")
 
@@ -2173,7 +2173,7 @@ class Runner:
             self.record_stage_status("nuclei_phase2", "skipped", "skip-nuclei enabled")
             self.mark_done("nuclei_phase2")
             return
-        ranked_json = self.cache / "endpoints_ranked.json"
+        ranked_json = self.intel / "endpoints_ranked.json"
         if not ranked_json.exists():
             self.record_stage_status("nuclei_phase2", "skipped", "endpoints_ranked.json missing")
             self.mark_done("nuclei_phase2")
@@ -2600,9 +2600,9 @@ class Runner:
         if self.is_done("endpoint_ranking"):
             return
         urls_all = self.urls / "urls_all.txt"
-        dirsearch_json = self.cache / "dirsearch_normalized.json"
+        dirsearch_json = self.intel / "dirsearch_normalized.json"
         out_md = self.intel / "endpoints_ranked.md"
-        out_json = self.cache / "endpoints_ranked.json"
+        out_json = self.intel / "endpoints_ranked.json"
         candidates: dict[str, dict] = {}
         def bump(u: str, add: int, src: str):
             c = candidates.setdefault(u, {"score": 0, "sources": set()})
@@ -2707,7 +2707,7 @@ class Runner:
             "takeover_summary": self.workdir / "takeover_summary.json",
         }
         cors_count = 0
-        cors_json = self.cache / "cors_findings.json"
+        cors_json = self.intel / "cors_findings.json"
         if cors_json.exists():
             try:
                 c = json.loads(cors_json.read_text(encoding="utf-8", errors="ignore"))
@@ -2773,23 +2773,23 @@ class Runner:
             "takeover": {"summary": str(self.workdir / "takeover_summary.json")},
             "intel": {
                 "params_ranked_md": str(self.intel / "params_ranked.md"),
-                "params_ranked_json": str(self.cache / "params_ranked.json"),
+                "params_ranked_json": str(self.intel / "params_ranked.json"),
                 "tech_summary_md": str(self.intel / "tech_summary.md"),
-                "tech_summary_json": str(self.cache / "tech_summary.json"),
+                "tech_summary_json": str(self.intel / "tech_summary.json"),
                 "tech_to_hosts_md": str(self.intel / "tech_to_hosts.md"),
-                "tech_to_hosts_json": str(self.cache / "tech_to_hosts.json"),
+                "tech_to_hosts_json": str(self.intel / "tech_to_hosts.json"),
                 "webserver_to_hosts_md": str(self.intel / "webserver_to_hosts.md"),
-                "webserver_to_hosts_json": str(self.cache / "webserver_to_hosts.json"),
+                "webserver_to_hosts_json": str(self.intel / "webserver_to_hosts.json"),
                 "hosts_with_legacy_versions_md": str(self.intel / "hosts_with_legacy_versions.md"),
-                "dirsearch_normalized_json": str(self.cache / "dirsearch_normalized.json"),
-                "dns_host_ip_map_json": str(self.cache / "dns_host_ip_map.json"),
+                "dirsearch_normalized_json": str(self.intel / "dirsearch_normalized.json"),
+                "dns_host_ip_map_json": str(self.intel / "dns_host_ip_map.json"),
                 "endpoints_ranked_md": str(self.intel / "endpoints_ranked.md"),
-                "endpoints_ranked_json": str(self.cache / "endpoints_ranked.json"),
-                "secrets_summary": str(self.cache / "secrets_summary.json"),
+                "endpoints_ranked_json": str(self.intel / "endpoints_ranked.json"),
+                "secrets_summary": str(self.intel / "secrets_summary.json"),
                 "cors_findings_md": str(self.intel / "cors_findings.md"),
-                "cors_findings_json": str(self.cache / "cors_findings.json"),
+                "cors_findings_json": str(self.intel / "cors_findings.json"),
                 "secrets_findings_md": str(self.intel / "secrets_findings.md"),
-                "secrets_findings_json": str(self.cache / "secrets_findings.json"),
+                "secrets_findings_json": str(self.intel / "secrets_findings.json"),
             },
             "status": {
                 "stage_status_jsonl": str(self.workdir / "stage_status.jsonl"),
@@ -2833,7 +2833,7 @@ class Runner:
             except Exception:
                 takeover_findings = 0
         cors_findings = 0
-        cors_json = self.cache / "cors_findings.json"
+        cors_json = self.intel / "cors_findings.json"
         if cors_json.exists():
             try:
                 data = json.loads(cors_json.read_text(encoding="utf-8", errors="ignore"))
@@ -2884,7 +2884,7 @@ class Runner:
                         buckets["other"] += 1
 
         legacy_hosts = 0
-        legacy_json = self.cache / "hosts_with_legacy_versions.json"
+        legacy_json = self.intel / "hosts_with_legacy_versions.json"
         if legacy_json.exists():
             try:
                 legacy_hosts = int(json.loads(legacy_json.read_text(encoding="utf-8", errors="ignore")).get("count") or 0)
@@ -2907,7 +2907,7 @@ class Runner:
                     skipped_hosts += 1
 
         _sf_count = 0
-        _sf_path = self.cache / "secrets_summary.json"
+        _sf_path = self.intel / "secrets_summary.json"
         if _sf_path.exists():
             try:
                 _sf_count = int(
@@ -2940,10 +2940,10 @@ class Runner:
             "httpx_403": buckets["403"],
             "httpx_other": buckets["other"],
             "secrets_findings": _sf_count,
-            "xss_findings": self._count_json_list(self.cache / "xss_findings.json"),
-            "bypass_403_findings": self._count_json_list(self.cache / "bypass_403_findings.json"),
-            "graphql_findings": self._count_json_list(self.cache / "graphql_findings.json"),
-            "github_dork_hits": self._count_json_list(self.cache / "github_dork_findings.json"),
+            "xss_findings": self._count_json_list(self.intel / "xss_findings.json"),
+            "bypass_403_findings": self._count_json_list(self.intel / "bypass_403_findings.json"),
+            "graphql_findings": self._count_json_list(self.intel / "graphql_findings.json"),
+            "github_dork_hits": self._count_json_list(self.intel / "github_dork_findings.json"),
         }
 
 
@@ -3117,7 +3117,7 @@ class Runner:
         urls = [x.strip() for x in params_file.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()][:self.config.dalfox_url_cap]
         targets_file = self.intel / "dalfox_targets.txt"
         targets_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
-        out_json = self.cache / "xss_findings.json"
+        out_json = self.intel / "xss_findings.json"
         self.run_tool("dalfox xss scan", [self.dalfox_bin, "file", str(targets_file), "--silence", "--skip-bav", "--worker", str(self.config.dalfox_workers), "--format", "json", "--output", str(out_json)], timeout=self.config.dalfox_timeout, allow_failure=True)
         data: list = []
         count = 0
@@ -3191,7 +3191,7 @@ class Runner:
                 self.record_stage_status("bypass_403", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
                 for f in futs:
                     f.cancel()
-        out_json=self.cache / "bypass_403_findings.json"
+        out_json=self.intel / "bypass_403_findings.json"
         self.write_json(out_json, findings)
         if hosts_403 and len(findings) == 0:
             self.record_stage_status("bypass_403", "warning", f"probed={len(hosts_403)} bypassed=0 errors={errors}")
@@ -3265,7 +3265,7 @@ class Runner:
                     self.record_stage_status("graphql", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
                     for f in futs:
                         f.cancel()
-        self.write_json(self.cache / "graphql_findings.json", findings)
+        self.write_json(self.intel / "graphql_findings.json", findings)
         if hosts and attempts > 0 and len(findings) == 0:
             self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} errors={errors}")
         else:
@@ -3364,7 +3364,7 @@ class Runner:
                 log(f"[!] github_dork: HTTP {e.code} on '{qt}'")
             except Exception as e:
                 log(f"[!] github_dork: error on '{qt}': {e}")
-        self.write_json(self.cache / "github_dork_findings.json", findings)
+        self.write_json(self.intel / "github_dork_findings.json", findings)
         self.record_stage_status("github_dork", "completed", f"queries={len(_GITHUB_DORK_QUERIES)} hits={len(findings)}")
         for f in findings[:200]:
             self.add_finding("github_dork", "MEDIUM", f.get("repo", ""), "GitHub dork hit", evidence=f"{f.get('query','')} -> {f.get('url','')}", confidence=65, tags=["osint","secrets"])
@@ -3419,7 +3419,7 @@ class Runner:
     def write_live_findings(self) -> None:
         out = self.workdir / "findings.md"
         sections=[]
-        for title, fn in [("## CORS Findings\n", self.cache / "cors_findings.json"), ("## 403 Bypasses\n", self.cache / "bypass_403_findings.json"), ("## XSS Findings\n", self.cache / "xss_findings.json"), ("## GraphQL Introspection Open\n", self.cache / "graphql_findings.json")]:
+        for title, fn in [("## CORS Findings\n", self.intel / "cors_findings.json"), ("## 403 Bypasses\n", self.intel / "bypass_403_findings.json"), ("## XSS Findings\n", self.intel / "xss_findings.json"), ("## GraphQL Introspection Open\n", self.intel / "graphql_findings.json")]:
             if not fn.exists():
                 continue
             try:
