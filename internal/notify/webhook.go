@@ -24,9 +24,11 @@ type Webhook struct {
 	Secret  string
 	Retries int
 
-	ch     chan webhookEvent
-	once   sync.Once
-	client *http.Client
+	ch       chan webhookEvent
+	once     sync.Once
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	client   *http.Client
 }
 
 func (w *Webhook) Start() {
@@ -39,11 +41,13 @@ func (w *Webhook) Start() {
 		}
 		w.ch = make(chan webhookEvent, 200)
 		w.client = &http.Client{Timeout: 6 * time.Second}
+		w.wg.Add(1)
 		go w.loop()
 	})
 }
 
 func (w *Webhook) loop() {
+	defer w.wg.Done()
 	for ev := range w.ch {
 		if ev.Payload != nil {
 			w.sendNowGeneric(ev.Name, ev.Payload)
@@ -81,18 +85,24 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 // Stop drains the pending webhook queue and shuts down the background worker.
 // Call this before the process exits to ensure queued events are delivered.
 func (w *Webhook) Stop() {
-	if w.URL == "" || w.ch == nil {
+	if w.URL == "" {
 		return
 	}
-	close(w.ch)
-	// Give the worker up to 10 seconds to flush remaining events.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(w.ch) == 0 {
-			break
+	w.stopOnce.Do(func() {
+		if w.ch == nil {
+			return
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		close(w.ch)
+		done := make(chan struct{})
+		go func() {
+			w.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	})
 }
 
 func (w *Webhook) sendNow(eventName string, job *models.Job) {
