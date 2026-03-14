@@ -233,9 +233,9 @@ func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, st
 		"event":   body["event"],
 		"attempt": attempt,
 		"status":  status,
-		"error":   errMsg,
-		"url":     w.URL,
-		"resp":    respBody,
+		"error":   redactSensitive(errMsg),
+		"url":     redactURL(w.URL),
+		"resp":    redactSensitive(respBody),
 	}
 	b, _ := json.Marshal(entry)
 	w.logMu.Lock()
@@ -249,7 +249,31 @@ func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, st
 	_, _ = f.Write(append(b, '\n'))
 }
 
+func redactURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if i := strings.Index(raw, "/api/webhooks/"); i > 0 {
+		return raw[:i] + "/api/webhooks/<redacted>"
+	}
+	if len(raw) > 16 {
+		return raw[:8] + "...<redacted>"
+	}
+	return "<redacted>"
+}
 
+func redactSensitive(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	l := strings.ToLower(s)
+	if strings.Contains(l, "token") || strings.Contains(l, "webhook") || strings.Contains(l, "authorization") {
+		return "<redacted>"
+	}
+	return s
+}
 
 func signHMACSHA256(payload []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))

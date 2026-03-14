@@ -3,6 +3,8 @@ package engine
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +43,15 @@ import (
 	"github.com/google/shlex"
 )
 
+const (
+	ErrTimeout      = "timeout"
+	ErrInvalidInput = "invalid-input"
+	ErrToolMissing  = "tool-missing"
+	ErrNetwork      = "network-blocked"
+	ErrParse        = "parse-failed"
+	ErrExecution    = "execution-failed"
+)
+
 type Options struct {
 	NucleiBin                  string
 	ReconHarvestCmd            string
@@ -62,6 +73,8 @@ type Options struct {
 	WebhookFindings            bool
 	WebhookModuleProgress      bool
 	WebhookFindingsMinSeverity string
+	ModuleTimeoutSec           int
+	ModuleRetries              int
 }
 
 // Notifier sends structured events.
@@ -90,7 +103,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	if err != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
-		job.Error = fmt.Sprintf("state manager init failed: %v", err)
+		setJobError(job, ErrExecution, fmt.Sprintf("state manager init failed: %v", err))
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
 	}
@@ -98,7 +111,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if err := scope.ValidateTarget(t); err != nil {
 			job.Status = models.JobFailed
 			job.FinishedAt = time.Now().UTC()
-			job.Error = fmt.Sprintf("target validation failed: %v", err)
+			setJobError(job, ErrInvalidInput, fmt.Sprintf("target validation failed: %v", err))
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
 		}
@@ -147,11 +160,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if err := scope.ValidateTarget(t); err != nil {
 			job.Status = models.JobFailed
 			job.FinishedAt = time.Now().UTC()
-			job.Error = fmt.Sprintf("target validation failed: %v", err)
+			setJobError(job, ErrInvalidInput, fmt.Sprintf("target validation failed: %v", err))
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
 		}
 	}
+
+	_ = writeRuntimeConfigSnapshot(job, opt)
 
 	plan := []string{
 		fmt.Sprintf("Load live hosts from: %s", rs.Live),
@@ -164,7 +179,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if policy.HasIntrusive(job.Templates) {
 			job.Status = models.JobRejected
 			job.FinishedAt = time.Now().UTC()
-			job.Error = "intrusive templates are blocked in safe_mode"
+			setJobError(job, ErrInvalidInput, "intrusive templates are blocked in safe_mode")
 			job.PlanPreview = plan
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
@@ -173,7 +188,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if !job.ApproveIntrusive {
 			job.Status = models.JobRejected
 			job.FinishedAt = time.Now().UTC()
-			job.Error = "intrusive mode requested without approve_intrusive=true"
+			setJobError(job, ErrInvalidInput, "intrusive mode requested without approve_intrusive=true")
 			job.PlanPreview = plan
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
@@ -181,7 +196,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if strings.TrimSpace(job.ApprovalTicket) == "" {
 			job.Status = models.JobRejected
 			job.FinishedAt = time.Now().UTC()
-			job.Error = "approval_ticket missing for intrusive mode"
+			setJobError(job, ErrInvalidInput, "approval_ticket missing for intrusive mode")
 			job.PlanPreview = plan
 			_ = writeJobReport(job, opt.ArtifactsRoot)
 			return nil
@@ -255,14 +270,14 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			if ctx.Err() == context.Canceled {
 				job.Status = models.JobCancelled
 				job.FinishedAt = time.Now().UTC()
-				job.Error = "job cancelled"
+				setJobError(job, "cancelled", "job cancelled")
 				_ = writeJobReport(job, opt.ArtifactsRoot)
 				return nil
 			}
 			if nucleiCtx.Err() == context.DeadlineExceeded {
 				job.Status = models.JobFailed
 				job.FinishedAt = time.Now().UTC()
-				job.Error = "nuclei timeout exceeded"
+				setJobError(job, ErrTimeout, "nuclei timeout exceeded")
 				_ = writeJobReport(job, opt.ArtifactsRoot)
 				return nil
 			}
@@ -274,7 +289,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			if opt.Progress != nil {
 				opt.Progress("exploit.warning nuclei exited non-zero with partial results; continuing")
 			}
-			job.Error = fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr)
+			setJobError(job, ErrExecution, fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr))
 		}
 
 		job.ExploitDurationSec = time.Since(exploitStart).Seconds()
@@ -295,17 +310,19 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		exploitModules = filterValidationOnly(exploitModules)
 	}
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
-		ArtifactsRoot: opt.ArtifactsRoot,
-		Progress:      opt.Progress,
-		SafeMode:      job.SafeMode,
-		MaxParallel:   0,
-		StateManager:  sm,
+		ArtifactsRoot:    opt.ArtifactsRoot,
+		Progress:         opt.Progress,
+		SafeMode:         job.SafeMode,
+		MaxParallel:      0,
+		StateManager:     sm,
+		ModuleTimeoutSec: opt.ModuleTimeoutSec,
+		ModuleRetries:    opt.ModuleRetries,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
 		job.Status = models.JobCancelled
 		job.FinishedAt = time.Now().UTC()
-		job.Error = "job cancelled"
+		setJobError(job, "cancelled", "job cancelled")
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return nil
 	}
@@ -340,20 +357,42 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		})
 
 		if opt.WebhookFindings {
+			batchCounts := map[string]int{"INFO": 0, "LOW": 0, "MEDIUM": 0}
+			batchSample := make([]map[string]any, 0, 5)
 			for _, f := range exploitFindings {
 				if !severityAtLeast(f.Severity, opt.WebhookFindingsMinSeverity) {
 					continue
 				}
-				opt.Notifier.SendGeneric("exploit.finding", map[string]any{
-					"job_id":      job.ID,
-					"target":      f.Target,
-					"module":      f.Module,
-					"severity":    f.Severity,
-					"title":       f.Title,
-					"confidence":  f.Confidence,
-					"validation":  f.Validation,
-					"evidence":    f.Evidence,
-					"report_path": job.ExploitReportPath,
+				sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+				if sev == "CRITICAL" || sev == "HIGH" {
+					opt.Notifier.SendGeneric("exploit.finding", map[string]any{
+						"job_id":      job.ID,
+						"target":      f.Target,
+						"module":      f.Module,
+						"severity":    f.Severity,
+						"title":       f.Title,
+						"confidence":  f.Confidence,
+						"validation":  f.Validation,
+						"evidence":    f.Evidence,
+						"report_path": job.ExploitReportPath,
+					})
+					continue
+				}
+				if _, ok := batchCounts[sev]; ok {
+					batchCounts[sev]++
+					if len(batchSample) < 5 {
+						batchSample = append(batchSample, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": f.Target})
+					}
+				}
+			}
+			if batchCounts["INFO"]+batchCounts["LOW"]+batchCounts["MEDIUM"] > 0 {
+				opt.Notifier.SendGeneric("exploit.findings.batch", map[string]any{
+					"job_id":  job.ID,
+					"target":  job.Target,
+					"counts":  batchCounts,
+					"sample":  batchSample,
+					"min_sev": opt.WebhookFindingsMinSeverity,
+					"note":    "low-priority findings aggregated",
 				})
 			}
 		}
@@ -362,7 +401,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
-		job.Error = err.Error()
+		setJobError(job, ErrExecution, err.Error())
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
 	}
@@ -375,7 +414,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	if reportPath, rpErr := exploit.WriteExploitReport(exploitFindings, job, artDir, rptOpts); rpErr != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
-		job.Error = fmt.Sprintf("write exploit report: %v", rpErr)
+		setJobError(job, ErrExecution, fmt.Sprintf("write exploit report: %v", rpErr))
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return rpErr
 	} else {
@@ -387,9 +426,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	if err := writeJobReport(job, opt.ArtifactsRoot); err != nil {
 		job.Status = models.JobFailed
 		job.FinishedAt = time.Now().UTC()
-		job.Error = fmt.Sprintf("write job report: %v", err)
+		setJobError(job, ErrExecution, fmt.Sprintf("write job report: %v", err))
 		return err
 	}
+	_ = writeArtifactManifest(job, opt.ArtifactsRoot)
+	_ = writePerformanceBaseline(job, opt.ArtifactsRoot)
 	return nil
 }
 
@@ -473,13 +514,13 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		if ctx.Err() == context.Canceled {
 			job.Status = models.JobCancelled
 			job.FinishedAt = time.Now().UTC()
-			job.Error = "job cancelled during recon phase"
+			setJobError(job, "cancelled", "job cancelled during recon phase")
 			return "", nil
 		}
 		if reconCtx.Err() == context.DeadlineExceeded {
 			job.Status = models.JobFailed
 			job.FinishedAt = time.Now().UTC()
-			job.Error = "recon timeout exceeded"
+			setJobError(job, ErrTimeout, "recon timeout exceeded")
 			return "", nil
 		}
 		if opt.Progress != nil {
@@ -904,6 +945,97 @@ func filterModulesBySkipList(modules []exploit.Module, skipList string) []exploi
 		}
 	}
 	return out
+}
+
+func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
+	if job == nil || strings.TrimSpace(opt.ArtifactsRoot) == "" {
+		return nil
+	}
+	path := filepath.Join(opt.ArtifactsRoot, job.ID, "runtime_config.json")
+	payload := map[string]any{
+		"schema_version": models.SchemaVersion,
+		"saved_at":       time.Now().UTC().Format(time.RFC3339),
+		"job_id":         job.ID,
+		"target":         job.Target,
+		"mode":           job.Mode,
+		"config": map[string]any{
+			"scan_profile":                  opt.ScanProfile,
+			"min_severity":                  opt.MinSeverity,
+			"skip_modules":                  opt.SkipModules,
+			"only_modules":                  opt.OnlyModules,
+			"validation_only":               opt.ValidationOnly,
+			"report_formats":                opt.ReportFormats,
+			"rate_limit_rps":                opt.RateLimitRPS,
+			"webhook_findings":              opt.WebhookFindings,
+			"webhook_module_progress":       opt.WebhookModuleProgress,
+			"webhook_findings_min_severity": opt.WebhookFindingsMinSeverity,
+		},
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, b, 0o644)
+}
+
+func setJobError(job *models.Job, code string, msg string) {
+	if job == nil {
+		return
+	}
+	job.ErrorCode = strings.TrimSpace(code)
+	job.Error = strings.TrimSpace(msg)
+}
+
+func writeArtifactManifest(job *models.Job, artifactsRoot string) error {
+	if job == nil {
+		return nil
+	}
+	base := filepath.Join(artifactsRoot, job.ID)
+	files := []string{job.ReconPath, job.ExploitFindingsPath, job.ExploitReportPath, job.ExploitHTMLReportPath, job.ReportPath, filepath.Join(base, "nuclei_findings.jsonl")}
+	entries := make([]map[string]any, 0, len(files))
+	for _, f := range files {
+		p := strings.TrimSpace(f)
+		if p == "" {
+			continue
+		}
+		h, sz, err := fileHash(p)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, map[string]any{"path": p, "sha256": h, "size": sz})
+	}
+	payload := map[string]any{"job_id": job.ID, "created_at": time.Now().UTC().Format(time.RFC3339), "files": entries}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	return atomicWriteFile(filepath.Join(base, "artifact_manifest.json"), b, 0o644)
+}
+
+func writePerformanceBaseline(job *models.Job, artifactsRoot string) error {
+	if job == nil {
+		return nil
+	}
+	payload := map[string]any{
+		"job_id":               job.ID,
+		"target":               job.Target,
+		"created_at":           time.Now().UTC().Format(time.RFC3339),
+		"recon_duration_sec":   job.ReconDurationSec,
+		"exploit_duration_sec": job.ExploitDurationSec,
+		"module_telemetry":     job.ModuleTelemetry,
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	return atomicWriteFile(filepath.Join(artifactsRoot, job.ID, "performance_baseline.json"), b, 0o644)
+}
+
+func fileHash(path string) (string, int64, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", 0, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), st.Size(), nil
 }
 
 func severityAtLeast(sev, min string) bool {

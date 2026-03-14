@@ -117,6 +117,26 @@ func (p *discordProvider) Format(body map[string]any) map[string]any {
 		embed["title"] = "Exploit module progress"
 		embed["color"] = 0x95a5a6
 		embed["description"] = fmt.Sprintf("job_id=%s\ntarget=%s\nstage=%s\nmodule=%s\n%s", jobID, target, stage, module, detail)
+	case "exploit.findings.batch":
+		jobID, _ := payloadRaw["job_id"].(string)
+		target, _ := payloadRaw["target"].(string)
+		counts, _ := payloadRaw["counts"].(map[string]any)
+		sample, _ := payloadRaw["sample"].([]any)
+		desc := fmt.Sprintf("job_id=%s\ntarget=%s\naggregated: INFO=%v LOW=%v MEDIUM=%v", jobID, target, counts["INFO"], counts["LOW"], counts["MEDIUM"])
+		if len(sample) > 0 {
+			desc += "\nsample:"
+			for i, it := range sample {
+				if i >= 3 {
+					break
+				}
+				if m, ok := it.(map[string]any); ok {
+					desc += fmt.Sprintf("\n- [%v] %v", m["severity"], m["title"])
+				}
+			}
+		}
+		embed["title"] = "Exploit low-priority findings (batched)"
+		embed["color"] = 0x3498db
+		embed["description"] = desc
 	case "exploit.modules.completed":
 		jobID, _ := payloadRaw["job_id"].(string)
 		target, _ := payloadRaw["target"].(string)
@@ -221,7 +241,7 @@ func (p *slackProvider) Format(body map[string]any) map[string]any {
 			"text": text,
 			"attachments": []map[string]any{
 				{
-					"text": desc,
+					"text":  desc,
 					"color": slackColor(event, job.Error != ""),
 				},
 			},

@@ -116,6 +116,7 @@ type Job struct {
 	CreatedAt             time.Time                `json:"created_at"`
 	StartedAt             time.Time                `json:"started_at,omitempty"`
 	FinishedAt            time.Time                `json:"finished_at,omitempty"`
+	ErrorCode             string                   `json:"error_code,omitempty"`
 	Error                 string                   `json:"error,omitempty"`
 	PlanPreview           []string                 `json:"plan_preview,omitempty"`
 	EvidencePath          string                   `json:"evidence_path,omitempty"`

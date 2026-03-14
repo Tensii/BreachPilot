@@ -33,6 +33,8 @@ type Config struct {
 	WebhookFindings            bool
 	WebhookModuleProgress      bool
 	WebhookFindingsMinSeverity string
+	ModuleTimeoutSec           int
+	ModuleRetries              int
 }
 
 func Load() Config {
@@ -73,6 +75,8 @@ func Load() Config {
 		WebhookFindings:            getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
 		WebhookModuleProgress:      getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", true),
 		WebhookFindingsMinSeverity: getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
+		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
+		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
 	}
 }
 
@@ -122,6 +126,12 @@ func (c Config) Validate() error {
 	}
 	if c.NucleiTimeoutSec <= 0 {
 		return fmt.Errorf("invalid BREACHPILOT_NUCLEI_TIMEOUT_SEC: must be > 0")
+	}
+	if c.ModuleTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_MODULE_TIMEOUT_SEC: must be > 0")
+	}
+	if c.ModuleRetries < 0 {
+		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")
 	}
 	if strings.TrimSpace(c.NucleiBin) != "" {
 		if _, err := exec.LookPath(c.NucleiBin); err != nil {

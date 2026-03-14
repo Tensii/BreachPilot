@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -45,6 +49,8 @@ func main() {
 		WebhookFindings:            cfg.WebhookFindings,
 		WebhookModuleProgress:      cfg.WebhookModuleProgress,
 		WebhookFindingsMinSeverity: cfg.WebhookFindingsMinSeverity,
+		ModuleTimeoutSec:           cfg.ModuleTimeoutSec,
+		ModuleRetries:              cfg.ModuleRetries,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
 	nf.Start()
@@ -68,6 +74,12 @@ func main() {
 	}
 	if len(args) == 1 && args[0] == "list-modules" {
 		listModules(engOpt)
+		return
+	}
+	if len(args) == 1 && args[0] == "doctor" {
+		if err := runDoctor(cfg, engOpt); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 
@@ -137,6 +149,9 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		}
 		if _, err := os.Stat(reconPath); err != nil {
 			return fmt.Errorf("summary path not accessible: %w", err)
+		}
+		if err := validateArtifactManifestForPath(reconPath); err != nil {
+			return fmt.Errorf("artifact integrity validation failed: %w", err)
 		}
 		// Derive target from summary for directory naming
 		if target == "" {
@@ -285,6 +300,129 @@ func printJobJSON(job *models.Job) error {
 	return nil
 }
 
+func runDoctor(cfg config.Config, opt engine.Options) error {
+	fmt.Println("[doctor] running checks...")
+	ok := true
+	check := func(name string, err error) {
+		if err != nil {
+			ok = false
+			fmt.Printf("[doctor] FAIL %-24s %v\n", name+":", err)
+		} else {
+			fmt.Printf("[doctor] OK   %-24s\n", name)
+		}
+	}
+
+	_, e1 := exec.LookPath("python3")
+	check("python3 in PATH", e1)
+	_, e2 := exec.LookPath(opt.NucleiBin)
+	check("nuclei in PATH", e2)
+	if strings.TrimSpace(opt.ReconHarvestCmd) == "" {
+		check("recon command configured", fmt.Errorf("BREACHPILOT_RECONHARVEST_CMD is empty"))
+	} else {
+		probe := exec.Command("/bin/bash", "-lc", opt.ReconHarvestCmd+" --help >/dev/null 2>&1")
+		check("recon command executable", probe.Run())
+	}
+	check("artifacts writable", ensureWritableDir(opt.ArtifactsRoot))
+	check("recon webhook reachable", checkWebhookReachable(cfg.ReconWebhookURL))
+	check("exploit webhook reachable", checkWebhookReachable(cfg.ExploitWebhookURL))
+
+	if !ok {
+		return fmt.Errorf("doctor failed: fix issues above")
+	}
+	fmt.Println("[doctor] all checks passed")
+	return nil
+}
+
+func ensureWritableDir(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("empty path")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	p := filepath.Join(dir, ".writecheck.tmp")
+	if err := os.WriteFile(p, []byte("ok"), 0o644); err != nil {
+		return err
+	}
+	_ = os.Remove(p)
+	return nil
+}
+
+func checkWebhookReachable(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("webhook URL is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("invalid URL")
+	}
+	host := u.Host
+	if strings.Contains(host, ":") {
+		host = strings.Split(host, ":")[0]
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "443"), 3*time.Second)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func validateArtifactManifestForPath(anyPath string) error {
+	p := filepath.Clean(strings.TrimSpace(anyPath))
+	if p == "" {
+		return nil
+	}
+	// walk up to find artifact_manifest.json in current/parent directories
+	d := p
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		d = filepath.Dir(p)
+	}
+	for i := 0; i < 4; i++ {
+		mf := filepath.Join(d, "artifact_manifest.json")
+		if _, err := os.Stat(mf); err == nil {
+			return verifyManifest(mf)
+		}
+		next := filepath.Dir(d)
+		if next == d || next == "." {
+			break
+		}
+		d = next
+	}
+	return nil
+}
+
+func verifyManifest(manifestPath string) error {
+	b, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	var m struct {
+		Files []struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	for _, f := range m.Files {
+		if strings.TrimSpace(f.Path) == "" || strings.TrimSpace(f.SHA256) == "" {
+			continue
+		}
+		raw, err := os.ReadFile(f.Path)
+		if err != nil {
+			return fmt.Errorf("missing file in manifest: %s", f.Path)
+		}
+		h := sha256.Sum256(raw)
+		if hex.EncodeToString(h[:]) != f.SHA256 {
+			return fmt.Errorf("hash mismatch for %s", f.Path)
+		}
+	}
+	return nil
+}
+
 func runSetup(opt engine.Options) error {
 	fmt.Println("[setup] checking runtime dependencies...")
 	checks := []struct {
@@ -382,6 +520,7 @@ func printUsage() {
 	  breachpilot file <summary.json> [--json]
 	  breachpilot resume <path/to/.breachpilot.state> [--json]
 	  breachpilot list-modules
+	  breachpilot doctor
 
 	Examples:
 	  breachpilot full example.com
@@ -395,6 +534,18 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		return fmt.Errorf("missing state file path. Use: breachpilot resume <path/to/.breachpilot.state>")
 	}
 	statePath := strings.TrimSpace(args[0])
+	if statePath == "" {
+		return fmt.Errorf("empty resume path")
+	}
+	if filepath.Base(statePath) != ".breachpilot.state" {
+		return fmt.Errorf("invalid resume file: expected .breachpilot.state, got %s", filepath.Base(statePath))
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		return fmt.Errorf("resume state file not accessible: %w", err)
+	}
+	if err := validateArtifactManifestForPath(statePath); err != nil {
+		return fmt.Errorf("artifact integrity validation failed: %w", err)
+	}
 
 	// Load state from the .breachpilot.state file
 	sm, err := engine.NewStateManagerFromPath(statePath)
