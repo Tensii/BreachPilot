@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	cspaudit "breachpilot/internal/exploit/modules/cspaudit"
 	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
+	graphqlabuse "breachpilot/internal/exploit/modules/graphqlabuse"
 	headers "breachpilot/internal/exploit/modules/headers"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
@@ -33,9 +35,13 @@ import (
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
+	privpath "breachpilot/internal/exploit/modules/privpath"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
+	sessionabuse "breachpilot/internal/exploit/modules/sessionabuse"
+	statechange "breachpilot/internal/exploit/modules/statechange"
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
+	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -308,6 +314,14 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	exploitModules := filterModules(registeredModuleInstances(), opt.OnlyModules, opt.SkipModules)
 	if opt.ValidationOnly {
 		exploitModules = filterValidationOnly(exploitModules)
+	}
+	exploitModules = prioritizeModules(exploitModules, rs)
+	if opt.Progress != nil {
+		names := make([]string, 0, len(exploitModules))
+		for _, m := range exploitModules {
+			names = append(names, m.Name())
+		}
+		opt.Progress("exploit.module.order " + strings.Join(names, ","))
 	}
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot:    opt.ArtifactsRoot,
@@ -848,6 +862,11 @@ func registeredModuleInfos() []ModuleInfo {
 		{"dns-check", "Validates DNS/email security configuration", true},
 		{"csp-audit", "Validates Content Security Policy headers", true},
 		{"http-response", "Detects HTTP response anomalies and information leaks", true},
+		{"session-abuse", "Detects risky session/token handling surfaces", true},
+		{"privilege-path", "Maps probable privilege escalation endpoint paths", true},
+		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true},
+		{"state-change", "Detects risky state-changing endpoint patterns", true},
+		{"upload-abuse", "Detects upload attack surface and retrieval risks", true},
 	}
 }
 
@@ -879,6 +898,11 @@ func registeredModuleInstances() []exploit.Module {
 		dnscheck.New(),
 		cspaudit.New(),
 		httpresponse.New(),
+		sessionabuse.New(),
+		privpath.New(),
+		graphqlabuse.New(),
+		statechange.New(),
+		uploadabuse.New(),
 	}
 }
 
@@ -889,6 +913,40 @@ func RegisteredModules() []string {
 	for _, m := range infos {
 		out = append(out, m.Name)
 	}
+	return out
+}
+
+func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.Module {
+	if len(mods) <= 1 {
+		return mods
+	}
+	// Lower score executes earlier.
+	score := map[string]int{}
+	for _, m := range mods {
+		score[strings.ToLower(m.Name())] = 100
+	}
+	// Push high-value Phase 13 modules earlier when relevant intel exists.
+	if strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
+		score["privilege-path"] = 20
+		score["session-abuse"] = 25
+	}
+	if strings.TrimSpace(rs.URLs.All) != "" {
+		score["graphql-abuse"] = 22
+	}
+	// keep broad context modules early too.
+	score["api-surface"] = 18
+	score["admin-surface"] = 24
+
+	out := make([]exploit.Module, len(mods))
+	copy(out, mods)
+	sort.SliceStable(out, func(i, j int) bool {
+		a := score[strings.ToLower(out[i].Name())]
+		b := score[strings.ToLower(out[j].Name())]
+		if a != b {
+			return a < b
+		}
+		return out[i].Name() < out[j].Name()
+	})
 	return out
 }
 
