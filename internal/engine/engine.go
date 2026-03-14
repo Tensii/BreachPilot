@@ -80,6 +80,15 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 	job.StartedAt = time.Now().UTC()
 	job.Status = models.JobRunning
+
+	sm, err := NewStateManager(opt.ArtifactsRoot, job.ID)
+	if err != nil {
+		job.Status = models.JobFailed
+		job.FinishedAt = time.Now().UTC()
+		job.Error = fmt.Sprintf("state manager init failed: %v", err)
+		_ = writeJobReport(job, opt.ArtifactsRoot)
+		return err
+	}
 	if t := strings.TrimSpace(job.Target); t != "" && t != "from-summary" {
 		if err := scope.ValidateTarget(t); err != nil {
 			job.Status = models.JobFailed
@@ -97,20 +106,26 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 
 	if strings.EqualFold(strings.TrimSpace(job.Mode), "full") {
-		notify("recon.started")
-		reconStart := time.Now()
-		summaryPath, err := runReconHarvest(ctx, job, opt)
-		job.ReconDurationSec = time.Since(reconStart).Seconds()
-		if err != nil {
-			_ = writeJobReport(job, opt.ArtifactsRoot)
-			return err
+		if sm.IsReconCompleted() {
+			notify("recon.resumed")
+			job.ReconPath = filepath.Join(opt.ArtifactsRoot, job.ID, "summary.json")
+		} else {
+			notify("recon.started")
+			reconStart := time.Now()
+			summaryPath, err := runReconHarvest(ctx, job, opt)
+			job.ReconDurationSec = time.Since(reconStart).Seconds()
+			if err != nil {
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return err
+			}
+			if job.Status == models.JobCancelled || job.Status == models.JobFailed {
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return nil
+			}
+			job.ReconPath = summaryPath
+			notify("recon.completed")
+			_ = sm.MarkReconCompleted()
 		}
-		if job.Status == models.JobCancelled || job.Status == models.JobFailed {
-			_ = writeJobReport(job, opt.ArtifactsRoot)
-			return nil
-		}
-		job.ReconPath = summaryPath
-		notify("recon.completed")
 	}
 
 	rs, err := validateReconSummary(job.ReconPath, job.Target)
@@ -204,51 +219,59 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		args = append(args, "-severity", "medium,high,critical")
 	}
 
-	notify("exploit.started")
-	exploitStart := time.Now()
-	nucleiCtx := ctx
-	cancelNuclei := func() {}
-	if opt.NucleiTimeoutSec > 0 {
-		nucleiCtx, cancelNuclei = context.WithTimeout(ctx, time.Duration(opt.NucleiTimeoutSec)*time.Second)
-	}
-	defer cancelNuclei()
+	stOut, errOut := os.Stat(outJSONL)
+	if sm.IsNucleiCompleted() && errOut == nil && stOut.Size() > 0 {
+		notify("exploit.nuclei.resumed")
+	} else {
+		notify("exploit.started")
+		exploitStart := time.Now()
+		nucleiCtx := ctx
+		cancelNuclei := func() {}
+		if opt.NucleiTimeoutSec > 0 {
+			nucleiCtx, cancelNuclei = context.WithTimeout(ctx, time.Duration(opt.NucleiTimeoutSec)*time.Second)
+		}
+		defer cancelNuclei()
 
-	cmd := exec.CommandContext(nucleiCtx, opt.NucleiBin, args...)
-	logFile, err := os.Create(outLog)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-	mw := io.MultiWriter(logFile, &progressWriter{stage: "exploit.log", cb: opt.Progress})
-	cmd.Stdout = mw
-	cmd.Stderr = mw
+		cmd := exec.CommandContext(nucleiCtx, opt.NucleiBin, args...)
+		logFile, err := os.Create(outLog)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		mw := io.MultiWriter(logFile, &progressWriter{stage: "exploit.log", cb: opt.Progress})
+		cmd.Stdout = mw
+		cmd.Stderr = mw
 
-	nucleiErr := cmd.Run()
-	if nucleiErr != nil {
+		nucleiErr := cmd.Run()
+		if nucleiErr != nil {
+			job.ExploitDurationSec = time.Since(exploitStart).Seconds()
+			if ctx.Err() == context.Canceled {
+				job.Status = models.JobCancelled
+				job.FinishedAt = time.Now().UTC()
+				job.Error = "job cancelled"
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return nil
+			}
+			if nucleiCtx.Err() == context.DeadlineExceeded {
+				job.Status = models.JobFailed
+				job.FinishedAt = time.Now().UTC()
+				job.Error = "nuclei timeout exceeded"
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return nil
+			}
+			st, statErr := os.Stat(outJSONL)
+			if statErr != nil || st.Size() == 0 {
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return fmt.Errorf("nuclei execution failed: %w", nucleiErr)
+			}
+			if opt.Progress != nil {
+				opt.Progress("exploit.warning nuclei exited non-zero with partial results; continuing")
+			}
+			job.Error = fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr)
+		}
+
 		job.ExploitDurationSec = time.Since(exploitStart).Seconds()
-		if ctx.Err() == context.Canceled {
-			job.Status = models.JobCancelled
-			job.FinishedAt = time.Now().UTC()
-			job.Error = "job cancelled"
-			_ = writeJobReport(job, opt.ArtifactsRoot)
-			return nil
-		}
-		if nucleiCtx.Err() == context.DeadlineExceeded {
-			job.Status = models.JobFailed
-			job.FinishedAt = time.Now().UTC()
-			job.Error = "nuclei timeout exceeded"
-			_ = writeJobReport(job, opt.ArtifactsRoot)
-			return nil
-		}
-		st, statErr := os.Stat(outJSONL)
-		if statErr != nil || st.Size() == 0 {
-			_ = writeJobReport(job, opt.ArtifactsRoot)
-			return fmt.Errorf("nuclei execution failed: %w", nucleiErr)
-		}
-		if opt.Progress != nil {
-			opt.Progress("exploit.warning nuclei exited non-zero with partial results; continuing")
-		}
-		job.Error = fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr)
+		_ = sm.MarkNucleiCompleted()
 	}
 
 	count, err := countLines(outJSONL)
@@ -256,7 +279,6 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
 	}
-	job.ExploitDurationSec = time.Since(exploitStart).Seconds()
 	job.FindingsCount = count
 	notify("exploit.completed")
 
@@ -270,6 +292,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Progress:      opt.Progress,
 		SafeMode:      job.SafeMode,
 		MaxParallel:   0,
+		StateManager:  sm,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	preFilterCount := len(exploitFindings)

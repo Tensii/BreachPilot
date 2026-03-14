@@ -8,7 +8,10 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"breachpilot/internal/config"
@@ -73,12 +76,30 @@ func main() {
 		filtered = append(filtered, a)
 	}
 
-	if err := runCLIMode(filtered, engOpt, nf, jsonOut); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Println("\n[!] Interrupt received, safely stopping (waiting 1s for state flush)...")
+		cancel()
+		time.Sleep(1 * time.Second)
+		os.Exit(1)
+	}()
+
+	if len(filtered) > 0 && filtered[0] == "resume" {
+		if err := resumeJob(ctx, filtered[1:], engOpt, nf, jsonOut); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if err := runCLIMode(ctx, filtered, engOpt, nf, jsonOut); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
+func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing mode. Use: full <target> OR file <summary.json>")
 	}
@@ -132,7 +153,7 @@ func runCLIMode(args []string, opt engine.Options, nf *notify.Webhook, jsonOut b
 	}
 
 	nf.Send("job.started", job)
-	if err := engine.Process(context.Background(), job, cliOpt); err != nil {
+	if err := engine.Process(ctx, job, cliOpt); err != nil {
 		job.Status = models.JobFailed
 		job.Error = err.Error()
 		nf.Send("job.failed", job)
@@ -261,9 +282,86 @@ func listModules(opt engine.Options) {
 }
 
 func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  breachpilot setup")
-	fmt.Println("  breachpilot list-modules")
-	fmt.Println("  breachpilot full <target> [--json]")
-	fmt.Println("  breachpilot file <summary.json> [--json]")
+	fmt.Println(`Usage:
+	  breachpilot setup
+	  breachpilot full <target> [--json]
+	  breachpilot file <summary.json> [--json]
+	  breachpilot resume <job_id> [--json]
+	  breachpilot list-modules
+
+	Examples:
+	  breachpilot setup
+	  breachpilot full example.com
+	  breachpilot file recon/summary.json --json
+	  breachpilot resume c016195d-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+	`)
+}
+
+func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, jsonOut bool) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing job_id. Use: breachpilot resume <job_id>")
+	}
+	jobID := strings.TrimSpace(args[0])
+
+	jobPath := filepath.Join(opt.ArtifactsRoot, jobID, "job.json")
+	data, err := os.ReadFile(jobPath)
+	if err != nil {
+		return fmt.Errorf("failed to read previous job config %s: %w", jobPath, err)
+	}
+	var job models.Job
+	if err := json.Unmarshal(data, &job); err != nil {
+		return fmt.Errorf("failed to parse job.json: %w", err)
+	}
+
+	statePath := filepath.Join(opt.ArtifactsRoot, jobID, ".breachpilot_state.json")
+	if _, err := os.Stat(statePath); os.IsNotExist(err) {
+		return fmt.Errorf("no state found for job %q. Job cannot be resumed from %s", jobID, statePath)
+	}
+
+	if !jsonOut {
+		fmt.Printf("\n[BREACHPILOT] Engine Resuming Job: %s\n", job.ID)
+	}
+	
+	job.Status = models.JobRunning
+
+	cliOpt := opt
+	cliOpt.Progress = func(stage string) {
+		if !jsonOut {
+			fmt.Printf("[stage] %s\n", stage)
+		}
+	}
+
+	nf.Send("job.started", &job)
+	if err := engine.Process(ctx, &job, cliOpt); err != nil {
+		job.Status = models.JobFailed
+		job.Error = err.Error()
+		nf.Send("job.failed", &job)
+		return err
+	}
+
+	switch job.Status {
+	case models.JobRejected:
+		nf.Send("job.rejected", &job)
+		if jsonOut {
+			return printJobJSON(&job)
+		}
+		fmt.Printf("Job rejected: %s\n", job.Error)
+		return nil
+	case models.JobCancelled:
+		nf.Send("job.cancelled", &job)
+		if jsonOut {
+			return printJobJSON(&job)
+		}
+		fmt.Printf("Job cancelled\n")
+		return nil
+	default:
+		nf.Send("job.completed", &job)
+	}
+
+	if jsonOut {
+		return printJobJSON(&job)
+	}
+
+	fmt.Printf("\n[BREACHPILOT] Resume Complete. Output: %s/%s\n", cliOpt.ArtifactsRoot, job.ID)
+	return nil
 }

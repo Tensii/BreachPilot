@@ -155,7 +155,6 @@ Explicit `BREACHPILOT_ONLY_MODULES` / `BREACHPILOT_SKIP_MODULES` override profil
 ## Rate Limiting
 Set `BREACHPILOT_RATE_LIMIT_RPS` to throttle requests per second across all modules. `0` = unlimited.
 
-## CWE Enrichment
 Findings are automatically enriched with CWE identifiers (e.g. CWE-942 for CORS, CWE-295 for TLS). Displayed in report tables and JSON.
 
 ## SARIF Export
@@ -163,3 +162,12 @@ Add `sarif` to `BREACHPILOT_REPORT_FORMATS` to generate `exploit_report.sarif` f
 
 ## Circuit Breaker
 Module circuit breaker auto-skips remaining modules after consecutive failures. Controlled via engine configuration.
+
+## Job Resumption (Phase 10)
+Interrupting a job with **Ctrl+C** triggers a graceful shutdown that records the current state to a `.breachpilot_state.json` file in the artifact directory. 
+
+You can resume an interrupted scanning job by simply passing the job ID:
+```bash
+breachpilot resume <job_id>
+```
+The tool will bypass previously completed steps (e.g., Recon, Nuclei) and skip any individual custom exploit modules that already ran successfully, generating a seamlessly merged continuous report!

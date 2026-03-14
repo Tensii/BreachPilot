@@ -25,6 +25,16 @@ type CreateJobRequest struct {
 	Templates        []string `json:"templates,omitempty"`
 }
 
+// JobState tracks the resumable execution state of a job on disk.
+type JobState struct {
+	JobID           string   `json:"job_id"`
+	StartedAt       string   `json:"started_at"`
+	LastUpdatedAt   string   `json:"last_updated_at"`
+	ReconCompleted  bool     `json:"recon_completed"`
+	NucleiCompleted bool     `json:"nuclei_completed"`
+	ModulesFinished []string `json:"modules_finished"`
+}
+
 // ExploitFinding is a single verified exploit-phase result.
 type ExploitFinding struct {
 	Module     string   `json:"module"`

@@ -1076,6 +1076,15 @@ class Runner:
             )
         self.write_md_report(reports / "findings.md", f"Live Findings — {self.target}", ["\n".join(findings_lines) if findings_lines else "_No findings yet._"])
         self.write_md_report(reports / "summary.md", f"Summary — {self.target}", [_read(self.workdir / "summary.md")])
+        try:
+            summary_json_src = self.workdir / "summary.json"
+            summary_json_dst = reports / "summary.json"
+            if summary_json_src.exists():
+                summary_json_dst.write_text(summary_json_src.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+            else:
+                summary_json_dst.write_text(json.dumps({"error": "summary.json not found", "target": self.target}, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.record_stage_status("final_reports", "warning", f"summary_json_copy_failed: {e}")
 
         self.cleanup_non_md_artifacts(self.workdir, keep_debug=self.config.debug_artifacts)
 
