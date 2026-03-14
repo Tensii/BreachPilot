@@ -27,12 +27,30 @@ func TargetFromWorkdir(workdir string) string {
 	if wd == "" || wd == "." {
 		return ""
 	}
+
+	parts := strings.Split(filepath.ToSlash(wd), "/")
+	for i := 0; i < len(parts); i++ {
+		if parts[i] != "artifacts" && parts[i] != "outputs" {
+			continue
+		}
+		// Expected shapes:
+		// - artifacts/<target>/<run>/recon
+		// - outputs/<target>/<run>
+		if i+1 < len(parts) {
+			target := strings.TrimSpace(parts[i+1])
+			if target != "" && target != "." {
+				return target
+			}
+		}
+	}
+
+	// Fallback to legacy behavior
 	parent := filepath.Dir(wd)
 	if parent == "." || parent == "" {
 		return ""
 	}
 	target := filepath.Base(parent)
-	if target == "." || target == "" || target == "outputs" {
+	if target == "." || target == "" || target == "outputs" || target == "artifacts" {
 		return ""
 	}
 	return target

@@ -24,8 +24,8 @@ import (
 	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
 	headers "breachpilot/internal/exploit/modules/headers"
-	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
+	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
@@ -321,6 +321,19 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			"module_count":   len(exploitModules),
 			"duration_sec":   job.ExploitDurationSec,
 		})
+		for _, f := range exploitFindings {
+			opt.Notifier.SendGeneric("exploit.finding", map[string]any{
+				"job_id":      job.ID,
+				"target":      f.Target,
+				"module":      f.Module,
+				"severity":    f.Severity,
+				"title":       f.Title,
+				"confidence":  f.Confidence,
+				"validation":  f.Validation,
+				"evidence":    f.Evidence,
+				"report_path": job.ExploitReportPath,
+			})
+		}
 	}
 
 	if err := writeExploitFindingsJSONL(exploitFindings, artDir, job); err != nil {

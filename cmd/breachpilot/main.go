@@ -156,6 +156,22 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if !jsonOut {
 			fmt.Printf("[stage] %s\n", stage)
 		}
+		// Forward exploit module progress to webhook for per-module visibility.
+		if strings.HasPrefix(stage, "exploit.module.") {
+			parts := strings.Fields(stage)
+			if len(parts) >= 2 {
+				payload := map[string]any{
+					"job_id": job.ID,
+					"target": job.Target,
+					"stage":  parts[0],
+					"module": parts[1],
+				}
+				if len(parts) >= 3 {
+					payload["detail"] = strings.Join(parts[2:], " ")
+				}
+				nf.SendGeneric("exploit.module.progress", payload)
+			}
+		}
 	}
 
 	nf.Send("job.started", job)
@@ -180,6 +196,13 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 			return printJobJSON(job)
 		}
 		fmt.Printf("Job cancelled\n")
+		return nil
+	case models.JobFailed:
+		nf.Send("job.failed", job)
+		if jsonOut {
+			return printJobJSON(job)
+		}
+		fmt.Printf("Job failed: %s\n", job.Error)
 		return nil
 	default:
 		nf.Send("job.completed", job)
@@ -382,6 +405,22 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		if !jsonOut {
 			fmt.Printf("[stage] %s\n", stage)
 		}
+		// Forward exploit module progress to webhook for per-module visibility.
+		if strings.HasPrefix(stage, "exploit.module.") {
+			parts := strings.Fields(stage)
+			if len(parts) >= 2 {
+				payload := map[string]any{
+					"job_id": job.ID,
+					"target": job.Target,
+					"stage":  parts[0],
+					"module": parts[1],
+				}
+				if len(parts) >= 3 {
+					payload["detail"] = strings.Join(parts[2:], " ")
+				}
+				nf.SendGeneric("exploit.module.progress", payload)
+			}
+		}
 	}
 
 	nf.Send("job.started", job)
@@ -406,6 +445,13 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 			return printJobJSON(job)
 		}
 		fmt.Printf("Job cancelled\n")
+		return nil
+	case models.JobFailed:
+		nf.Send("job.failed", job)
+		if jsonOut {
+			return printJobJSON(job)
+		}
+		fmt.Printf("Job failed: %s\n", job.Error)
 		return nil
 	default:
 		nf.Send("job.completed", job)
