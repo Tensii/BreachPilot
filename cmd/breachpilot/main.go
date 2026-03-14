@@ -29,7 +29,7 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
-	log.Println(cfg.RedactedSummary())
+	printStartupBanner(cfg)
 	engOpt := engine.Options{
 		NucleiBin:                  cfg.NucleiBin,
 		ReconHarvestCmd:            config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
@@ -181,7 +181,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 	cliOpt := opt
 	cliOpt.Progress = func(stage string) {
 		if !jsonOut {
-			fmt.Printf("[stage] %s\n", stage)
+			fmt.Println(renderStage(stage))
 		}
 		if stage == "exploit.started" {
 			nf.SendGeneric("exploit.started", map[string]any{
@@ -224,7 +224,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job rejected: %s\n", job.Error)
+		fmt.Printf("\x1b[31m[✗] JOB REJECTED\x1b[0m %s\n", job.Error)
 		return nil
 	case models.JobCancelled:
 		nf.Send("job.cancelled", job)
@@ -234,14 +234,14 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job cancelled\n")
+		fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
 		return nil
 	case models.JobFailed:
 		nf.Send("job.failed", job)
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job failed: %s\n", job.Error)
+		fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
 		return nil
 	default:
 		nf.Send("job.completed", job)
@@ -424,7 +424,7 @@ func verifyManifest(manifestPath string) error {
 }
 
 func runSetup(opt engine.Options) error {
-	fmt.Println("[setup] checking runtime dependencies...")
+	fmt.Println("\x1b[36m[SETUP] initializing breachpilot runtime checks...\x1b[0m")
 	checks := []struct {
 		name string
 		cmd  []string
@@ -437,7 +437,7 @@ func runSetup(opt engine.Options) error {
 		if err != nil {
 			return fmt.Errorf("[setup] missing or broken %s: %v", c.name, err)
 		}
-		fmt.Printf("[setup] ok %s: %s\n", c.name, strings.TrimSpace(string(out)))
+		fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m %s: %s\n", c.name, strings.TrimSpace(string(out)))
 	}
 
 	reconCmd := strings.TrimSpace(opt.ReconHarvestCmd)
@@ -448,12 +448,12 @@ func runSetup(opt engine.Options) error {
 	if err := probe.Run(); err != nil {
 		return fmt.Errorf("[setup] recon command not executable: %s", reconCmd)
 	}
-	fmt.Printf("[setup] ok recon command: %s\n", reconCmd)
+	fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m recon command: %s\n", reconCmd)
 	if err := os.MkdirAll(opt.ArtifactsRoot, 0o755); err != nil {
 		return fmt.Errorf("[setup] artifacts dir failed: %w", err)
 	}
-	fmt.Printf("[setup] artifacts dir ready: %s\n", opt.ArtifactsRoot)
-	fmt.Println("[setup] done")
+	fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m artifacts dir ready: %s\n", opt.ArtifactsRoot)
+	fmt.Println("\x1b[36m[SETUP] done. system armed.\x1b[0m")
 	return nil
 }
 
@@ -510,6 +510,67 @@ func listModules(opt engine.Options) {
 			safety = "active"
 		}
 		fmt.Printf("%s\t%s\t%s\n", mi.Name, mi.Description, safety)
+	}
+}
+
+func printStartupBanner(cfg config.Config) {
+	cyan := "\x1b[36m"
+	green := "\x1b[32m"
+	yellow := "\x1b[33m"
+	gray := "\x1b[90m"
+	reset := "\x1b[0m"
+
+	redact := func(v string) string {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return "<empty>"
+		}
+		return "<set>"
+	}
+	minSev := strings.TrimSpace(cfg.MinSeverity)
+	if minSev == "" {
+		minSev = "none"
+	}
+
+	fmt.Println(cyan + "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓" + reset)
+	fmt.Println(cyan + "┃  ☠️🔥  BREACHPILOT // OFFENSIVE RUNTIME ONLINE                           ┃" + reset)
+	fmt.Println(cyan + "┃  [ RECON ] -> [ TRIAGE ] -> [ VERIFY ] -> [ EXPLOIT ] -> [ REPORT ]    ┃" + reset)
+	fmt.Println(cyan + "┃  \"quiet in logs, loud in findings\"                                    ┃" + reset)
+	fmt.Println(cyan + "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛" + reset)
+	fmt.Printf("%s[WEBHOOKS]%s recon=%s exploit=%s retries=%d\n", green, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
+	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
+	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
+	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
+	fmt.Printf("%s[FLAGS   ]%s validation_only=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+}
+
+func emptyAs(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+func renderStage(stage string) string {
+	reset := "\x1b[0m"
+	gray := "\x1b[90m"
+	cyan := "\x1b[36m"
+	green := "\x1b[32m"
+	yellow := "\x1b[33m"
+	red := "\x1b[31m"
+
+	s := strings.TrimSpace(stage)
+	switch {
+	case strings.Contains(s, ".start") || strings.HasSuffix(s, "started"):
+		return fmt.Sprintf("%s[⚡]%s %s", cyan, reset, s)
+	case strings.Contains(s, ".done") || strings.HasSuffix(s, "completed"):
+		return fmt.Sprintf("%s[✓]%s %s", green, reset, s)
+	case strings.Contains(s, "warning") || strings.Contains(s, "retry"):
+		return fmt.Sprintf("%s[~]%s %s", yellow, reset, s)
+	case strings.Contains(s, "error") || strings.Contains(s, "failed") || strings.Contains(s, "cancel"):
+		return fmt.Sprintf("%s[✗]%s %s", red, reset, s)
+	default:
+		return fmt.Sprintf("%s[•]%s %s", gray, reset, s)
 	}
 }
 
@@ -586,7 +647,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	cliOpt.ArtifactsRoot = filepath.Dir(filepath.Dir(jobDir))
 	cliOpt.Progress = func(stage string) {
 		if !jsonOut {
-			fmt.Printf("[stage] %s\n", stage)
+			fmt.Println(renderStage(stage))
 		}
 		// Forward exploit module progress to webhook for per-module visibility.
 		if opt.WebhookModuleProgress && strings.HasPrefix(stage, "exploit.module.") {
@@ -620,7 +681,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job rejected: %s\n", job.Error)
+		fmt.Printf("\x1b[31m[✗] JOB REJECTED\x1b[0m %s\n", job.Error)
 		return nil
 	case models.JobCancelled:
 		nf.Send("job.cancelled", job)
@@ -630,14 +691,14 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job cancelled\n")
+		fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
 		return nil
 	case models.JobFailed:
 		nf.Send("job.failed", job)
 		if jsonOut {
 			return printJobJSON(job)
 		}
-		fmt.Printf("Job failed: %s\n", job.Error)
+		fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
 		return nil
 	default:
 		nf.Send("job.completed", job)
