@@ -31,8 +31,91 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
+	args := os.Args[1:]
+	if len(args) == 0 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	if len(args) == 1 && args[0] == "setup" {
+		printStartupBanner(cfg)
+		engOpt := buildEngineOptions(cfg)
+		if err := runSetup(engOpt); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(args) == 1 && args[0] == "list-modules" {
+		printStartupBanner(cfg)
+		engOpt := buildEngineOptions(cfg)
+		listModules(engOpt)
+		return
+	}
+	if len(args) == 1 && args[0] == "doctor" {
+		printStartupBanner(cfg)
+		engOpt := buildEngineOptions(cfg)
+		if err := runDoctor(cfg, engOpt); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	jsonOut := false
+	aggressiveFlag := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		n := strings.ToLower(strings.TrimSpace(a))
+		if n == "--json" || n == "json" {
+			jsonOut = true
+			continue
+		}
+		if n == "--aggressive" || n == "aggressive" {
+			aggressiveFlag = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if aggressiveFlag {
+		cfg.AggressiveMode = true
+	}
 	printStartupBanner(cfg)
-	engOpt := engine.Options{
+
+	engOpt := buildEngineOptions(cfg)
+	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
+	nf.Start()
+	defer nf.Stop()
+	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl")}
+	rf.Start()
+	defer rf.Stop()
+	engOpt.Notifier = nf
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Println("\n[!] Interrupt received, safely stopping... Waiting for active tasks and webhooks to finish.")
+		cancel()
+		// We purposefully do not call os.Exit(1) here.
+		// Canceling the context will cause the engine to unroll safely and return models.JobCancelled.
+		// The main routine will then hit the switch job.Status case to send the job.cancelled webhook,
+		// and the application will naturally exit cleanly.
+	}()
+
+	if len(filtered) > 0 && filtered[0] == "resume" {
+		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, jsonOut); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func buildEngineOptions(cfg config.Config) engine.Options {
+	return engine.Options{
 		NucleiBin:                  cfg.NucleiBin,
 		ReconHarvestCmd:            config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
 		ReconWebhookURL:            cfg.ReconWebhookURL,
@@ -61,79 +144,6 @@ func main() {
 		AuthAnonHeaders:            cfg.AuthAnonHeaders,
 		AuthUserHeaders:            cfg.AuthUserHeaders,
 		AuthAdminHeaders:           cfg.AuthAdminHeaders,
-	}
-	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
-	nf.Start()
-	defer nf.Stop()
-	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl")}
-	rf.Start()
-	defer rf.Stop()
-	engOpt.Notifier = nf
-
-	args := os.Args[1:]
-	if len(args) == 0 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	if len(args) == 1 && args[0] == "setup" {
-		if err := runSetup(engOpt); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-	if len(args) == 1 && args[0] == "list-modules" {
-		listModules(engOpt)
-		return
-	}
-	if len(args) == 1 && args[0] == "doctor" {
-		if err := runDoctor(cfg, engOpt); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-
-	jsonOut := false
-	aggressiveFlag := false
-	filtered := make([]string, 0, len(args))
-	for _, a := range args {
-		n := strings.ToLower(strings.TrimSpace(a))
-		if n == "--json" || n == "json" {
-			jsonOut = true
-			continue
-		}
-		if n == "--aggressive" || n == "aggressive" {
-			aggressiveFlag = true
-			continue
-		}
-		filtered = append(filtered, a)
-	}
-	if aggressiveFlag {
-		engOpt.AggressiveMode = true
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		fmt.Println("\n[!] Interrupt received, safely stopping... Waiting for active tasks and webhooks to finish.")
-		cancel()
-		// We purposefully do not call os.Exit(1) here.
-		// Canceling the context will cause the engine to unroll safely and return models.JobCancelled.
-		// The main routine will then hit the switch job.Status case to send the job.cancelled webhook,
-		// and the application will naturally exit cleanly.
-	}()
-
-	if len(filtered) > 0 && filtered[0] == "resume" {
-		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, jsonOut); err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-
-	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut); err != nil {
-		log.Fatal(err)
 	}
 }
 
@@ -169,7 +179,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		if _, err := os.Stat(reconPath); err != nil {
 			return fmt.Errorf("summary path not accessible: %w", err)
 		}
-		if err := validateArtifactManifestForPath(reconPath); err != nil {
+		if err := validateArtifactManifestEntryForPath(reconPath); err != nil {
 			return fmt.Errorf("artifact integrity validation failed: %w", err)
 		}
 		// Derive target from summary for directory naming
@@ -420,18 +430,32 @@ func validateArtifactManifestForPath(anyPath string) error {
 	return nil
 }
 
+func validateArtifactManifestEntryForPath(anyPath string) error {
+	p := filepath.Clean(strings.TrimSpace(anyPath))
+	if p == "" {
+		return nil
+	}
+	d := p
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		d = filepath.Dir(p)
+	}
+	for i := 0; i < 4; i++ {
+		mf := filepath.Join(d, "artifact_manifest.json")
+		if _, err := os.Stat(mf); err == nil {
+			return verifyManifestEntry(mf, p)
+		}
+		next := filepath.Dir(d)
+		if next == d || next == "." {
+			break
+		}
+		d = next
+	}
+	return nil
+}
+
 func verifyManifest(manifestPath string) error {
-	b, err := os.ReadFile(manifestPath)
+	m, err := loadManifest(manifestPath)
 	if err != nil {
-		return err
-	}
-	var m struct {
-		Files []struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
 	for _, f := range m.Files {
@@ -448,6 +472,51 @@ func verifyManifest(manifestPath string) error {
 		}
 	}
 	return nil
+}
+
+func verifyManifestEntry(manifestPath, targetPath string) error {
+	m, err := loadManifest(manifestPath)
+	if err != nil {
+		return err
+	}
+	targetPath = filepath.Clean(strings.TrimSpace(targetPath))
+	for _, f := range m.Files {
+		if filepath.Clean(strings.TrimSpace(f.Path)) != targetPath {
+			continue
+		}
+		raw, err := os.ReadFile(f.Path)
+		if err != nil {
+			return fmt.Errorf("missing file in manifest: %s", f.Path)
+		}
+		h := sha256.Sum256(raw)
+		if hex.EncodeToString(h[:]) != f.SHA256 {
+			return fmt.Errorf("hash mismatch for %s", f.Path)
+		}
+		return nil
+	}
+	return fmt.Errorf("path not present in manifest: %s", targetPath)
+}
+
+func loadManifest(manifestPath string) (struct {
+	Files []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
+}, error) {
+	var m struct {
+		Files []struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+	}
+	b, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return m, err
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 func runSetup(opt engine.Options) error {
