@@ -954,9 +954,11 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 	if strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
 		score["privilege-path"] = 20
 		score["session-abuse"] = 25
+		score["open-redirect"] = 23
 	}
 	if strings.TrimSpace(rs.URLs.All) != "" {
 		score["graphql-abuse"] = 22
+		score["auth-bypass"] = 26
 	}
 	// keep broad context modules early too.
 	score["api-surface"] = 18
