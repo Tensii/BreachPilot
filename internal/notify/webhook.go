@@ -98,6 +98,17 @@ func (w *Webhook) Send(event string, job *models.Job) {
 	}
 	w.Start()
 
+	// Keep completion notices in normal queue order so they land after
+	// any finding/module events already emitted for the same run.
+	if event == "job.completed" {
+		select {
+		case w.normalCh <- webhookEvent{Name: event, Job: job}:
+		case <-time.After(2 * time.Second):
+			w.sendNow(event, job)
+		}
+		return
+	}
+
 	// Never drop terminal job events.
 	if strings.HasPrefix(event, "job.") {
 		select {

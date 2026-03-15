@@ -57,3 +57,39 @@ func TestWebhookStopIsSafeWhenNeverStarted(t *testing.T) {
 		t.Fatal("Stop should return quickly when webhook not started")
 	}
 }
+
+func TestWebhookJobCompletedPreservesNormalQueueOrder(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	srv := testutil.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		name, _ := payload["event"].(string)
+		mu.Lock()
+		events = append(events, name)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	nf := &Webhook{URL: srv.URL, Retries: 1}
+	job := &models.Job{ID: "j1", Target: "example.com"}
+
+	nf.SendGeneric("exploit.finding", map[string]any{"job_id": "j1", "severity": "HIGH"})
+	nf.Send("job.completed", job)
+	nf.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events flushed, got %d (%v)", len(events), events)
+	}
+	if events[0] != "exploit.finding" || events[1] != "job.completed" {
+		t.Fatalf("unexpected event order: %v", events)
+	}
+}
