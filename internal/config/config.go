@@ -81,7 +81,7 @@ func Load() Config {
 		ScanProfile:                getEnv("BREACHPILOT_SCAN_PROFILE", ""),
 		RateLimitRPS:               getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
 		WebhookFindings:            getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
-		WebhookModuleProgress:      getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", true),
+		WebhookModuleProgress:      getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", false),
 		WebhookFindingsMinSeverity: getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
 		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
 		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),

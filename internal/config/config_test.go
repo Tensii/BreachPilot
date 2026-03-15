@@ -30,6 +30,14 @@ func TestValidationOnlyDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestWebhookModuleProgressDefaultFalse(t *testing.T) {
+	os.Unsetenv("BREACHPILOT_WEBHOOK_MODULE_PROGRESS")
+	cfg := Load()
+	if cfg.WebhookModuleProgress {
+		t.Fatal("expected webhook module progress false by default")
+	}
+}
+
 func TestValidateProofModeRequiresAllowlist(t *testing.T) {
 	cfg := Config{
 		NucleiBin:        "echo",
