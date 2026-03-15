@@ -29,3 +29,18 @@ func TestValidationOnlyDefaultFalse(t *testing.T) {
 		t.Fatal("expected validation only false by default")
 	}
 }
+
+func TestValidateProofModeRequiresAllowlist(t *testing.T) {
+	cfg := Config{
+		NucleiBin:        "echo",
+		WebhookRetries:   1,
+		ReconTimeoutSec:  1,
+		ReconRetries:     0,
+		NucleiTimeoutSec: 1,
+		ModuleTimeoutSec: 1,
+		ProofMode:        true,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected proof mode validation error")
+	}
+}

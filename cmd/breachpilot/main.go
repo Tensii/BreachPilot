@@ -54,8 +54,13 @@ func main() {
 		ModuleTimeoutSec:           cfg.ModuleTimeoutSec,
 		ModuleRetries:              cfg.ModuleRetries,
 		AggressiveMode:             cfg.AggressiveMode,
+		ProofMode:                  cfg.ProofMode,
+		ProofTargetAllowlist:       cfg.ProofTargetAllowlist,
 		AuthUserCookie:             cfg.AuthUserCookie,
 		AuthAdminCookie:            cfg.AuthAdminCookie,
+		AuthAnonHeaders:            cfg.AuthAnonHeaders,
+		AuthUserHeaders:            cfg.AuthUserHeaders,
+		AuthAdminHeaders:           cfg.AuthAdminHeaders,
 	}
 	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
 	nf.Start()
@@ -600,7 +605,12 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t proof_mode=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.ProofMode, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	if cfg.ProofMode {
+		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
+			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")
+		fmt.Printf("\x1b[31m[PROOF   ]\x1b[0m allowlist=%s live auth contexts=%t\n", emptyAs(cfg.ProofTargetAllowlist, "<empty>"), liveAuth)
+	}
 	if cfg.AggressiveMode {
 		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ☠️ AGGRESSIVE MODE ENABLED — active verification probes ON\n")
 	}

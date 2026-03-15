@@ -36,8 +36,13 @@ type Config struct {
 	ModuleTimeoutSec           int
 	ModuleRetries              int
 	AggressiveMode             bool
+	ProofMode                  bool
+	ProofTargetAllowlist       string
 	AuthUserCookie             string
 	AuthAdminCookie            string
+	AuthAnonHeaders            string
+	AuthUserHeaders            string
+	AuthAdminHeaders           string
 }
 
 func Load() Config {
@@ -81,8 +86,13 @@ func Load() Config {
 		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
 		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
 		AggressiveMode:             getEnvBool("BREACHPILOT_AGGRESSIVE", false),
+		ProofMode:                  getEnvBool("BREACHPILOT_PROOF_MODE", false),
+		ProofTargetAllowlist:       getEnv("BREACHPILOT_PROOF_TARGET_ALLOWLIST", ""),
 		AuthUserCookie:             getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
 		AuthAdminCookie:            getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
+		AuthAnonHeaders:            getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
+		AuthUserHeaders:            getEnv("BREACHPILOT_AUTH_USER_HEADERS", ""),
+		AuthAdminHeaders:           getEnv("BREACHPILOT_AUTH_ADMIN_HEADERS", ""),
 	}
 }
 
@@ -139,6 +149,9 @@ func (c Config) Validate() error {
 	if c.ModuleRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")
 	}
+	if c.ProofMode && strings.TrimSpace(c.ProofTargetAllowlist) == "" {
+		return fmt.Errorf("invalid BREACHPILOT_PROOF_TARGET_ALLOWLIST: required when BREACHPILOT_PROOF_MODE is enabled")
+	}
 	if strings.TrimSpace(c.NucleiBin) != "" {
 		if _, err := exec.LookPath(c.NucleiBin); err != nil {
 			return fmt.Errorf("invalid BREACHPILOT_NUCLEI_BIN: %w", err)
@@ -186,14 +199,14 @@ func (c Config) RedactedSummary() string {
 		reportFormats = "json,md,html"
 	}
 	ctxCount := 0
-	if strings.TrimSpace(c.AuthUserCookie) != "" {
+	if strings.TrimSpace(c.AuthUserCookie) != "" || strings.TrimSpace(c.AuthUserHeaders) != "" {
 		ctxCount++
 	}
-	if strings.TrimSpace(c.AuthAdminCookie) != "" {
+	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
 }
 
 func loadEnvFile(path string) error {

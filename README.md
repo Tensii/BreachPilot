@@ -106,11 +106,27 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_REPORT_FORMATS` (comma-separated output formats: `json`, `md`, `html`, `sarif`; default: `json,md,html`)
 - `BREACHPILOT_SCAN_PROFILE` (optional preset: `quick`, `standard`, `deep`)
 - `BREACHPILOT_RATE_LIMIT_RPS` (max requests/sec across all modules; `0` = unlimited)
+- `BREACHPILOT_AGGRESSIVE` (optional bool; enables active verification probes)
+- `BREACHPILOT_PROOF_MODE` (optional bool; enables proof-mode replay on allowlisted targets only)
+- `BREACHPILOT_PROOF_TARGET_ALLOWLIST` (comma-separated hosts or `*.domain.tld` patterns allowed for proof mode)
+- `BREACHPILOT_AUTH_USER_COOKIE` (optional real low-privilege session cookie)
+- `BREACHPILOT_AUTH_ADMIN_COOKIE` (optional real admin session cookie)
+- `BREACHPILOT_AUTH_ANON_HEADERS` (optional semicolon/newline separated headers for anonymous context)
+- `BREACHPILOT_AUTH_USER_HEADERS` (optional semicolon/newline separated headers for user context)
+- `BREACHPILOT_AUTH_ADMIN_HEADERS` (optional semicolon/newline separated headers for admin context)
 
 ## Notes
 - CLI streams stage/log progress.
 - Full mode supports resume if recon summary already exists in the same job artifact path.
 - Each run writes `job_report.json` in the evidence directory.
+
+## Proof Mode
+Use `BREACHPILOT_PROOF_MODE=true` only on owned or explicitly approved targets.
+
+Requirements:
+- set `BREACHPILOT_PROOF_TARGET_ALLOWLIST`
+- provide real test auth contexts where needed
+- expect proof artifacts under `artifacts/<job>/proofs/`
 
 ## New Modules (Phase 8)
 

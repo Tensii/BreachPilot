@@ -85,8 +85,13 @@ type Options struct {
 	ModuleTimeoutSec           int
 	ModuleRetries              int
 	AggressiveMode             bool
+	ProofMode                  bool
+	ProofTargetAllowlist       string
 	AuthUserCookie             string
 	AuthAdminCookie            string
+	AuthAnonHeaders            string
+	AuthUserHeaders            string
+	AuthAdminHeaders           string
 }
 
 // Notifier sends structured events.
@@ -330,16 +335,21 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		opt.Progress("exploit.module.order " + strings.Join(names, ","))
 	}
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
-		ArtifactsRoot:    opt.ArtifactsRoot,
-		Progress:         opt.Progress,
-		SafeMode:         job.SafeMode,
-		MaxParallel:      0,
-		StateManager:     sm,
-		ModuleTimeoutSec: opt.ModuleTimeoutSec,
-		ModuleRetries:    opt.ModuleRetries,
-		Aggressive:       opt.AggressiveMode,
-		AuthUserCookie:   opt.AuthUserCookie,
-		AuthAdminCookie:  opt.AuthAdminCookie,
+		ArtifactsRoot:        opt.ArtifactsRoot,
+		Progress:             opt.Progress,
+		SafeMode:             job.SafeMode,
+		MaxParallel:          0,
+		StateManager:         sm,
+		ModuleTimeoutSec:     opt.ModuleTimeoutSec,
+		ModuleRetries:        opt.ModuleRetries,
+		Aggressive:           opt.AggressiveMode,
+		ProofMode:            opt.ProofMode,
+		ProofTargetAllowlist: opt.ProofTargetAllowlist,
+		AuthUserCookie:       opt.AuthUserCookie,
+		AuthAdminCookie:      opt.AuthAdminCookie,
+		AuthAnonHeaders:      opt.AuthAnonHeaders,
+		AuthUserHeaders:      opt.AuthUserHeaders,
+		AuthAdminHeaders:     opt.AuthAdminHeaders,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {

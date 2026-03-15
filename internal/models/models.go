@@ -40,17 +40,18 @@ type JobState struct {
 
 // ExploitFinding is a single verified exploit-phase result.
 type ExploitFinding struct {
-	Module     string   `json:"module"`
-	Severity   string   `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
-	Confidence int      `json:"confidence"` // 0–100
-	Target     string   `json:"target"`
-	Title      string   `json:"title"`
-	Validation string   `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
-	Evidence   string   `json:"evidence,omitempty"`
-	PoCHint    string   `json:"poc_hint,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	CWE        string   `json:"cwe,omitempty"`
-	Timestamp  string   `json:"timestamp"`
+	Module       string   `json:"module"`
+	Severity     string   `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
+	Confidence   int      `json:"confidence"` // 0–100
+	Target       string   `json:"target"`
+	Title        string   `json:"title"`
+	Validation   string   `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
+	Evidence     string   `json:"evidence,omitempty"`
+	ArtifactPath string   `json:"artifact_path,omitempty"`
+	PoCHint      string   `json:"poc_hint,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	CWE          string   `json:"cwe,omitempty"`
+	Timestamp    string   `json:"timestamp"`
 }
 
 // SecretsFinding represents an exposed secret string discovered by ReconHarvest.
