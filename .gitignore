@@ -1,5 +1,6 @@
 # Build artifacts
 /breachpilot
+/main
 
 # Python cache
 __pycache__/
@@ -7,3 +8,6 @@ __pycache__/
 
 # Runtime outputs
 artifacts/
+
+# Local configuration with secrets
+breachpilot.env

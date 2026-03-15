@@ -1,12 +1,20 @@
 BINARY=breachpilot
 
-.PHONY: build test run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
+.PHONY: build test test-race vet ci run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
 
 build:
 	go build -o $(BINARY) ./cmd/breachpilot
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./...
+
+vet:
+	go vet ./...
+
+ci: vet test build
 
 run:
 	go run ./cmd/breachpilot

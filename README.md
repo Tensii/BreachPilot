@@ -25,8 +25,20 @@ It ships with a vendored ReconHarvest runner under `tools/reconharvest/` for por
 ## Build
 ```bash
 make build
+make vet
 make test
 ```
+
+## Local config
+Tracked secrets and machine-specific config should not live in git.
+
+Use the example file as the template for your local config:
+- `breachpilot.env.example`
+
+Keep your real runtime values in:
+- `breachpilot.env`
+
+If any webhook or API token was previously committed, rotate it before the next upgrade or release.
 
 ## Sync vendored ReconHarvest
 When `reconHarvest-PythonV` is updated, sync into BreachPilot with one command:
@@ -59,8 +71,8 @@ RECONHARVEST_SRC=/custom/path/to/reconHarvest-PythonV make sync-reconharvest
 ## Config file (recommended)
 BreachPilot automatically loads `./breachpilot.env` (or path from `BREACHPILOT_CONFIG`).
 
-A ready config file is included:
-- `breachpilot.env`
+A ready config template is included:
+- `breachpilot.env.example`
 
 ### Split webhook channels (no conflict)
 Use separate webhook URLs:

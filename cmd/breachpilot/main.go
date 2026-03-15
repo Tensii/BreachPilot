@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/url"
@@ -22,6 +23,7 @@ import (
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/notify"
+	"github.com/google/shlex"
 )
 
 func main() {
@@ -331,8 +333,7 @@ func runDoctor(cfg config.Config, opt engine.Options) error {
 	if strings.TrimSpace(opt.ReconHarvestCmd) == "" {
 		check("recon command configured", fmt.Errorf("BREACHPILOT_RECONHARVEST_CMD is empty"))
 	} else {
-		probe := exec.Command("/bin/bash", "-lc", opt.ReconHarvestCmd+" --help >/dev/null 2>&1")
-		check("recon command executable", probe.Run())
+		check("recon command executable", probeCommand(opt.ReconHarvestCmd, "--help"))
 	}
 	check("artifacts writable", ensureWritableDir(opt.ArtifactsRoot))
 	check("recon webhook reachable", checkWebhookReachable(cfg.ReconWebhookURL))
@@ -366,14 +367,23 @@ func checkWebhookReachable(raw string) error {
 		return fmt.Errorf("webhook URL is empty")
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("invalid URL")
 	}
-	host := u.Host
-	if strings.Contains(host, ":") {
-		host = strings.Split(host, ":")[0]
+
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return fmt.Errorf("unsupported URL scheme %q", u.Scheme)
+		}
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "443"), 3*time.Second)
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), port), 3*time.Second)
 	if err != nil {
 		return err
 	}
@@ -456,9 +466,8 @@ func runSetup(opt engine.Options) error {
 	if reconCmd == "" {
 		return fmt.Errorf("[setup] recon command is empty")
 	}
-	probe := exec.Command("/bin/bash", "-lc", reconCmd+" --help >/dev/null 2>&1")
-	if err := probe.Run(); err != nil {
-		return fmt.Errorf("[setup] recon command not executable: %s", reconCmd)
+	if err := probeCommand(reconCmd, "--help"); err != nil {
+		return fmt.Errorf("[setup] recon command not executable: %w", err)
 	}
 	fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m recon command: %s\n", reconCmd)
 	if err := os.MkdirAll(opt.ArtifactsRoot, 0o755); err != nil {
@@ -512,6 +521,44 @@ func safeDirName(s string) string {
 		return "unknown"
 	}
 	return result
+}
+
+func probeCommand(raw string, extraArgs ...string) error {
+	argv, err := splitCommand(raw)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := append(append([]string{}, argv[1:]...), extraArgs...)
+	cmd := exec.CommandContext(ctx, argv[0], args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("command timed out")
+		}
+		return err
+	}
+	return nil
+}
+
+func splitCommand(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("empty command")
+	}
+
+	argv, err := shlex.Split(raw)
+	if err != nil || len(argv) == 0 {
+		return nil, fmt.Errorf("invalid command: %q", raw)
+	}
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return nil, fmt.Errorf("executable not found: %w", err)
+	}
+	return argv, nil
 }
 
 func listModules(opt engine.Options) {
@@ -576,6 +623,8 @@ func renderStage(stage string) string {
 
 	s := strings.TrimSpace(stage)
 	switch {
+	case strings.Contains(s, "exploit.log"):
+		return fmt.Sprintf("%s[~]%s %s", yellow, reset, s)
 	case strings.Contains(s, ".start") || strings.HasSuffix(s, "started"):
 		return fmt.Sprintf("%s[⚡]%s %s", cyan, reset, s)
 	case strings.Contains(s, ".done") || strings.HasSuffix(s, "completed"):

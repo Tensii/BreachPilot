@@ -3,12 +3,12 @@ package notify
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"breachpilot/internal/models"
+	"breachpilot/internal/testutil"
 )
 
 func TestWebhookStopFlushesQueuedEvents(t *testing.T) {
@@ -16,7 +16,7 @@ func TestWebhookStopFlushesQueuedEvents(t *testing.T) {
 		mu     sync.Mutex
 		events []string
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := testutil.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
