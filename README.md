@@ -106,9 +106,14 @@ This gives the exact behavior you asked for:
 - `BREACHPILOT_REPORT_FORMATS` (comma-separated output formats: `json`, `md`, `html`, `sarif`; default: `json,md,html`)
 - `BREACHPILOT_SCAN_PROFILE` (optional preset: `quick`, `standard`, `deep`)
 - `BREACHPILOT_RATE_LIMIT_RPS` (max requests/sec across all modules; `0` = unlimited)
-- `BREACHPILOT_AGGRESSIVE` (optional bool; enables active verification probes)
-- `BREACHPILOT_PROOF_MODE` (optional bool; enables proof-mode replay on allowlisted targets only)
-- `BREACHPILOT_PROOF_TARGET_ALLOWLIST` (comma-separated hosts or `*.domain.tld` patterns allowed for proof mode)
+- `BREACHPILOT_AGGRESSIVE` (optional bool; enables active verification probes ON and disables SafeMode OFF)
+
+### Active Probing
+Pass `aggressive` as a CLI argument to enable active verification probes (default is read-only). CLI arguments override `.env` settings.
+
+```bash
+./breachpilot full example.com aggressive
+```
 - `BREACHPILOT_AUTH_USER_COOKIE` (optional real low-privilege session cookie)
 - `BREACHPILOT_AUTH_ADMIN_COOKIE` (optional real admin session cookie)
 - `BREACHPILOT_AUTH_ANON_HEADERS` (optional semicolon/newline separated headers for anonymous context)
@@ -121,12 +126,19 @@ This gives the exact behavior you asked for:
 - Each run writes `job_report.json` in the evidence directory.
 
 ## Proof Mode
-Use `BREACHPILOT_PROOF_MODE=true` only on owned or explicitly approved targets.
+Use `BREACHPILOT_PROOF_MODE=true` on owned or explicitly approved targets.
 
-Requirements:
-- set `BREACHPILOT_PROOF_TARGET_ALLOWLIST`
-- provide real test auth contexts where needed
-- expect proof artifacts under `artifacts/<job>/proofs/`
+**`BREACHPILOT_PROOF_TARGET_ALLOWLIST` is optional.** When left empty, all targets are permitted (the tool trusts the operator to scan their own infrastructure). To restrict to specific domains, set a comma-separated list:
+
+```bash
+# Restrict to specific domains
+BREACHPILOT_PROOF_TARGET_ALLOWLIST=company.com,*.staging.company.com
+
+# Or leave empty to allow all targets (recommended for internal teams)
+BREACHPILOT_PROOF_TARGET_ALLOWLIST=
+```
+
+Proof artifacts are written to `artifacts/<job>/proofs/`.
 
 ## New Modules (Phase 8)
 

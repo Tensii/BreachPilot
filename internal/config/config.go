@@ -149,9 +149,7 @@ func (c Config) Validate() error {
 	if c.ModuleRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")
 	}
-	if c.ProofMode && strings.TrimSpace(c.ProofTargetAllowlist) == "" {
-		return fmt.Errorf("invalid BREACHPILOT_PROOF_TARGET_ALLOWLIST: required when BREACHPILOT_PROOF_MODE is enabled")
-	}
+
 	if strings.TrimSpace(c.NucleiBin) != "" {
 		if _, err := exec.LookPath(c.NucleiBin); err != nil {
 			return fmt.Errorf("invalid BREACHPILOT_NUCLEI_BIN: %w", err)

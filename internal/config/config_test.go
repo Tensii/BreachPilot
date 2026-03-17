@@ -38,7 +38,9 @@ func TestWebhookModuleProgressDefaultFalse(t *testing.T) {
 	}
 }
 
-func TestValidateProofModeRequiresAllowlist(t *testing.T) {
+func TestValidateProofModeNoAllowlistIsValid(t *testing.T) {
+	// Proof mode without an allowlist is now valid — empty allowlist means "allow all targets".
+	// This removes the friction of listing every domain for internal security teams.
 	cfg := Config{
 		NucleiBin:        "echo",
 		WebhookRetries:   1,
@@ -47,8 +49,9 @@ func TestValidateProofModeRequiresAllowlist(t *testing.T) {
 		NucleiTimeoutSec: 1,
 		ModuleTimeoutSec: 1,
 		ProofMode:        true,
+		// ProofTargetAllowlist intentionally empty
 	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected proof mode validation error")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no validation error when allowlist is empty, got: %v", err)
 	}
 }

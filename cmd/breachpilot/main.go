@@ -202,7 +202,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		Target:    target,
 		Mode:      mode,
 		ReconPath: reconPath,
-		SafeMode:  true,
+		SafeMode:  !opt.AggressiveMode,
 		Status:    models.JobQueued,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -678,7 +678,7 @@ func printStartupBanner(cfg config.Config) {
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
 			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")
-		fmt.Printf("\x1b[31m[PROOF   ]\x1b[0m allowlist=%s live auth contexts=%t\n", emptyAs(cfg.ProofTargetAllowlist, "<empty>"), liveAuth)
+		fmt.Printf("\x1b[31m[PROOF   ]\x1b[0m allowlist=%s live auth contexts=%t\n", emptyAs(cfg.ProofTargetAllowlist, "all (no restriction)"), liveAuth)
 	}
 	if cfg.AggressiveMode {
 		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ☠️ AGGRESSIVE MODE ENABLED — active verification probes ON\n")
@@ -729,8 +729,9 @@ func printUsage() {
 	Examples:
 	  breachpilot full example.com aggressive
 	  breachpilot aggressive full example.com
-	  breachpilot file recon/summary.json json aggressive
+	  breachpilot file recon/summary.json aggressive
 	  breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive
+	  (CLI args override breachpilot.env settings)
 	`)
 }
 
@@ -766,7 +767,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 		Target:    st.Target,
 		Mode:      st.Mode,
 		ReconPath: st.ReconPath,
-		SafeMode:  true,
+		SafeMode:  !opt.AggressiveMode,
 		Status:    models.JobRunning,
 		CreatedAt: time.Now().UTC(),
 	}
