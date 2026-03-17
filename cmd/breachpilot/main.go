@@ -37,6 +37,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	firstArg := strings.ToLower(strings.TrimSpace(args[0]))
+	if firstArg == "help" || firstArg == "--help" || firstArg == "-h" {
+		printUsage()
+		return
+	}
+
 	if len(args) == 1 && args[0] == "setup" {
 		printStartupBanner(cfg)
 		engOpt := buildEngineOptions(cfg)
@@ -62,6 +68,7 @@ func main() {
 
 	jsonOut := false
 	aggressiveFlag := false
+	skipNucleiFlag := false
 	filtered := make([]string, 0, len(args))
 	for _, a := range args {
 		n := strings.ToLower(strings.TrimSpace(a))
@@ -73,10 +80,17 @@ func main() {
 			aggressiveFlag = true
 			continue
 		}
+		if n == "--skip-nuclei" {
+			skipNucleiFlag = true
+			continue
+		}
 		filtered = append(filtered, a)
 	}
 	if aggressiveFlag {
 		cfg.AggressiveMode = true
+	}
+	if skipNucleiFlag {
+		cfg.SkipNuclei = true
 	}
 	printStartupBanner(cfg)
 
@@ -144,6 +158,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		AuthAnonHeaders:            cfg.AuthAnonHeaders,
 		AuthUserHeaders:            cfg.AuthUserHeaders,
 		AuthAdminHeaders:           cfg.AuthAdminHeaders,
+		SkipNuclei:                 cfg.SkipNuclei,
 	}
 }
 
@@ -178,6 +193,9 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		}
 		if _, err := os.Stat(reconPath); err != nil {
 			return fmt.Errorf("summary path not accessible: %w", err)
+		}
+		if filepath.Base(reconPath) == ".breachpilot.state" {
+			return fmt.Errorf("invalid summary path: file is a state checkpoint. Use: breachpilot resume %s", reconPath)
 		}
 		if err := validateArtifactManifestEntryForPath(reconPath); err != nil {
 			return fmt.Errorf("artifact integrity validation failed: %w", err)
@@ -674,7 +692,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t proof_mode=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.ProofMode, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
 			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")

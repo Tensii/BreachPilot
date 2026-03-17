@@ -111,9 +111,10 @@ func (sm *StateManager) Save() error {
 }
 
 // MarkReconCompleted flags the recon phase as finished.
-func (sm *StateManager) MarkReconCompleted() error {
+func (sm *StateManager) MarkReconCompleted(reconPath string) error {
 	sm.mu.Lock()
 	sm.state.ReconCompleted = true
+	sm.state.ReconPath = reconPath
 	sm.mu.Unlock()
 	return sm.Save()
 }

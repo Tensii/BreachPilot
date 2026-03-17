@@ -93,6 +93,7 @@ type Options struct {
 	AuthAnonHeaders            string
 	AuthUserHeaders            string
 	AuthAdminHeaders           string
+	SkipNuclei                 bool
 }
 
 // Notifier sends structured events.
@@ -110,6 +111,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			}
 			if opt.SkipModules == "" {
 				opt.SkipModules = p.SkipModules
+			}
+			if !opt.SkipNuclei {
+				opt.SkipNuclei = p.SkipNuclei
 			}
 		}
 	}
@@ -144,7 +148,16 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	if strings.EqualFold(strings.TrimSpace(job.Mode), "full") {
 		if sm.IsReconCompleted() {
 			notify("recon.resumed")
-			job.ReconPath = filepath.Join(opt.ArtifactsRoot, job.ID, "summary.json")
+			st := sm.State()
+			if st.ReconPath != "" {
+				job.ReconPath = st.ReconPath
+			} else {
+				// Fallback if not persisted (for older states)
+				job.ReconPath = filepath.Join(opt.ArtifactsRoot, job.ID, "recon", "summary.json")
+				if _, err := os.Stat(job.ReconPath); err != nil {
+					job.ReconPath = filepath.Join(opt.ArtifactsRoot, job.ID, "summary.json")
+				}
+			}
 		} else {
 			notify("recon.started")
 			reconStart := time.Now()
@@ -160,7 +173,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			}
 			job.ReconPath = summaryPath
 			notify("recon.completed")
-			_ = sm.MarkReconCompleted()
+			_ = sm.MarkReconCompleted(summaryPath)
 		}
 	}
 
@@ -266,7 +279,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 
 	stOut, errOut := os.Stat(outJSONL)
-	if sm.IsNucleiCompleted() && errOut == nil && stOut.Size() > 0 {
+	if opt.SkipNuclei {
+		notify("exploit.nuclei.skipped")
+	} else if sm.IsNucleiCompleted() && errOut == nil && stOut.Size() > 0 {
 		notify("exploit.nuclei.resumed")
 	} else {
 		notify("exploit.started")
@@ -793,6 +808,13 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 	var raw map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return rs, fmt.Errorf("parse summary json: %w", err)
+	}
+	// Basic validation to ensure this is a recon summary and not a state file
+	if _, ok := raw["workdir"]; !ok {
+		if _, isState := raw["job_id"]; isState {
+			return rs, fmt.Errorf("invalid recon summary: file appears to be a .breachpilot.state file (expected summary.json)")
+		}
+		return rs, fmt.Errorf("invalid recon summary: missing 'workdir' field")
 	}
 	if sv, ok := raw["schema_version"].(string); ok && sv != "" && sv != models.SchemaVersion {
 		return rs, fmt.Errorf("incompatible schema_version: %s", sv)

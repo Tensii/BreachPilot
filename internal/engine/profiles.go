@@ -7,6 +7,7 @@ type ScanProfile struct {
 	OnlyModules string
 	SkipModules string
 	MaxParallel int
+	SkipNuclei  bool
 }
 
 var profiles = map[string]ScanProfile{

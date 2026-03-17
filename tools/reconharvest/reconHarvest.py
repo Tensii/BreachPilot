@@ -1302,7 +1302,7 @@ class Runner:
         self.dashboard.set_context(source_running="assetfinder", subtask_done=1, subtask_total=2)
         if self.assetfinder_bin:
             self.run_tool("assetfinder", [self.assetfinder_bin, "--subs-only", self.target], timeout=self.config.assetfinder_timeout, stdout_path=assetfinder_txt, stderr_path=self.logs / "assetfinder.stderr.log", allow_failure=True)
-        lines = sorted({x.strip() for x in (subfinder_txt.read_text(encoding='utf-8', errors='ignore') + "\n" + assetfinder_txt.read_text(encoding='utf-8', errors='ignore')).splitlines() if x.strip()})
+        lines = sorted({self.target} | {x.strip() for x in (subfinder_txt.read_text(encoding='utf-8', errors='ignore') + "\n" + assetfinder_txt.read_text(encoding='utf-8', errors='ignore')).splitlines() if x.strip()})
         all_subdomains.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         self.dashboard.set_context(source_running="merge complete", subtask_done=2, subtask_total=2)
         self.record_stage_status("subdomains", "completed", "merged passive subdomain sources")
@@ -1340,6 +1340,21 @@ class Runner:
                         continue
                 if host and ips:
                     mp.setdefault(host, set()).update(ips)
+
+            # Ensure IP addresses from all_subdomains.txt are included in resolved hosts
+            if all_subdomains.exists():
+                for line in all_subdomains.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    val = line.strip()
+                    if not val:
+                        continue
+                    # Strip scheme if present
+                    pure = re.sub(r'^https?://', '', val, flags=re.I).split(':')[0]
+                    try:
+                        ipaddress.ip_address(pure)
+                        hosts.append(pure)
+                        mp.setdefault(pure, set()).add(pure)
+                    except Exception:
+                        continue
 
             # Fallback enrichment from httpx output when dnsx output is hostname-only.
             if not mp:
@@ -2790,6 +2805,8 @@ class Runner:
                 "cors_findings_json": str(self.intel / "cors_findings.json"),
                 "secrets_findings_md": str(self.intel / "secrets_findings.md"),
                 "secrets_findings_json": str(self.intel / "secrets_findings.json"),
+                "portscan_results_json": str(self.workdir / "portscan_results.json"),
+                "portscan_hosts_txt": str(self.workdir / "portscan_hosts.txt"),
             },
             "status": {
                 "stage_status_jsonl": str(self.workdir / "stage_status.jsonl"),

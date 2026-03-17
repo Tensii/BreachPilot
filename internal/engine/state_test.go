@@ -30,11 +30,15 @@ func TestStateManager(t *testing.T) {
 	if sm.IsReconCompleted() {
 		t.Fatalf("expected recon not completed initially")
 	}
-	if err := sm.MarkReconCompleted(); err != nil {
+	expectedReconPath := "/tmp/recon/summary.json"
+	if err := sm.MarkReconCompleted(expectedReconPath); err != nil {
 		t.Fatalf("failed to mark recon completed: %v", err)
 	}
 	if !sm.IsReconCompleted() {
 		t.Fatalf("expected recon marked as completed")
+	}
+	if sm.State().ReconPath != expectedReconPath {
+		t.Fatalf("expected recon path %s but got %s", expectedReconPath, sm.State().ReconPath)
 	}
 
 	// 3. Mark Nuclei
@@ -64,6 +68,9 @@ func TestStateManager(t *testing.T) {
 
 	if !sm2.IsReconCompleted() {
 		t.Fatalf("reloaded state lost recon completion")
+	}
+	if sm2.State().ReconPath != expectedReconPath {
+		t.Fatalf("reloaded state lost recon path: expected %s, got %s", expectedReconPath, sm2.State().ReconPath)
 	}
 	if !sm2.IsNucleiCompleted() {
 		t.Fatalf("reloaded state lost nuclei completion")
