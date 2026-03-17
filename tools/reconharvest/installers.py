@@ -187,7 +187,7 @@ def install_go_tool(binary: str, go_install_cmd: str, force: bool = False) -> No
     local_bin.mkdir(parents=True, exist_ok=True)
     tool_path = go_bin / binary
     link_path = local_bin / binary
-    if tool_path.exists() and ((not link_path.exists()) or force):
+    if tool_path.exists():
         try:
             if link_path.exists() or link_path.is_symlink():
                 link_path.unlink(missing_ok=True)
@@ -203,7 +203,7 @@ def install_go_tool(binary: str, go_install_cmd: str, force: bool = False) -> No
 
     # Re-check and relink post-install
     tool_path = go_bin / binary
-    if tool_path.exists() and ((not link_path.exists()) or force):
+    if tool_path.exists():
         try:
             if link_path.exists() or link_path.is_symlink():
                 link_path.unlink(missing_ok=True)

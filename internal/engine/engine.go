@@ -45,6 +45,7 @@ import (
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
+	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -889,6 +890,7 @@ func registeredModuleInfos() []ModuleInfo {
 		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true},
 		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true},
 		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true},
+		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true},
 	}
 }
 
@@ -928,6 +930,7 @@ func registeredModuleInstances() []exploit.Module {
 		authbypass.New(),
 		mutationengine.New(),
 		idorplaybook.New(),
+		jwtaccess.New(),
 	}
 }
 
