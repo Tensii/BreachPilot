@@ -160,6 +160,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		AuthUserHeaders:            cfg.AuthUserHeaders,
 		AuthAdminHeaders:           cfg.AuthAdminHeaders,
 		SSRFCanaryHost:             cfg.SSRFCanaryHost,
+		SSRFCanaryRedirect:         cfg.SSRFCanarySupportsRedirect,
 		OpenRedirectCanaryHost:     cfg.OpenRedirectCanaryHost,
 		SkipNuclei:                 cfg.SkipNuclei,
 		ScoringEnabled:             cfg.ScoringEnabled,

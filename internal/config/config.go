@@ -44,6 +44,7 @@ type Config struct {
 	AuthUserHeaders            string
 	AuthAdminHeaders           string
 	SSRFCanaryHost             string
+	SSRFCanarySupportsRedirect bool
 	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
 	ScoringEnabled             bool
@@ -101,6 +102,7 @@ func Load() Config {
 		AuthUserHeaders:            getEnv("BREACHPILOT_AUTH_USER_HEADERS", ""),
 		AuthAdminHeaders:           getEnv("BREACHPILOT_AUTH_ADMIN_HEADERS", ""),
 		SSRFCanaryHost:             getEnv("BREACHPILOT_SSRF_CANARY_HOST", "ssrf.breachpilot.internal"),
+		SSRFCanarySupportsRedirect: getEnvBool("BREACHPILOT_SSRF_CANARY_REDIRECT", false),
 		OpenRedirectCanaryHost:     getEnv("BREACHPILOT_REDIRECT_CANARY_HOST", "evil.breachpilot.internal"),
 		SkipNuclei:                 getEnvBool("BREACHPILOT_SKIP_NUCLEI", false),
 		ScoringEnabled:             getEnvBool("BREACHPILOT_SCORING_ENABLED", true),

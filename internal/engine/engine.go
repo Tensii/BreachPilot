@@ -101,6 +101,7 @@ type Options struct {
 	AuthUserHeaders            string
 	AuthAdminHeaders           string
 	SSRFCanaryHost             string
+	SSRFCanaryRedirect         bool
 	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
 	ScoringEnabled             bool
@@ -388,6 +389,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		AuthUserHeaders:        opt.AuthUserHeaders,
 		AuthAdminHeaders:       opt.AuthAdminHeaders,
 		SSRFCanaryHost:         opt.SSRFCanaryHost,
+		SSRFCanaryRedirect:     opt.SSRFCanaryRedirect,
 		OpenRedirectCanaryHost: opt.OpenRedirectCanaryHost,
 		ScoringEnabled:         opt.ScoringEnabled,
 		ChainAnalysisEnabled:   opt.ChainAnalysisEnabled,
