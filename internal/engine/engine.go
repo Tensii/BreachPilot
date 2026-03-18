@@ -830,8 +830,9 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 		return rs, fmt.Errorf("resume live hosts invalid: %s", live)
 	}
 	if rt := strings.TrimSpace(requestedTarget); rt != "" && rt != "from-summary" {
-		if tgt := ingest.TargetFromWorkdir(rs.Workdir); tgt != "" && strings.Contains(tgt, ".") && !strings.EqualFold(tgt, rt) {
-			return rs, fmt.Errorf("resume target mismatch: summary=%s requested=%s", tgt, rt)
+		normalizedRT := scope.NormalizeTargetForDir(rt)
+		if tgt := ingest.TargetFromWorkdir(rs.Workdir); tgt != "" && strings.Contains(tgt, ".") && !strings.EqualFold(tgt, normalizedRT) {
+			return rs, fmt.Errorf("resume target mismatch: summary=%s requested=%s (normalized=%s)", tgt, rt, normalizedRT)
 		}
 	}
 	return rs, nil

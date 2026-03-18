@@ -1025,7 +1025,7 @@ class Runner:
                 continue
             
             # PROTECT essential files required by BreachPilot for ingestion
-            if p.name in {"workspace_meta.json", "summary.json", "live_hosts.txt"}:
+            if p.name in {"workspace_meta.json", "summary.json", "live_hosts.txt", "xss_findings.json", "dalfox_targets.txt"}:
                 continue
             if p.parent == self.intel and "ranked" in p.name:
                 continue
@@ -3142,7 +3142,8 @@ class Runner:
             try:
                 loaded = json.loads(out_json.read_text(encoding="utf-8", errors="ignore"))
                 if isinstance(loaded, list):
-                    data = loaded
+                    # Filter out empty objects [{}] which Dalfox v2.12.0 outputs for failed/unreachable targets
+                    data = [x for x in loaded if isinstance(x, dict) and x]
                     count = len(data)
             except Exception:
                 pass

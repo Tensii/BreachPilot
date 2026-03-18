@@ -27,3 +27,37 @@ func ValidateTarget(target string) error {
 	}
 	return nil
 }
+
+// NormalizeTargetForDir sanitizes a target into a safe directory name.
+// This is used for artifact directory naming and should be used consistently
+// when comparing targets against directory-derived names.
+func NormalizeTargetForDir(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "unknown"
+	}
+	// Remove protocol prefix if present
+	for _, pfx := range []string{"https://", "http://"} {
+		if strings.HasPrefix(strings.ToLower(s), pfx) {
+			s = s[len(pfx):]
+			break
+		}
+	}
+	// Remove trailing slashes
+	s = strings.TrimRight(s, "/")
+	// Replace disallowed characters
+	var out strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			out.WriteRune(r)
+		default:
+			out.WriteRune('_')
+		}
+	}
+	result := out.String()
+	if result == "" {
+		return "unknown"
+	}
+	return result
+}

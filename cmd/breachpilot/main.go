@@ -23,6 +23,7 @@ import (
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/notify"
+	"breachpilot/internal/scope"
 	"github.com/google/shlex"
 )
 
@@ -572,7 +573,7 @@ func runSetup(opt engine.Options) error {
 
 // nextRunID creates a human-friendly job ID: "<domain>/<N>" with auto-incrementing run number.
 func nextRunID(artifactsRoot, target string) string {
-	safeDomain := safeDirName(target)
+	safeDomain := scope.NormalizeTargetForDir(target)
 	domainDir := filepath.Join(artifactsRoot, safeDomain)
 	_ = os.MkdirAll(domainDir, 0o755)
 	run := 1
@@ -586,34 +587,6 @@ func nextRunID(artifactsRoot, target string) string {
 	return fmt.Sprintf("%s/%d", safeDomain, run)
 }
 
-// safeDirName sanitises a target into a safe directory name.
-func safeDirName(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "unknown"
-	}
-	// Remove protocol prefix if present
-	for _, pfx := range []string{"https://", "http://"} {
-		s = strings.TrimPrefix(s, pfx)
-	}
-	// Remove trailing slashes
-	s = strings.TrimRight(s, "/")
-	// Replace disallowed characters
-	var out strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
-			out.WriteRune(r)
-		default:
-			out.WriteRune('_')
-		}
-	}
-	result := out.String()
-	if result == "" {
-		return "unknown"
-	}
-	return result
-}
 
 func probeCommand(raw string, extraArgs ...string) error {
 	argv, err := splitCommand(raw)
