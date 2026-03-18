@@ -44,19 +44,25 @@ type JobState struct {
 
 // ExploitFinding is a single verified exploit-phase result.
 type ExploitFinding struct {
-	Module          string                 `json:"module"`
-	Severity        string                 `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
-	Confidence      int                    `json:"confidence"` // 0–100
-	Target          string                 `json:"target"`
-	Title           string                 `json:"title"`
-	Validation      string                 `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
-	Evidence        string                 `json:"evidence,omitempty"`
-	ArtifactPath    string                 `json:"artifact_path,omitempty"`
-	PoCHint         string                 `json:"poc_hint,omitempty"`
-	Tags            []string               `json:"tags,omitempty"`
-	CWE             string                 `json:"cwe,omitempty"`
-	Timestamp       string                 `json:"timestamp"`
-	DynamicMetadata map[string]interface{} `json:"dynamic_metadata,omitempty"`
+	Module           string                 `json:"module"`
+	Severity         string                 `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
+	Confidence       int                    `json:"confidence"` // 0–100
+	Target           string                 `json:"target"`
+	Title            string                 `json:"title"`
+	Validation       string                 `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
+	Evidence         string                 `json:"evidence,omitempty"`
+	ArtifactPath     string                 `json:"artifact_path,omitempty"`
+	PoCHint          string                 `json:"poc_hint,omitempty"`
+	Tags             []string               `json:"tags,omitempty"`
+	CWE              string                 `json:"cwe,omitempty"`
+	Timestamp        string                 `json:"timestamp"`
+	DynamicMetadata  map[string]interface{} `json:"dynamic_metadata,omitempty"`
+	DBMSGuess        string                 `json:"dbms_guess,omitempty"`
+	DBMSConfidence   int                    `json:"dbms_confidence,omitempty"`
+	ValidationFamily string                 `json:"validation_family,omitempty"`
+	MatchedIndicator string                 `json:"matched_indicator,omitempty"`
+	MatchedSnippet   string                 `json:"matched_snippet,omitempty"`
+	Capabilities     []string               `json:"capabilities,omitempty"`
 
 	// RiskScore holds the contextual score computed by the scoring engine.
 	// Zero value = not yet scored.
