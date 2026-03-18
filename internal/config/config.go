@@ -43,6 +43,8 @@ type Config struct {
 	AuthAnonHeaders            string
 	AuthUserHeaders            string
 	AuthAdminHeaders           string
+	SSRFCanaryHost             string
+	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
 }
 
@@ -94,6 +96,8 @@ func Load() Config {
 		AuthAnonHeaders:            getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
 		AuthUserHeaders:            getEnv("BREACHPILOT_AUTH_USER_HEADERS", ""),
 		AuthAdminHeaders:           getEnv("BREACHPILOT_AUTH_ADMIN_HEADERS", ""),
+		SSRFCanaryHost:             getEnv("BREACHPILOT_SSRF_CANARY_HOST", "ssrf.breachpilot.internal"),
+		OpenRedirectCanaryHost:     getEnv("BREACHPILOT_REDIRECT_CANARY_HOST", "evil.breachpilot.internal"),
 		SkipNuclei:                 getEnvBool("BREACHPILOT_SKIP_NUCLEI", false),
 	}
 }

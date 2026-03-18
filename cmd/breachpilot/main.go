@@ -159,6 +159,8 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		AuthAnonHeaders:            cfg.AuthAnonHeaders,
 		AuthUserHeaders:            cfg.AuthUserHeaders,
 		AuthAdminHeaders:           cfg.AuthAdminHeaders,
+		SSRFCanaryHost:             cfg.SSRFCanaryHost,
+		OpenRedirectCanaryHost:     cfg.OpenRedirectCanaryHost,
 		SkipNuclei:                 cfg.SkipNuclei,
 	}
 }

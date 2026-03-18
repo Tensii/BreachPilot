@@ -51,6 +51,7 @@ import (
 	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
 	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
 	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
+	idorsize "breachpilot/internal/exploit/modules/idorsize"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -98,6 +99,8 @@ type Options struct {
 	AuthAnonHeaders            string
 	AuthUserHeaders            string
 	AuthAdminHeaders           string
+	SSRFCanaryHost             string
+	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
 }
 
@@ -379,6 +382,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		AuthAnonHeaders:      opt.AuthAnonHeaders,
 		AuthUserHeaders:      opt.AuthUserHeaders,
 		AuthAdminHeaders:     opt.AuthAdminHeaders,
+		SSRFCanaryHost:       opt.SSRFCanaryHost,
+		OpenRedirectCanaryHost: opt.OpenRedirectCanaryHost,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
@@ -927,9 +932,11 @@ func registeredModuleInfos() []ModuleInfo {
 		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true},
 		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true},
 		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true},
+		{"ssrf-prober", "Detects SSRF via parameters, headers, and bodies", true},
 		{"crlf-injection", "Detects CRLF injection in headers/params", true},
 		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true},
 		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true},
+		{"idor-size", "Response size-based IDOR detection", true},
 	}
 }
 
@@ -975,6 +982,7 @@ func registeredModuleInstances() []exploit.Module {
 		crlfinjection.New(),
 		samlprobe.New(),
 		rsqlinjection.New(),
+		idorsize.New(),
 	}
 }
 
