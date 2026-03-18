@@ -19,11 +19,13 @@ import (
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/filter"
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
+	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
+	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
 	cspaudit "breachpilot/internal/exploit/modules/cspaudit"
 	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
@@ -32,30 +34,29 @@ import (
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
 	idorplaybook "breachpilot/internal/exploit/modules/idorplaybook"
+	idorsize "breachpilot/internal/exploit/modules/idorsize"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
+	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
 	mutationengine "breachpilot/internal/exploit/modules/mutationengine"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
 	privpath "breachpilot/internal/exploit/modules/privpath"
+	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
+	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
 	sessionabuse "breachpilot/internal/exploit/modules/sessionabuse"
+	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
 	statechange "breachpilot/internal/exploit/modules/statechange"
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
-	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
-	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
-	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
-	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
-	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
-	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
-	idorsize "breachpilot/internal/exploit/modules/idorsize"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
 	"breachpilot/internal/scope"
+	riskscoring "breachpilot/internal/scoring"
 	"github.com/google/shlex"
 )
 
@@ -102,6 +103,10 @@ type Options struct {
 	SSRFCanaryHost             string
 	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
+	ScoringEnabled             bool
+	ChainAnalysisEnabled       bool
+	ExposureOverride           string
+	CriticalityOverride        string
 }
 
 // Notifier sends structured events.
@@ -367,23 +372,27 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		opt.Progress("exploit.module.order " + strings.Join(names, ","))
 	}
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
-		ArtifactsRoot:        opt.ArtifactsRoot,
-		Progress:             opt.Progress,
-		SafeMode:             job.SafeMode,
-		MaxParallel:          0,
-		StateManager:         sm,
-		ModuleTimeoutSec:     opt.ModuleTimeoutSec,
-		ModuleRetries:        opt.ModuleRetries,
-		Aggressive:           opt.AggressiveMode,
-		ProofMode:            opt.ProofMode,
-		ProofTargetAllowlist: opt.ProofTargetAllowlist,
-		AuthUserCookie:       opt.AuthUserCookie,
-		AuthAdminCookie:      opt.AuthAdminCookie,
-		AuthAnonHeaders:      opt.AuthAnonHeaders,
-		AuthUserHeaders:      opt.AuthUserHeaders,
-		AuthAdminHeaders:     opt.AuthAdminHeaders,
-		SSRFCanaryHost:       opt.SSRFCanaryHost,
+		ArtifactsRoot:          opt.ArtifactsRoot,
+		Progress:               opt.Progress,
+		SafeMode:               job.SafeMode,
+		MaxParallel:            0,
+		StateManager:           sm,
+		ModuleTimeoutSec:       opt.ModuleTimeoutSec,
+		ModuleRetries:          opt.ModuleRetries,
+		Aggressive:             opt.AggressiveMode,
+		ProofMode:              opt.ProofMode,
+		ProofTargetAllowlist:   opt.ProofTargetAllowlist,
+		AuthUserCookie:         opt.AuthUserCookie,
+		AuthAdminCookie:        opt.AuthAdminCookie,
+		AuthAnonHeaders:        opt.AuthAnonHeaders,
+		AuthUserHeaders:        opt.AuthUserHeaders,
+		AuthAdminHeaders:       opt.AuthAdminHeaders,
+		SSRFCanaryHost:         opt.SSRFCanaryHost,
 		OpenRedirectCanaryHost: opt.OpenRedirectCanaryHost,
+		ScoringEnabled:         opt.ScoringEnabled,
+		ChainAnalysisEnabled:   opt.ChainAnalysisEnabled,
+		ExposureOverride:       opt.ExposureOverride,
+		CriticalityOverride:    opt.CriticalityOverride,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
@@ -397,7 +406,86 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
 
-	// Send exploit.modules.completed webhook
+	// --- scoring pass ---
+	if opt.ScoringEnabled {
+		// 1. Infer target-level exposure and criticality
+		meta := riskscoring.TargetMeta{
+			Hostname:         job.Target,
+			ResolvedIP:       "", // Would need to resolve or get from rs
+			IsInternetFacing: true,
+			BehindCDN:        false,
+		}
+
+		exposure := riskscoring.InferExposure(meta)
+		if opt.ExposureOverride != "" {
+			exposure = riskscoring.ExposureLevel(opt.ExposureOverride)
+		}
+
+		criticality := riskscoring.InferCriticality(meta)
+		if opt.CriticalityOverride != "" {
+			criticality = riskscoring.CriticalityLevel(opt.CriticalityOverride)
+		}
+
+		// 2. Build FindingMeta slice for chain analysis
+		findingMetas := make([]riskscoring.FindingMeta, len(exploitFindings))
+		for i, f := range exploitFindings {
+			findingMetas[i] = riskscoring.FindingMeta{
+				ID:     fmt.Sprintf("%s-%d", f.Module, i),
+				Module: f.Module,
+				URL:    f.Target,
+			}
+		}
+
+		// 3. Run chain analysis
+		chainBonusMap := make(map[string]float64)
+		chainRefsMap := make(map[string][]riskscoring.ChainRef)
+		var allChains []riskscoring.ChainRef
+
+		if opt.ChainAnalysisEnabled {
+			chainAnalysis := riskscoring.AnalyzeChains(findingMetas)
+			for id, ca := range chainAnalysis {
+				chainBonusMap[id] = ca.Bonus
+				chainRefsMap[id] = ca.Chains
+				allChains = append(allChains, ca.Chains...)
+			}
+		}
+
+		// 4. Score each finding
+		var scoredFindings []riskscoring.ScoredFinding
+		for i := range exploitFindings {
+			f := &exploitFindings[i]
+			id := findingMetas[i].ID
+			bonus := chainBonusMap[id]
+			chains := chainRefsMap[id]
+
+			input := riskscoring.ScoreInput{
+				FindingID:   id,
+				Module:      f.Module,
+				URL:         f.Target,
+				RawSeverity: f.Severity,
+				Exposure:    exposure,
+				Criticality: criticality,
+				ChainBonus:  bonus,
+			}
+
+			rsScore := riskscoring.Score(input)
+			rsScore.Chains = chains
+			f.RiskScore = rsScore
+
+			scoredFindings = append(scoredFindings, riskscoring.ScoredFinding{
+				ID:     id,
+				Title:  f.Title,
+				Module: f.Module,
+				URL:    f.Target,
+				Score:  rsScore,
+			})
+		}
+
+		// 5. Build scan-level summary
+		job.RiskSummary = riskscoring.BuildSummary(scoredFindings, exposure, criticality, allChains)
+		job.RiskScore = job.RiskSummary.OverallScore
+	}
+
 	if opt.Notifier != nil {
 		severityCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
 		topFindings := make([]map[string]any, 0, 5)

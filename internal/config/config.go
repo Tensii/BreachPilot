@@ -46,6 +46,10 @@ type Config struct {
 	SSRFCanaryHost             string
 	OpenRedirectCanaryHost     string
 	SkipNuclei                 bool
+	ScoringEnabled             bool
+	ChainAnalysisEnabled       bool
+	ExposureOverride           string
+	CriticalityOverride        string
 }
 
 func Load() Config {
@@ -99,6 +103,10 @@ func Load() Config {
 		SSRFCanaryHost:             getEnv("BREACHPILOT_SSRF_CANARY_HOST", "ssrf.breachpilot.internal"),
 		OpenRedirectCanaryHost:     getEnv("BREACHPILOT_REDIRECT_CANARY_HOST", "evil.breachpilot.internal"),
 		SkipNuclei:                 getEnvBool("BREACHPILOT_SKIP_NUCLEI", false),
+		ScoringEnabled:             getEnvBool("BREACHPILOT_SCORING_ENABLED", true),
+		ChainAnalysisEnabled:       getEnvBool("BREACHPILOT_CHAIN_ANALYSIS_ENABLED", true),
+		ExposureOverride:           getEnv("BREACHPILOT_EXPOSURE_OVERRIDE", ""),
+		CriticalityOverride:        getEnv("BREACHPILOT_CRITICALITY_OVERRIDE", ""),
 	}
 }
 
@@ -209,8 +217,8 @@ func (c Config) RedactedSummary() string {
 	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
 }
 
 func loadEnvFile(path string) error {

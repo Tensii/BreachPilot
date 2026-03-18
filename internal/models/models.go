@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"breachpilot/internal/scoring"
+)
 
 const SchemaVersion = "1"
 
@@ -40,19 +44,23 @@ type JobState struct {
 
 // ExploitFinding is a single verified exploit-phase result.
 type ExploitFinding struct {
-	Module       string   `json:"module"`
-	Severity     string   `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
-	Confidence   int      `json:"confidence"` // 0–100
-	Target       string   `json:"target"`
-	Title        string   `json:"title"`
-	Validation   string   `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
-	Evidence     string   `json:"evidence,omitempty"`
-	ArtifactPath string   `json:"artifact_path,omitempty"`
-	PoCHint      string   `json:"poc_hint,omitempty"`
-	Tags         []string `json:"tags,omitempty"`
-	CWE          string   `json:"cwe,omitempty"`
-	Timestamp    string                 `json:"timestamp"`
+	Module          string                 `json:"module"`
+	Severity        string                 `json:"severity"`   // CRITICAL / HIGH / MEDIUM / LOW / INFO
+	Confidence      int                    `json:"confidence"` // 0–100
+	Target          string                 `json:"target"`
+	Title           string                 `json:"title"`
+	Validation      string                 `json:"validation,omitempty"` // signal / verified / confirmed / weaponized
+	Evidence        string                 `json:"evidence,omitempty"`
+	ArtifactPath    string                 `json:"artifact_path,omitempty"`
+	PoCHint         string                 `json:"poc_hint,omitempty"`
+	Tags            []string               `json:"tags,omitempty"`
+	CWE             string                 `json:"cwe,omitempty"`
+	Timestamp       string                 `json:"timestamp"`
 	DynamicMetadata map[string]interface{} `json:"dynamic_metadata,omitempty"`
+
+	// RiskScore holds the contextual score computed by the scoring engine.
+	// Zero value = not yet scored.
+	RiskScore riskscoring.RiskScore `json:"risk_score,omitempty"`
 }
 
 // SecretsFinding represents an exposed secret string discovered by ReconHarvest.
@@ -106,31 +114,32 @@ type ExploitModuleTelemetry struct {
 }
 
 type Job struct {
-	ID                    string                   `json:"id"`
-	Target                string                   `json:"target"`
-	Mode                  string                   `json:"mode,omitempty"`
-	SafeMode              bool                     `json:"safe_mode"`
-	ApproveIntrusive      bool                     `json:"approve_intrusive"`
-	Templates             []string                 `json:"templates,omitempty"`
-	ApprovalTicket        string                   `json:"approval_ticket,omitempty"`
-	ReconPath             string                   `json:"recon_summary"`
-	Status                JobStatus                `json:"status"`
-	CreatedAt             time.Time                `json:"created_at"`
-	StartedAt             time.Time                `json:"started_at,omitempty"`
-	FinishedAt            time.Time                `json:"finished_at,omitempty"`
-	ErrorCode             string                   `json:"error_code,omitempty"`
-	Error                 string                   `json:"error,omitempty"`
-	PlanPreview           []string                 `json:"plan_preview,omitempty"`
-	EvidencePath          string                   `json:"evidence_path,omitempty"`
-	FindingsCount         int                      `json:"findings_count,omitempty"`
-	ExploitFindingsCount  int                      `json:"exploit_findings_count,omitempty"`
-	ExploitFindingsPath   string                   `json:"exploit_findings_path,omitempty"`
-	ExploitReportPath     string                   `json:"exploit_report_path,omitempty"`
-	ExploitHTMLReportPath string                   `json:"exploit_html_report_path,omitempty"`
-	RiskScore             float64                  `json:"risk_score,omitempty"`
-	ModuleTelemetry       []ExploitModuleTelemetry `json:"module_telemetry,omitempty"`
-	FilteredCount         int                      `json:"filtered_count,omitempty"`
-	ReconDurationSec      float64                  `json:"recon_duration_sec,omitempty"`
-	ExploitDurationSec    float64                  `json:"exploit_duration_sec,omitempty"`
-	ReportPath            string                   `json:"report_path,omitempty"`
+	ID                    string                      `json:"id"`
+	Target                string                      `json:"target"`
+	Mode                  string                      `json:"mode,omitempty"`
+	SafeMode              bool                        `json:"safe_mode"`
+	ApproveIntrusive      bool                        `json:"approve_intrusive"`
+	Templates             []string                    `json:"templates,omitempty"`
+	ApprovalTicket        string                      `json:"approval_ticket,omitempty"`
+	ReconPath             string                      `json:"recon_summary"`
+	Status                JobStatus                   `json:"status"`
+	CreatedAt             time.Time                   `json:"created_at"`
+	StartedAt             time.Time                   `json:"started_at,omitempty"`
+	FinishedAt            time.Time                   `json:"finished_at,omitempty"`
+	ErrorCode             string                      `json:"error_code,omitempty"`
+	Error                 string                      `json:"error,omitempty"`
+	PlanPreview           []string                    `json:"plan_preview,omitempty"`
+	EvidencePath          string                      `json:"evidence_path,omitempty"`
+	FindingsCount         int                         `json:"findings_count,omitempty"`
+	ExploitFindingsCount  int                         `json:"exploit_findings_count,omitempty"`
+	ExploitFindingsPath   string                      `json:"exploit_findings_path,omitempty"`
+	ExploitReportPath     string                      `json:"exploit_report_path,omitempty"`
+	ExploitHTMLReportPath string                      `json:"exploit_html_report_path,omitempty"`
+	RiskScore             float64                     `json:"risk_score,omitempty"`
+	RiskSummary           riskscoring.ScanRiskSummary `json:"risk_summary,omitempty"`
+	ModuleTelemetry       []ExploitModuleTelemetry    `json:"module_telemetry,omitempty"`
+	FilteredCount         int                         `json:"filtered_count,omitempty"`
+	ReconDurationSec      float64                     `json:"recon_duration_sec,omitempty"`
+	ExploitDurationSec    float64                     `json:"exploit_duration_sec,omitempty"`
+	ReportPath            string                      `json:"report_path,omitempty"`
 }

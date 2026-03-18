@@ -162,6 +162,10 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		SSRFCanaryHost:             cfg.SSRFCanaryHost,
 		OpenRedirectCanaryHost:     cfg.OpenRedirectCanaryHost,
 		SkipNuclei:                 cfg.SkipNuclei,
+		ScoringEnabled:             cfg.ScoringEnabled,
+		ChainAnalysisEnabled:       cfg.ChainAnalysisEnabled,
+		ExposureOverride:           cfg.ExposureOverride,
+		CriticalityOverride:        cfg.CriticalityOverride,
 	}
 }
 
@@ -588,7 +592,6 @@ func nextRunID(artifactsRoot, target string) string {
 	}
 	return fmt.Sprintf("%s/%d", safeDomain, run)
 }
-
 
 func probeCommand(raw string, extraArgs ...string) error {
 	argv, err := splitCommand(raw)
