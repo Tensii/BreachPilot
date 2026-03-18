@@ -48,6 +48,9 @@ import (
 	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
+	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
+	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
+	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -924,6 +927,9 @@ func registeredModuleInfos() []ModuleInfo {
 		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true},
 		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true},
 		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true},
+		{"crlf-injection", "Detects CRLF injection in headers/params", true},
+		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true},
+		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true},
 	}
 }
 
@@ -966,6 +972,9 @@ func registeredModuleInstances() []exploit.Module {
 		jwtaccess.New(),
 		advancedinjection.New(),
 		ssrfprober.New(),
+		crlfinjection.New(),
+		samlprobe.New(),
+		rsqlinjection.New(),
 	}
 }
 
@@ -997,6 +1006,12 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 	if strings.TrimSpace(rs.URLs.All) != "" {
 		score["graphql-abuse"] = 22
 		score["auth-bypass"] = 26
+		score["crlf-injection"] = 30
+		score["ssrf-prober"] = 35
+		score["rsql-injection"] = 40
+	}
+	if strings.Contains(strings.ToLower(rs.Live), "saml") || strings.Contains(strings.ToLower(rs.Live), "sso") {
+		score["saml-probe"] = 15
 	}
 	// keep broad context modules early too.
 	score["api-surface"] = 18
