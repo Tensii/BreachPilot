@@ -51,7 +51,8 @@ type ExploitFinding struct {
 	PoCHint      string   `json:"poc_hint,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	CWE          string   `json:"cwe,omitempty"`
-	Timestamp    string   `json:"timestamp"`
+	Timestamp    string                 `json:"timestamp"`
+	DynamicMetadata map[string]interface{} `json:"dynamic_metadata,omitempty"`
 }
 
 // SecretsFinding represents an exposed secret string discovered by ReconHarvest.

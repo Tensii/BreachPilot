@@ -46,6 +46,8 @@ import (
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
+	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
+	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -962,6 +964,8 @@ func registeredModuleInstances() []exploit.Module {
 		mutationengine.New(),
 		idorplaybook.New(),
 		jwtaccess.New(),
+		advancedinjection.New(),
+		ssrfprober.New(),
 	}
 }
 
