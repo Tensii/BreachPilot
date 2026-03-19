@@ -108,6 +108,9 @@ type Options struct {
 	ChainAnalysisEnabled       bool
 	ExposureOverride           string
 	CriticalityOverride        string
+	BrowserCaptureEnabled      bool
+	BrowserCaptureMaxPages     int
+	BrowserCapturePath         string
 }
 
 // Notifier sends structured events.
@@ -395,6 +398,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		ChainAnalysisEnabled:   opt.ChainAnalysisEnabled,
 		ExposureOverride:       opt.ExposureOverride,
 		CriticalityOverride:    opt.CriticalityOverride,
+		BrowserCaptureEnabled:  opt.BrowserCaptureEnabled,
+		BrowserCaptureMaxPages: opt.BrowserCaptureMaxPages,
+		BrowserCapturePath:     opt.BrowserCapturePath,
 	}, exploitModules)
 	job.ModuleTelemetry = telemetry
 	if ctx.Err() == context.Canceled {
