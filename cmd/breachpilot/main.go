@@ -70,6 +70,12 @@ func main() {
 	jsonOut := false
 	aggressiveFlag := false
 	skipNucleiFlag := false
+	if cfg.BrowserCaptureEnabled {
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE", "1")
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", fmt.Sprintf("%d", cfg.BrowserCaptureMaxPages))
+		_ = os.Setenv("BREACHPILOT_BROWSER_PATH", cfg.BrowserCapturePath)
+		_ = os.Setenv("BREACHPILOT_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
+	}
 	filtered := make([]string, 0, len(args))
 	for _, a := range args {
 		n := strings.ToLower(strings.TrimSpace(a))
@@ -167,6 +173,9 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		ChainAnalysisEnabled:       cfg.ChainAnalysisEnabled,
 		ExposureOverride:           cfg.ExposureOverride,
 		CriticalityOverride:        cfg.CriticalityOverride,
+		BrowserCaptureEnabled:      cfg.BrowserCaptureEnabled,
+		BrowserCaptureMaxPages:     cfg.BrowserCaptureMaxPages,
+		BrowserCapturePath:         cfg.BrowserCapturePath,
 	}
 }
 

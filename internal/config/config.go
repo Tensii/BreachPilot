@@ -51,6 +51,9 @@ type Config struct {
 	ChainAnalysisEnabled       bool
 	ExposureOverride           string
 	CriticalityOverride        string
+	BrowserCaptureEnabled      bool
+	BrowserCaptureMaxPages     int
+	BrowserCapturePath         string
 }
 
 func Load() Config {
@@ -109,6 +112,9 @@ func Load() Config {
 		ChainAnalysisEnabled:       getEnvBool("BREACHPILOT_CHAIN_ANALYSIS_ENABLED", true),
 		ExposureOverride:           getEnv("BREACHPILOT_EXPOSURE_OVERRIDE", ""),
 		CriticalityOverride:        getEnv("BREACHPILOT_CRITICALITY_OVERRIDE", ""),
+		BrowserCaptureEnabled:      getEnvBool("BREACHPILOT_BROWSER_CAPTURE", false),
+		BrowserCaptureMaxPages:     getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", 6),
+		BrowserCapturePath:         getEnv("BREACHPILOT_BROWSER_PATH", ""),
 	}
 }
 
