@@ -119,6 +119,26 @@ type ExploitModuleTelemetry struct {
 	Canceled      bool   `json:"canceled"`
 }
 
+type RuntimeEvent struct {
+	Kind      string          `json:"kind"`
+	Stage     string          `json:"stage,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Module    string          `json:"module,omitempty"`
+	Target    string          `json:"target,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
+	Counts    map[string]int  `json:"counts,omitempty"`
+	Finding   *FindingPreview `json:"finding,omitempty"`
+}
+
+type FindingPreview struct {
+	Module     string `json:"module"`
+	Severity   string `json:"severity"`
+	Validation string `json:"validation,omitempty"`
+	Title      string `json:"title"`
+	Target     string `json:"target"`
+}
+
 type Job struct {
 	ID                    string                      `json:"id"`
 	Target                string                      `json:"target"`

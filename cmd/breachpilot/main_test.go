@@ -12,17 +12,29 @@ func TestFormatCLISummaryCounts(t *testing.T) {
 	job := &models.Job{Target: "example.com", Mode: "full", FindingsCount: 5, ExploitFindingsCount: 3, FilteredCount: 2}
 	lines := formatCLISummary(job, "full")
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Nuclei findings: 5") {
+	if !strings.Contains(joined, "Findings: nuclei=5 exploit=3 total=8 filtered=2") {
 		t.Fatalf("missing nuclei count: %s", joined)
 	}
-	if !strings.Contains(joined, "Exploit-module findings: 3") {
-		t.Fatalf("missing exploit count: %s", joined)
+	if !strings.Contains(joined, "Runtime: recon=0.0s exploit=0.0s total=0.0s") {
+		t.Fatalf("missing runtime line: %s", joined)
 	}
-	if !strings.Contains(joined, "Total findings: 8") {
-		t.Fatalf("missing total count: %s", joined)
+}
+
+func TestFormatCLISummaryTopModules(t *testing.T) {
+	job := &models.Job{
+		Target:               "example.com",
+		Mode:                 "full",
+		ExploitFindingsCount: 5,
+		ModuleTelemetry: []models.ExploitModuleTelemetry{
+			{Module: "idorplaybook", FindingsCount: 3},
+			{Module: "authbypass", FindingsCount: 2},
+			{Module: "headers", FindingsCount: 1},
+		},
 	}
-	if !strings.Contains(joined, "Filtered findings: 2") {
-		t.Fatalf("missing filtered count: %s", joined)
+	lines := formatCLISummary(job, "full")
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Top exploit modules: idorplaybook=3, authbypass=2, headers=1") {
+		t.Fatalf("missing top module summary: %s", joined)
 	}
 }
 

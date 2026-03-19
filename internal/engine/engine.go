@@ -82,6 +82,7 @@ type Options struct {
 	OnlyModules                string
 	ValidationOnly             bool
 	Progress                   func(string)
+	Events                     func(models.RuntimeEvent)
 	Notifier                   Notifier
 	PreviousReportPath         string
 	ReportFormats              string
@@ -156,10 +157,24 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		}
 	}
 
-	notify := func(s string) {
-		if opt.Progress != nil {
-			opt.Progress(s)
+	emit := func(ev models.RuntimeEvent) {
+		ev.Timestamp = time.Now().UTC()
+		if opt.Events != nil {
+			opt.Events(ev)
 		}
+		if opt.Progress != nil && strings.TrimSpace(ev.Message) != "" {
+			opt.Progress(ev.Message)
+		}
+	}
+	notify := func(s string) {
+		stage, status := classifyProgressMessage(s)
+		emit(models.RuntimeEvent{
+			Kind:    "stage",
+			Stage:   stage,
+			Status:  status,
+			Message: s,
+			Target:  job.Target,
+		})
 	}
 
 	if strings.EqualFold(strings.TrimSpace(job.Mode), "full") {
@@ -278,9 +293,14 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	nucleiInput := hostsPath
 	if rankedInput, rankedCount := buildRankedNucleiInput(rs.Intel.EndpointsRankedJSON, artDir); rankedCount > 0 {
 		nucleiInput = rankedInput
-		if opt.Progress != nil {
-			opt.Progress(fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount))
-		}
+		emit(models.RuntimeEvent{
+			Kind:    "stage",
+			Stage:   "exploit.targeting",
+			Status:  "info",
+			Message: fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount),
+			Target:  job.Target,
+			Counts:  map[string]int{"ranked_endpoints": rankedCount},
+		})
 	}
 
 	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
@@ -316,7 +336,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			return err
 		}
 		defer logFile.Close()
-		nucleiPW := &progressWriter{stage: "exploit.log", cb: opt.Progress}
+		nucleiPW := &progressWriter{stage: "exploit.log", target: job.Target, cb: opt.Progress, eventCB: opt.Events}
 		mw := io.MultiWriter(logFile, nucleiPW)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
@@ -344,9 +364,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				_ = writeJobReport(job, opt.ArtifactsRoot)
 				return fmt.Errorf("nuclei execution failed: %w", nucleiErr)
 			}
-			if opt.Progress != nil {
-				opt.Progress("exploit.warning nuclei exited non-zero with partial results; continuing")
-			}
+			emit(models.RuntimeEvent{
+				Kind:    "stage",
+				Stage:   "exploit",
+				Status:  "warning",
+				Message: "exploit.warning nuclei exited non-zero with partial results; continuing",
+				Target:  job.Target,
+			})
 			setJobError(job, ErrExecution, fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr))
 		}
 
@@ -368,16 +392,22 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		exploitModules = filterValidationOnly(exploitModules)
 	}
 	exploitModules = prioritizeModules(exploitModules, rs)
-	if opt.Progress != nil {
-		names := make([]string, 0, len(exploitModules))
-		for _, m := range exploitModules {
-			names = append(names, m.Name())
-		}
-		opt.Progress("exploit.module.order " + strings.Join(names, ","))
+	names := make([]string, 0, len(exploitModules))
+	for _, m := range exploitModules {
+		names = append(names, m.Name())
 	}
+	emit(models.RuntimeEvent{
+		Kind:    "module",
+		Stage:   "exploit.module",
+		Status:  "planned",
+		Message: "exploit.module.order " + strings.Join(names, ","),
+		Target:  job.Target,
+		Counts:  map[string]int{"planned": len(names)},
+	})
 	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
 		ArtifactsRoot:          opt.ArtifactsRoot,
 		Progress:               opt.Progress,
+		Events:                 opt.Events,
 		SafeMode:               job.SafeMode,
 		MaxParallel:            0,
 		StateManager:           sm,
@@ -413,6 +443,18 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	preFilterCount := len(exploitFindings)
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
+	emit(models.RuntimeEvent{
+		Kind:    "summary",
+		Stage:   "exploit",
+		Status:  "completed",
+		Message: fmt.Sprintf("exploit.summary nuclei=%d exploit=%d filtered=%d", job.FindingsCount, len(exploitFindings), job.FilteredCount),
+		Target:  job.Target,
+		Counts: map[string]int{
+			"nuclei":   job.FindingsCount,
+			"exploit":  len(exploitFindings),
+			"filtered": job.FilteredCount,
+		},
+	})
 
 	// --- scoring pass ---
 	if opt.ScoringEnabled {
@@ -610,6 +652,16 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		if _, vErr := validateReconSummary(summaryPath, job.Target); vErr != nil {
 			return "", fmt.Errorf("resume validation failed: %w", vErr)
 		}
+		if opt.Events != nil {
+			opt.Events(models.RuntimeEvent{
+				Kind:      "stage",
+				Stage:     "recon",
+				Status:    "resumed",
+				Message:   "recon.resume existing summary found; skipping recon rerun",
+				Target:    job.Target,
+				Timestamp: time.Now().UTC(),
+			})
+		}
 		if opt.Progress != nil {
 			opt.Progress("recon.resume existing summary found; skipping recon rerun")
 		}
@@ -655,7 +707,7 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
 		}
-		pw := &progressWriter{stage: "recon.log", cb: opt.Progress}
+		pw := &progressWriter{stage: "recon.log", target: job.Target, cb: opt.Progress, eventCB: opt.Events}
 		mw := io.MultiWriter(logFile, pw)
 		cmd.Stdout = mw
 		cmd.Stderr = mw
@@ -686,8 +738,20 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			setJobError(job, ErrTimeout, "recon timeout exceeded")
 			return "", nil
 		}
+		msg := fmt.Sprintf("recon.retry attempt=%d/%d", attempt, attempts)
+		if opt.Events != nil {
+			opt.Events(models.RuntimeEvent{
+				Kind:      "stage",
+				Stage:     "recon",
+				Status:    "warning",
+				Message:   msg,
+				Target:    job.Target,
+				Timestamp: time.Now().UTC(),
+				Counts:    map[string]int{"attempt": attempt, "attempts": attempts},
+			})
+		}
 		if opt.Progress != nil {
-			opt.Progress(fmt.Sprintf("recon.retry attempt=%d/%d", attempt, attempts))
+			opt.Progress(msg)
 		}
 		if attempt == attempts {
 			return "", fmt.Errorf("reconHarvest failed after retries: %w", err)
@@ -856,13 +920,15 @@ func writeJobReport(job *models.Job, artifactsRoot string) error {
 }
 
 type progressWriter struct {
-	stage string
-	cb    func(string)
-	buf   []byte
+	stage   string
+	target  string
+	cb      func(string)
+	eventCB func(models.RuntimeEvent)
+	buf     []byte
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
-	if w.cb == nil {
+	if w.cb == nil && w.eventCB == nil {
 		return len(p), nil
 	}
 	w.buf = append(w.buf, p...)
@@ -880,7 +946,20 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		line := strings.TrimSpace(string(w.buf[:i]))
 		w.buf = w.buf[i+1:]
 		if line != "" {
-			w.cb(fmt.Sprintf("%s %s", w.stage, line))
+			msg := fmt.Sprintf("%s %s", w.stage, line)
+			if w.cb != nil {
+				w.cb(msg)
+			}
+			if w.eventCB != nil {
+				w.eventCB(models.RuntimeEvent{
+					Kind:      "log",
+					Stage:     w.stage,
+					Status:    "info",
+					Message:   msg,
+					Target:    w.target,
+					Timestamp: time.Now().UTC(),
+				})
+			}
 		}
 	}
 	return len(p), nil
@@ -888,14 +967,49 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 
 // Flush emits any remaining partial line still in the buffer.
 func (w *progressWriter) Flush() {
-	if w.cb == nil || len(w.buf) == 0 {
+	if (w.cb == nil && w.eventCB == nil) || len(w.buf) == 0 {
 		return
 	}
 	line := strings.TrimSpace(string(w.buf))
 	w.buf = nil
 	if line != "" {
-		w.cb(fmt.Sprintf("%s %s", w.stage, line))
+		msg := fmt.Sprintf("%s %s", w.stage, line)
+		if w.cb != nil {
+			w.cb(msg)
+		}
+		if w.eventCB != nil {
+			w.eventCB(models.RuntimeEvent{
+				Kind:      "log",
+				Stage:     w.stage,
+				Status:    "info",
+				Message:   msg,
+				Target:    w.target,
+				Timestamp: time.Now().UTC(),
+			})
+		}
 	}
+}
+
+func classifyProgressMessage(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	stage := s
+	if idx := strings.IndexAny(s, " :"); idx > 0 {
+		stage = strings.TrimSpace(s[:idx])
+	}
+	status := "info"
+	switch {
+	case strings.Contains(s, ".start") || strings.HasSuffix(s, "started"):
+		status = "started"
+	case strings.Contains(s, ".done") || strings.HasSuffix(s, "completed"):
+		status = "completed"
+	case strings.Contains(s, "warning") || strings.Contains(s, "retry"):
+		status = "warning"
+	case strings.Contains(s, "error") || strings.Contains(s, "failed") || strings.Contains(s, "cancel"):
+		status = "error"
+	case strings.Contains(s, "resume"):
+		status = "resumed"
+	}
+	return stage, status
 }
 
 func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSummary, error) {

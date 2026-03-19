@@ -243,34 +243,8 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 	}
 
 	cliOpt := opt
-	cliOpt.Progress = func(stage string) {
-		if !jsonOut {
-			fmt.Println(renderStage(stage))
-		}
-		if stage == "exploit.started" {
-			nf.SendGeneric("exploit.started", map[string]any{
-				"job_id": job.ID,
-				"target": job.Target,
-				"mode":   job.Mode,
-			})
-		}
-		// Forward exploit module progress to webhook for per-module visibility.
-		if opt.WebhookModuleProgress && strings.HasPrefix(stage, "exploit.module.") {
-			parts := strings.Fields(stage)
-			if len(parts) >= 2 {
-				payload := map[string]any{
-					"job_id": job.ID,
-					"target": job.Target,
-					"stage":  parts[0],
-					"module": parts[1],
-				}
-				if len(parts) >= 3 {
-					payload["detail"] = strings.Join(parts[2:], " ")
-				}
-				nf.SendGeneric("exploit.module.progress", payload)
-			}
-		}
-	}
+	cliOpt.Progress = nil
+	cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
 
 	if mode != "full" {
 		nf.Send("job.started", job)
@@ -326,13 +300,8 @@ func formatCLISummary(job *models.Job, mode string) []string {
 	}
 	lines := []string{
 		fmt.Sprintf("Done. target=%s mode=%s evidence=%s", job.Target, job.Mode, job.EvidencePath),
-		fmt.Sprintf("Nuclei findings: %d", job.FindingsCount),
-		fmt.Sprintf("Exploit-module findings: %d", job.ExploitFindingsCount),
-		fmt.Sprintf("Total findings: %d", job.FindingsCount+job.ExploitFindingsCount),
-		fmt.Sprintf("Durations: recon=%.1fs exploit=%.1fs", job.ReconDurationSec, job.ExploitDurationSec),
-	}
-	if job.FilteredCount > 0 {
-		lines = append(lines, fmt.Sprintf("Filtered findings: %d", job.FilteredCount))
+		fmt.Sprintf("Findings: nuclei=%d exploit=%d total=%d filtered=%d", job.FindingsCount, job.ExploitFindingsCount, job.FindingsCount+job.ExploitFindingsCount, job.FilteredCount),
+		fmt.Sprintf("Runtime: recon=%.1fs exploit=%.1fs total=%.1fs", job.ReconDurationSec, job.ExploitDurationSec, job.ReconDurationSec+job.ExploitDurationSec),
 	}
 	if job.ReportPath != "" {
 		lines = append(lines, fmt.Sprintf("Job report: %s", job.ReportPath))
@@ -346,6 +315,9 @@ func formatCLISummary(job *models.Job, mode string) []string {
 	if job.RiskScore > 0 {
 		lines = append(lines, fmt.Sprintf("Risk score: %.1f/10", job.RiskScore))
 	}
+	if topModules := summarizeTopModules(job); topModules != "" {
+		lines = append(lines, fmt.Sprintf("Top exploit modules: %s", topModules))
+	}
 	if job.ExploitFindingsCount > 0 {
 		lines = append(lines, fmt.Sprintf("Exploit findings: %d (JSONL: %s)", job.ExploitFindingsCount, job.ExploitFindingsPath))
 	}
@@ -353,6 +325,41 @@ func formatCLISummary(job *models.Job, mode string) []string {
 		lines = append(lines, fmt.Sprintf("Recon summary used: %s", job.ReconPath))
 	}
 	return lines
+}
+
+func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhook, jsonOut bool) func(models.RuntimeEvent) {
+	var tracker *cliRuntimeTracker
+	if !jsonOut {
+		tracker = newCLIRuntimeTracker(os.Stdout)
+	}
+	return func(ev models.RuntimeEvent) {
+		if tracker != nil {
+			tracker.Handle(ev)
+		}
+		if ev.Kind == "stage" && ev.Stage == "exploit" && ev.Status == "started" {
+			nf.SendGeneric("exploit.started", map[string]any{
+				"job_id": job.ID,
+				"target": job.Target,
+				"mode":   job.Mode,
+			})
+		}
+		if opt.WebhookModuleProgress && ev.Kind == "module" {
+			payload := map[string]any{
+				"job_id": job.ID,
+				"target": job.Target,
+				"stage":  ev.Stage,
+				"module": ev.Module,
+				"status": ev.Status,
+			}
+			if strings.TrimSpace(ev.Message) != "" {
+				payload["detail"] = ev.Message
+			}
+			if len(ev.Counts) > 0 {
+				payload["counts"] = ev.Counts
+			}
+			nf.SendGeneric("exploit.module.progress", payload)
+		}
+	}
 }
 
 func printJobJSON(job *models.Job) error {
@@ -796,27 +803,8 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	// jobDir = artifactsRoot/domain/N → artifactsRoot = jobDir minus the last 2 path components
 	cliOpt := opt
 	cliOpt.ArtifactsRoot = filepath.Dir(filepath.Dir(jobDir))
-	cliOpt.Progress = func(stage string) {
-		if !jsonOut {
-			fmt.Println(renderStage(stage))
-		}
-		// Forward exploit module progress to webhook for per-module visibility.
-		if opt.WebhookModuleProgress && strings.HasPrefix(stage, "exploit.module.") {
-			parts := strings.Fields(stage)
-			if len(parts) >= 2 {
-				payload := map[string]any{
-					"job_id": job.ID,
-					"target": job.Target,
-					"stage":  parts[0],
-					"module": parts[1],
-				}
-				if len(parts) >= 3 {
-					payload["detail"] = strings.Join(parts[2:], " ")
-				}
-				nf.SendGeneric("exploit.module.progress", payload)
-			}
-		}
-	}
+	cliOpt.Progress = nil
+	cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
 
 	nf.Send("job.started", job)
 	if err := engine.Process(ctx, job, cliOpt); err != nil {
