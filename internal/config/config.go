@@ -98,7 +98,7 @@ func Load() Config {
 		WebhookFindings:                getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
 		WebhookModuleProgress:          getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", false),
 		WebhookFindingsMinSeverity:     getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
-		ModuleTimeoutSec:               getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
+		ModuleTimeoutSec:               getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 900),
 		ModuleRetries:                  getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
 		AggressiveMode:                 getEnvBool("BREACHPILOT_AGGRESSIVE", false),
 		ProofMode:                      getEnvBool("BREACHPILOT_PROOF_MODE", false),
