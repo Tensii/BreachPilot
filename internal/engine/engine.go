@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -326,6 +327,10 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		args = append(args, "-tags", "misconfig,exposure,tech")
 	} else {
 		args = append(args, "-severity", "medium,high,critical")
+	}
+
+	if opt.RateLimitRPS > 0 {
+		args = append(args, "-rl", strconv.Itoa(opt.RateLimitRPS))
 	}
 
 	stOut, errOut := os.Stat(outJSONL)

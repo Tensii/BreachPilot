@@ -3135,19 +3135,32 @@ class Runner:
         targets_file = self.intel / "dalfox_targets.txt"
         targets_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
         out_json = self.intel / "xss_findings.json"
-        self.run_tool("dalfox xss scan", [self.dalfox_bin, "file", str(targets_file), "--silence", "--skip-bav", "--worker", str(self.config.dalfox_workers), "--format", "json", "--output", str(out_json)], timeout=self.config.dalfox_timeout, allow_failure=True)
-        data: list = []
-        count = 0
+        result = self.run_tool("dalfox xss scan", [self.dalfox_bin, "file", str(targets_file), "--silence", "--skip-bav", "--worker", str(self.config.dalfox_workers), "--format", "json", "--output", str(out_json)], timeout=self.config.dalfox_timeout, allow_failure=True)
+        raw_data: list = []
         if out_json.exists():
             try:
                 loaded = json.loads(out_json.read_text(encoding="utf-8", errors="ignore"))
                 if isinstance(loaded, list):
                     # Filter out empty objects [{}] which Dalfox v2.12.0 outputs for failed/unreachable targets
-                    data = [x for x in loaded if isinstance(x, dict) and x]
-                    count = len(data)
+                    raw_data = [x for x in loaded if isinstance(x, dict) and x]
             except Exception:
                 pass
-        self.record_stage_status("xss_scan", "completed", f"urls_tested={len(urls)} findings={count}")
+        data = [x for x in raw_data if self._is_strong_xss_finding(x)]
+        discarded = max(0, len(raw_data) - len(data))
+        count = len(data)
+        if count > 0:
+            self.write_json(out_json, data)
+        else:
+            out_json.unlink(missing_ok=True)
+
+        if result.returncode != 0:
+            detail = f"urls_tested={len(urls)} findings={count} discarded={discarded} rc={result.returncode}"
+            if count > 0:
+                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; retained stronger findings only ({detail})")
+            else:
+                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; discarded partial or reflection-only results ({detail})")
+        else:
+            self.record_stage_status("xss_scan", "completed", f"urls_tested={len(urls)} findings={count} discarded={discarded}")
         for x in data[:100]:
             tgt = str(x.get("url") or x.get("target") or "") if isinstance(x, dict) else ""
             self.add_finding("xss_scan", "HIGH", tgt, "Potential XSS finding", evidence=str(x)[:300], confidence=75, tags=["xss"])
@@ -3155,6 +3168,43 @@ class Runner:
             self._notify(f"XSS findings={count}", status="warning", stage="xss_scan", severity="HIGH")
         self.write_live_findings()
         self.mark_done("xss_scan")
+
+    def _is_strong_xss_finding(self, finding: dict) -> bool:
+        if not isinstance(finding, dict) or not finding:
+            return False
+        finding_type = str(finding.get("type") or "").strip().lower()
+        inject_type = str(finding.get("inject_type") or "").strip().lower()
+        poc_type = str(finding.get("poc_type") or "").strip().lower()
+        msg = " ".join(
+            str(finding.get(k) or "").strip().lower()
+            for k in ("message_str", "evidence", "message", "detail")
+        )
+
+        if "reflected payload" in msg:
+            return False
+        if finding_type == "r":
+            return False
+        if inject_type.startswith("injs-none") and poc_type in {"", "plain"}:
+            return False
+
+        strong_terms = (
+            "triggered",
+            "verified",
+            "executed",
+            "headless",
+            "blind",
+            "stored",
+            "dom",
+            "callback",
+            "interactsh",
+        )
+        if any(term in msg for term in strong_terms):
+            return True
+
+        if poc_type in {"headless", "gheadless"}:
+            return True
+
+        return False
 
     def stage_bypass_403(self) -> None:
         if self.is_done("bypass_403"):
