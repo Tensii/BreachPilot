@@ -443,18 +443,6 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	preFilterCount := len(exploitFindings)
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
-	emit(models.RuntimeEvent{
-		Kind:    "summary",
-		Stage:   "exploit",
-		Status:  "completed",
-		Message: fmt.Sprintf("exploit.summary nuclei=%d exploit=%d filtered=%d", job.FindingsCount, len(exploitFindings), job.FilteredCount),
-		Target:  job.Target,
-		Counts: map[string]int{
-			"nuclei":   job.FindingsCount,
-			"exploit":  len(exploitFindings),
-			"filtered": job.FilteredCount,
-		},
-	})
 
 	// --- scoring pass ---
 	if opt.ScoringEnabled {
@@ -537,11 +525,64 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		job.RiskScore = job.RiskSummary.OverallScore
 	}
 
+	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
+	exploitFindings = reliableFindings
+	job.FilteredCount += reliabilityFiltered
+
+	if opt.ScoringEnabled {
+		meta := riskscoring.TargetMeta{
+			Hostname:         job.Target,
+			ResolvedIP:       "",
+			IsInternetFacing: true,
+			BehindCDN:        false,
+		}
+		exposure := riskscoring.InferExposure(meta)
+		if opt.ExposureOverride != "" {
+			exposure = riskscoring.ExposureLevel(opt.ExposureOverride)
+		}
+		criticality := riskscoring.InferCriticality(meta)
+		if opt.CriticalityOverride != "" {
+			criticality = riskscoring.CriticalityLevel(opt.CriticalityOverride)
+		}
+
+		scoredFindings := make([]riskscoring.ScoredFinding, 0, len(exploitFindings))
+		var allChains []riskscoring.ChainRef
+		for i, f := range exploitFindings {
+			id := fmt.Sprintf("%s-%d", f.Module, i)
+			scoredFindings = append(scoredFindings, riskscoring.ScoredFinding{
+				ID:     id,
+				Title:  f.Title,
+				Module: f.Module,
+				URL:    f.Target,
+				Score:  f.RiskScore,
+			})
+			allChains = append(allChains, f.RiskScore.Chains...)
+		}
+		job.RiskSummary = riskscoring.BuildSummary(scoredFindings, exposure, criticality, allChains)
+		job.RiskScore = job.RiskSummary.OverallScore
+	}
+
+	emit(models.RuntimeEvent{
+		Kind:    "summary",
+		Stage:   "exploit",
+		Status:  "completed",
+		Message: fmt.Sprintf("exploit.summary nuclei=%d exploit=%d filtered=%d", job.FindingsCount, len(exploitFindings), job.FilteredCount),
+		Target:  job.Target,
+		Counts: map[string]int{
+			"nuclei":   job.FindingsCount,
+			"exploit":  len(exploitFindings),
+			"filtered": job.FilteredCount,
+		},
+	})
+
 	if opt.Notifier != nil {
 		severityCounts := map[string]int{"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
 		topFindings := make([]map[string]any, 0, 5)
 		for _, f := range exploitFindings {
 			sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+			if band := strings.ToUpper(strings.TrimSpace(string(f.RiskScore.Band))); band != "" {
+				sev = band
+			}
 			if _, ok := severityCounts[sev]; ok {
 				severityCounts[sev]++
 			}
@@ -566,16 +607,20 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			batchCounts := map[string]int{"INFO": 0, "LOW": 0, "MEDIUM": 0}
 			batchSample := make([]map[string]any, 0, 5)
 			for _, f := range exploitFindings {
-				if !severityAtLeast(f.Severity, opt.WebhookFindingsMinSeverity) {
+				sevForFilter := f.Severity
+				if band := strings.ToUpper(strings.TrimSpace(string(f.RiskScore.Band))); band != "" {
+					sevForFilter = band
+				}
+				if !severityAtLeast(sevForFilter, opt.WebhookFindingsMinSeverity) {
 					continue
 				}
-				sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+				sev := strings.ToUpper(strings.TrimSpace(sevForFilter))
 				if sev == "CRITICAL" || sev == "HIGH" {
 					opt.Notifier.SendGeneric("exploit.finding", map[string]any{
 						"job_id":      job.ID,
 						"target":      f.Target,
 						"module":      f.Module,
-						"severity":    f.Severity,
+						"severity":    sev,
 						"title":       f.Title,
 						"confidence":  f.Confidence,
 						"validation":  f.Validation,
