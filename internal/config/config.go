@@ -10,50 +10,54 @@ import (
 )
 
 type Config struct {
-	WebhookURL                 string
-	ReconWebhookURL            string
-	ExploitWebhookURL          string
-	WebhookSecret              string
-	WebhookRetries             int
-	NucleiBin                  string
-	ReconHarvestCmd            string
-	ReconTimeoutSec            int
-	ReconRetries               int
-	NucleiTimeoutSec           int
-	ArtifactsRoot              string
-	MinSeverity                string
-	SkipModules                string
-	OnlyModules                string
-	ValidationOnly             bool
-	ConfigPath                 string
-	PreviousReportPath         string
-	ReportFormats              string
-	ScanProfile                string
-	RateLimitRPS               int
-	WebhookFindings            bool
-	WebhookModuleProgress      bool
-	WebhookFindingsMinSeverity string
-	ModuleTimeoutSec           int
-	ModuleRetries              int
-	AggressiveMode             bool
-	ProofMode                  bool
-	ProofTargetAllowlist       string
-	AuthUserCookie             string
-	AuthAdminCookie            string
-	AuthAnonHeaders            string
-	AuthUserHeaders            string
-	AuthAdminHeaders           string
-	SSRFCanaryHost             string
-	SSRFCanarySupportsRedirect bool
-	OpenRedirectCanaryHost     string
-	SkipNuclei                 bool
-	ScoringEnabled             bool
-	ChainAnalysisEnabled       bool
-	ExposureOverride           string
-	CriticalityOverride        string
-	BrowserCaptureEnabled      bool
-	BrowserCaptureMaxPages     int
-	BrowserCapturePath         string
+	WebhookURL                     string
+	ReconWebhookURL                string
+	ExploitWebhookURL              string
+	WebhookSecret                  string
+	WebhookRetries                 int
+	NucleiBin                      string
+	ReconHarvestCmd                string
+	ReconTimeoutSec                int
+	ReconRetries                   int
+	NucleiTimeoutSec               int
+	ArtifactsRoot                  string
+	MinSeverity                    string
+	SkipModules                    string
+	OnlyModules                    string
+	ValidationOnly                 bool
+	ConfigPath                     string
+	PreviousReportPath             string
+	ReportFormats                  string
+	ScanProfile                    string
+	RateLimitRPS                   int
+	WebhookFindings                bool
+	WebhookModuleProgress          bool
+	WebhookFindingsMinSeverity     string
+	ModuleTimeoutSec               int
+	ModuleRetries                  int
+	AggressiveMode                 bool
+	ProofMode                      bool
+	ProofTargetAllowlist           string
+	AuthUserCookie                 string
+	AuthAdminCookie                string
+	AuthAnonHeaders                string
+	AuthUserHeaders                string
+	AuthAdminHeaders               string
+	SSRFCanaryHost                 string
+	SSRFCanarySupportsRedirect     bool
+	OpenRedirectCanaryHost         string
+	SkipNuclei                     bool
+	ScoringEnabled                 bool
+	ChainAnalysisEnabled           bool
+	ExposureOverride               string
+	CriticalityOverride            string
+	BrowserCaptureEnabled          bool
+	BrowserCaptureMaxPages         int
+	BrowserCapturePerPageWaitMs    int
+	BrowserCaptureSettleWaitMs     int
+	BrowserCaptureScrollSteps      int
+	BrowserCaptureMaxRoutesPerPage int
+	BrowserCapturePath             string
 }
 
 func Load() Config {
@@ -71,50 +75,54 @@ func Load() Config {
 	}
 
 	return Config{
-		WebhookURL:                 legacyWH,
-		ReconWebhookURL:            reconWH,
-		ExploitWebhookURL:          exploitWH,
-		WebhookSecret:              os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
-		WebhookRetries:             getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
-		NucleiBin:                  getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
-		ReconHarvestCmd:            getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
-		ReconTimeoutSec:            getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
-		ReconRetries:               getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
-		NucleiTimeoutSec:           getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
-		ArtifactsRoot:              getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
-		MinSeverity:                getEnv("BREACHPILOT_MIN_SEVERITY", ""),
-		SkipModules:                getEnv("BREACHPILOT_SKIP_MODULES", ""),
-		OnlyModules:                getEnv("BREACHPILOT_ONLY_MODULES", ""),
-		ValidationOnly:             getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
-		ConfigPath:                 configPath,
-		PreviousReportPath:         getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
-		ReportFormats:              getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
-		ScanProfile:                getEnv("BREACHPILOT_SCAN_PROFILE", ""),
-		RateLimitRPS:               getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
-		WebhookFindings:            getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
-		WebhookModuleProgress:      getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", false),
-		WebhookFindingsMinSeverity: getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
-		ModuleTimeoutSec:           getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
-		ModuleRetries:              getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
-		AggressiveMode:             getEnvBool("BREACHPILOT_AGGRESSIVE", false),
-		ProofMode:                  getEnvBool("BREACHPILOT_PROOF_MODE", false),
-		ProofTargetAllowlist:       getEnv("BREACHPILOT_PROOF_TARGET_ALLOWLIST", ""),
-		AuthUserCookie:             getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
-		AuthAdminCookie:            getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
-		AuthAnonHeaders:            getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
-		AuthUserHeaders:            getEnv("BREACHPILOT_AUTH_USER_HEADERS", ""),
-		AuthAdminHeaders:           getEnv("BREACHPILOT_AUTH_ADMIN_HEADERS", ""),
-		SSRFCanaryHost:             getEnv("BREACHPILOT_SSRF_CANARY_HOST", "ssrf.breachpilot.internal"),
-		SSRFCanarySupportsRedirect: getEnvBool("BREACHPILOT_SSRF_CANARY_REDIRECT", false),
-		OpenRedirectCanaryHost:     getEnv("BREACHPILOT_REDIRECT_CANARY_HOST", "evil.breachpilot.internal"),
-		SkipNuclei:                 getEnvBool("BREACHPILOT_SKIP_NUCLEI", false),
-		ScoringEnabled:             getEnvBool("BREACHPILOT_SCORING_ENABLED", true),
-		ChainAnalysisEnabled:       getEnvBool("BREACHPILOT_CHAIN_ANALYSIS_ENABLED", true),
-		ExposureOverride:           getEnv("BREACHPILOT_EXPOSURE_OVERRIDE", ""),
-		CriticalityOverride:        getEnv("BREACHPILOT_CRITICALITY_OVERRIDE", ""),
-		BrowserCaptureEnabled:      getEnvBool("BREACHPILOT_BROWSER_CAPTURE", false),
-		BrowserCaptureMaxPages:     getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", 6),
-		BrowserCapturePath:         getEnv("BREACHPILOT_BROWSER_PATH", ""),
+		WebhookURL:                     legacyWH,
+		ReconWebhookURL:                reconWH,
+		ExploitWebhookURL:              exploitWH,
+		WebhookSecret:                  os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
+		WebhookRetries:                 getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
+		NucleiBin:                      getEnv("BREACHPILOT_NUCLEI_BIN", "nuclei"),
+		ReconHarvestCmd:                getEnv("BREACHPILOT_RECONHARVEST_CMD", ""),
+		ReconTimeoutSec:                getEnvInt("BREACHPILOT_RECON_TIMEOUT_SEC", 7200),
+		ReconRetries:                   getEnvInt("BREACHPILOT_RECON_RETRIES", 1),
+		NucleiTimeoutSec:               getEnvInt("BREACHPILOT_NUCLEI_TIMEOUT_SEC", 1800),
+		ArtifactsRoot:                  getEnv("BREACHPILOT_ARTIFACTS", "./artifacts"),
+		MinSeverity:                    getEnv("BREACHPILOT_MIN_SEVERITY", ""),
+		SkipModules:                    getEnv("BREACHPILOT_SKIP_MODULES", ""),
+		OnlyModules:                    getEnv("BREACHPILOT_ONLY_MODULES", ""),
+		ValidationOnly:                 getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
+		ConfigPath:                     configPath,
+		PreviousReportPath:             getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
+		ReportFormats:                  getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
+		ScanProfile:                    getEnv("BREACHPILOT_SCAN_PROFILE", ""),
+		RateLimitRPS:                   getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
+		WebhookFindings:                getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
+		WebhookModuleProgress:          getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", false),
+		WebhookFindingsMinSeverity:     getEnv("BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY", ""),
+		ModuleTimeoutSec:               getEnvInt("BREACHPILOT_MODULE_TIMEOUT_SEC", 120),
+		ModuleRetries:                  getEnvInt("BREACHPILOT_MODULE_RETRIES", 1),
+		AggressiveMode:                 getEnvBool("BREACHPILOT_AGGRESSIVE", false),
+		ProofMode:                      getEnvBool("BREACHPILOT_PROOF_MODE", false),
+		ProofTargetAllowlist:           getEnv("BREACHPILOT_PROOF_TARGET_ALLOWLIST", ""),
+		AuthUserCookie:                 getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
+		AuthAdminCookie:                getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
+		AuthAnonHeaders:                getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
+		AuthUserHeaders:                getEnv("BREACHPILOT_AUTH_USER_HEADERS", ""),
+		AuthAdminHeaders:               getEnv("BREACHPILOT_AUTH_ADMIN_HEADERS", ""),
+		SSRFCanaryHost:                 getEnv("BREACHPILOT_SSRF_CANARY_HOST", "ssrf.breachpilot.internal"),
+		SSRFCanarySupportsRedirect:     getEnvBool("BREACHPILOT_SSRF_CANARY_REDIRECT", false),
+		OpenRedirectCanaryHost:         getEnv("BREACHPILOT_REDIRECT_CANARY_HOST", "evil.breachpilot.internal"),
+		SkipNuclei:                     getEnvBool("BREACHPILOT_SKIP_NUCLEI", false),
+		ScoringEnabled:                 getEnvBool("BREACHPILOT_SCORING_ENABLED", true),
+		ChainAnalysisEnabled:           getEnvBool("BREACHPILOT_CHAIN_ANALYSIS_ENABLED", true),
+		ExposureOverride:               getEnv("BREACHPILOT_EXPOSURE_OVERRIDE", ""),
+		CriticalityOverride:            getEnv("BREACHPILOT_CRITICALITY_OVERRIDE", ""),
+		BrowserCaptureEnabled:          getEnvBool("BREACHPILOT_BROWSER_CAPTURE", false),
+		BrowserCaptureMaxPages:         getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", 6),
+		BrowserCapturePerPageWaitMs:    getEnvInt("BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS", 4000),
+		BrowserCaptureSettleWaitMs:     getEnvInt("BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS", 1500),
+		BrowserCaptureScrollSteps:      getEnvInt("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS", 3),
+		BrowserCaptureMaxRoutesPerPage: getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", 10),
+		BrowserCapturePath:             getEnv("BREACHPILOT_BROWSER_PATH", ""),
 	}
 }
 
@@ -170,6 +178,23 @@ func (c Config) Validate() error {
 	}
 	if c.ModuleRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")
+	}
+	if c.BrowserCaptureEnabled {
+		if c.BrowserCaptureMaxPages <= 0 {
+			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES: must be > 0")
+		}
+		if c.BrowserCapturePerPageWaitMs <= 0 {
+			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS: must be > 0")
+		}
+		if c.BrowserCaptureSettleWaitMs <= 0 {
+			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS: must be > 0")
+		}
+		if c.BrowserCaptureScrollSteps <= 0 {
+			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS: must be > 0")
+		}
+		if c.BrowserCaptureMaxRoutesPerPage <= 0 {
+			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE: must be > 0")
+		}
 	}
 
 	if strings.TrimSpace(c.NucleiBin) != "" {

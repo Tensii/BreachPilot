@@ -113,7 +113,10 @@ type ExploitModuleTelemetry struct {
 	FinishedAt    string `json:"finished_at"`
 	DurationMs    int64  `json:"duration_ms"`
 	FindingsCount int    `json:"findings_count"`
+	AcceptedCount int    `json:"accepted_count"`
+	FilteredCount int    `json:"filtered_count"`
 	ErrorCount    int    `json:"error_count"`
+	LastError     string `json:"last_error,omitempty"`
 	Skipped       bool   `json:"skipped"`
 	SkippedReason string `json:"skipped_reason,omitempty"`
 	Canceled      bool   `json:"canceled"`

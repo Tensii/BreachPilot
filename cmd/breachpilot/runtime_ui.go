@@ -225,6 +225,9 @@ func summarizeTopModules(job *models.Job) string {
 	}
 	items := append([]models.ExploitModuleTelemetry{}, job.ModuleTelemetry...)
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].AcceptedCount != items[j].AcceptedCount {
+			return items[i].AcceptedCount > items[j].AcceptedCount
+		}
 		if items[i].FindingsCount != items[j].FindingsCount {
 			return items[i].FindingsCount > items[j].FindingsCount
 		}
@@ -232,10 +235,16 @@ func summarizeTopModules(job *models.Job) string {
 	})
 	parts := make([]string, 0, 3)
 	for _, item := range items {
-		if item.Skipped || item.ErrorCount > 0 || item.FindingsCount == 0 {
+		if item.Skipped || item.ErrorCount > 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s=%d", item.Module, item.FindingsCount))
+		if item.AcceptedCount > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d/%d", item.Module, item.AcceptedCount, item.FindingsCount))
+		} else if item.FindingsCount > 0 {
+			parts = append(parts, fmt.Sprintf("%s=0/%d", item.Module, item.FindingsCount))
+		} else {
+			continue
+		}
 		if len(parts) == 3 {
 			break
 		}

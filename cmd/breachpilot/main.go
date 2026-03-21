@@ -73,6 +73,10 @@ func main() {
 	if cfg.BrowserCaptureEnabled {
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE", "1")
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", fmt.Sprintf("%d", cfg.BrowserCaptureMaxPages))
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS", fmt.Sprintf("%d", cfg.BrowserCapturePerPageWaitMs))
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS", fmt.Sprintf("%d", cfg.BrowserCaptureSettleWaitMs))
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS", fmt.Sprintf("%d", cfg.BrowserCaptureScrollSteps))
+		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", fmt.Sprintf("%d", cfg.BrowserCaptureMaxRoutesPerPage))
 		_ = os.Setenv("BREACHPILOT_BROWSER_PATH", cfg.BrowserCapturePath)
 		_ = os.Setenv("BREACHPILOT_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
 	}
@@ -137,45 +141,49 @@ func main() {
 
 func buildEngineOptions(cfg config.Config) engine.Options {
 	return engine.Options{
-		NucleiBin:                  cfg.NucleiBin,
-		ReconHarvestCmd:            config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
-		ReconWebhookURL:            cfg.ReconWebhookURL,
-		ReconTimeoutSec:            cfg.ReconTimeoutSec,
-		ReconRetries:               cfg.ReconRetries,
-		NucleiTimeoutSec:           cfg.NucleiTimeoutSec,
-		ArtifactsRoot:              cfg.ArtifactsRoot,
-		MinSeverity:                cfg.MinSeverity,
-		SkipModules:                cfg.SkipModules,
-		OnlyModules:                cfg.OnlyModules,
-		ValidationOnly:             cfg.ValidationOnly,
-		PreviousReportPath:         cfg.PreviousReportPath,
-		ReportFormats:              cfg.ReportFormats,
-		ScanProfile:                cfg.ScanProfile,
-		RateLimitRPS:               cfg.RateLimitRPS,
-		WebhookFindings:            cfg.WebhookFindings,
-		WebhookModuleProgress:      cfg.WebhookModuleProgress,
-		WebhookFindingsMinSeverity: cfg.WebhookFindingsMinSeverity,
-		ModuleTimeoutSec:           cfg.ModuleTimeoutSec,
-		ModuleRetries:              cfg.ModuleRetries,
-		AggressiveMode:             cfg.AggressiveMode,
-		ProofMode:                  cfg.ProofMode,
-		ProofTargetAllowlist:       cfg.ProofTargetAllowlist,
-		AuthUserCookie:             cfg.AuthUserCookie,
-		AuthAdminCookie:            cfg.AuthAdminCookie,
-		AuthAnonHeaders:            cfg.AuthAnonHeaders,
-		AuthUserHeaders:            cfg.AuthUserHeaders,
-		AuthAdminHeaders:           cfg.AuthAdminHeaders,
-		SSRFCanaryHost:             cfg.SSRFCanaryHost,
-		SSRFCanaryRedirect:         cfg.SSRFCanarySupportsRedirect,
-		OpenRedirectCanaryHost:     cfg.OpenRedirectCanaryHost,
-		SkipNuclei:                 cfg.SkipNuclei,
-		ScoringEnabled:             cfg.ScoringEnabled,
-		ChainAnalysisEnabled:       cfg.ChainAnalysisEnabled,
-		ExposureOverride:           cfg.ExposureOverride,
-		CriticalityOverride:        cfg.CriticalityOverride,
-		BrowserCaptureEnabled:      cfg.BrowserCaptureEnabled,
-		BrowserCaptureMaxPages:     cfg.BrowserCaptureMaxPages,
-		BrowserCapturePath:         cfg.BrowserCapturePath,
+		NucleiBin:                      cfg.NucleiBin,
+		ReconHarvestCmd:                config.ResolveReconHarvestCmd(cfg.ReconHarvestCmd),
+		ReconWebhookURL:                cfg.ReconWebhookURL,
+		ReconTimeoutSec:                cfg.ReconTimeoutSec,
+		ReconRetries:                   cfg.ReconRetries,
+		NucleiTimeoutSec:               cfg.NucleiTimeoutSec,
+		ArtifactsRoot:                  cfg.ArtifactsRoot,
+		MinSeverity:                    cfg.MinSeverity,
+		SkipModules:                    cfg.SkipModules,
+		OnlyModules:                    cfg.OnlyModules,
+		ValidationOnly:                 cfg.ValidationOnly,
+		PreviousReportPath:             cfg.PreviousReportPath,
+		ReportFormats:                  cfg.ReportFormats,
+		ScanProfile:                    cfg.ScanProfile,
+		RateLimitRPS:                   cfg.RateLimitRPS,
+		WebhookFindings:                cfg.WebhookFindings,
+		WebhookModuleProgress:          cfg.WebhookModuleProgress,
+		WebhookFindingsMinSeverity:     cfg.WebhookFindingsMinSeverity,
+		ModuleTimeoutSec:               cfg.ModuleTimeoutSec,
+		ModuleRetries:                  cfg.ModuleRetries,
+		AggressiveMode:                 cfg.AggressiveMode,
+		ProofMode:                      cfg.ProofMode,
+		ProofTargetAllowlist:           cfg.ProofTargetAllowlist,
+		AuthUserCookie:                 cfg.AuthUserCookie,
+		AuthAdminCookie:                cfg.AuthAdminCookie,
+		AuthAnonHeaders:                cfg.AuthAnonHeaders,
+		AuthUserHeaders:                cfg.AuthUserHeaders,
+		AuthAdminHeaders:               cfg.AuthAdminHeaders,
+		SSRFCanaryHost:                 cfg.SSRFCanaryHost,
+		SSRFCanaryRedirect:             cfg.SSRFCanarySupportsRedirect,
+		OpenRedirectCanaryHost:         cfg.OpenRedirectCanaryHost,
+		SkipNuclei:                     cfg.SkipNuclei,
+		ScoringEnabled:                 cfg.ScoringEnabled,
+		ChainAnalysisEnabled:           cfg.ChainAnalysisEnabled,
+		ExposureOverride:               cfg.ExposureOverride,
+		CriticalityOverride:            cfg.CriticalityOverride,
+		BrowserCaptureEnabled:          cfg.BrowserCaptureEnabled,
+		BrowserCaptureMaxPages:         cfg.BrowserCaptureMaxPages,
+		BrowserCapturePerPageWaitMs:    cfg.BrowserCapturePerPageWaitMs,
+		BrowserCaptureSettleWaitMs:     cfg.BrowserCaptureSettleWaitMs,
+		BrowserCaptureScrollSteps:      cfg.BrowserCaptureScrollSteps,
+		BrowserCaptureMaxRoutesPerPage: cfg.BrowserCaptureMaxRoutesPerPage,
+		BrowserCapturePath:             cfg.BrowserCapturePath,
 	}
 }
 
@@ -655,7 +663,7 @@ func listModules(opt engine.Options) {
 		if !mi.SafeReadOnly {
 			safety = "active"
 		}
-		fmt.Printf("%s\t%s\t%s\n", mi.Name, mi.Description, safety)
+		fmt.Printf("%s\t%s\t%s\t%s\n", mi.Name, mi.Description, safety, mi.Group)
 	}
 }
 
@@ -688,6 +696,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
 	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[ENGINE  ]%s default exploit lane=exploit-core context_modules=explicit-only|validation_only|deep\n", gray, reset)
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
 			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")

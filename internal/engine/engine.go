@@ -70,48 +70,52 @@ const (
 )
 
 type Options struct {
-	NucleiBin                  string
-	ReconHarvestCmd            string
-	ReconWebhookURL            string
-	ReconTimeoutSec            int
-	ReconRetries               int
-	NucleiTimeoutSec           int
-	ArtifactsRoot              string
-	MinSeverity                string
-	SkipModules                string
-	OnlyModules                string
-	ValidationOnly             bool
-	Progress                   func(string)
-	Events                     func(models.RuntimeEvent)
-	Notifier                   Notifier
-	PreviousReportPath         string
-	ReportFormats              string
-	ScanProfile                string
-	RateLimitRPS               int
-	WebhookFindings            bool
-	WebhookModuleProgress      bool
-	WebhookFindingsMinSeverity string
-	ModuleTimeoutSec           int
-	ModuleRetries              int
-	AggressiveMode             bool
-	ProofMode                  bool
-	ProofTargetAllowlist       string
-	AuthUserCookie             string
-	AuthAdminCookie            string
-	AuthAnonHeaders            string
-	AuthUserHeaders            string
-	AuthAdminHeaders           string
-	SSRFCanaryHost             string
-	SSRFCanaryRedirect         bool
-	OpenRedirectCanaryHost     string
-	SkipNuclei                 bool
-	ScoringEnabled             bool
-	ChainAnalysisEnabled       bool
-	ExposureOverride           string
-	CriticalityOverride        string
-	BrowserCaptureEnabled      bool
-	BrowserCaptureMaxPages     int
-	BrowserCapturePath         string
+	NucleiBin                      string
+	ReconHarvestCmd                string
+	ReconWebhookURL                string
+	ReconTimeoutSec                int
+	ReconRetries                   int
+	NucleiTimeoutSec               int
+	ArtifactsRoot                  string
+	MinSeverity                    string
+	SkipModules                    string
+	OnlyModules                    string
+	ValidationOnly                 bool
+	Progress                       func(string)
+	Events                         func(models.RuntimeEvent)
+	Notifier                       Notifier
+	PreviousReportPath             string
+	ReportFormats                  string
+	ScanProfile                    string
+	RateLimitRPS                   int
+	WebhookFindings                bool
+	WebhookModuleProgress          bool
+	WebhookFindingsMinSeverity     string
+	ModuleTimeoutSec               int
+	ModuleRetries                  int
+	AggressiveMode                 bool
+	ProofMode                      bool
+	ProofTargetAllowlist           string
+	AuthUserCookie                 string
+	AuthAdminCookie                string
+	AuthAnonHeaders                string
+	AuthUserHeaders                string
+	AuthAdminHeaders               string
+	SSRFCanaryHost                 string
+	SSRFCanaryRedirect             bool
+	OpenRedirectCanaryHost         string
+	SkipNuclei                     bool
+	ScoringEnabled                 bool
+	ChainAnalysisEnabled           bool
+	ExposureOverride               string
+	CriticalityOverride            string
+	BrowserCaptureEnabled          bool
+	BrowserCaptureMaxPages         int
+	BrowserCapturePerPageWaitMs    int
+	BrowserCaptureSettleWaitMs     int
+	BrowserCaptureScrollSteps      int
+	BrowserCaptureMaxRoutesPerPage int
+	BrowserCapturePath             string
 }
 
 // Notifier sends structured events.
@@ -387,52 +391,78 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	notify("exploit.completed")
 
 	// --- exploit module phase ---
-	exploitModules := filterModules(registeredModuleInstances(), opt.OnlyModules, opt.SkipModules)
+	exploitModules := filterModules(selectedModuleInstances(opt), opt.OnlyModules, opt.SkipModules)
 	if opt.ValidationOnly {
 		exploitModules = filterValidationOnly(exploitModules)
 	}
-	exploitModules = prioritizeModules(exploitModules, rs)
-	names := make([]string, 0, len(exploitModules))
-	for _, m := range exploitModules {
-		names = append(names, m.Name())
-	}
+	exploitModules, plannerSkipped, plannerPreview := planExploitModules(exploitModules, rs, opt)
+	job.PlanPreview = append(job.PlanPreview, plannerPreview...)
+	scoutModules, proofModules := splitModulesByPlannerStage(exploitModules)
+	persistedSignals := loadCorrelationSignalsArtifact(artDir)
+	scoutModules = prioritizeModules(scoutModules, rs)
+	scoutNames := moduleNames(scoutModules)
 	emit(models.RuntimeEvent{
 		Kind:    "module",
 		Stage:   "exploit.module",
 		Status:  "planned",
-		Message: "exploit.module.order " + strings.Join(names, ","),
+		Message: "exploit.module.wave1 " + strings.Join(scoutNames, ","),
 		Target:  job.Target,
-		Counts:  map[string]int{"planned": len(names)},
+		Counts:  map[string]int{"planned": len(scoutModules)},
 	})
-	exploitFindings, telemetry := exploit.RunModules(ctx, job, &rs, exploit.Options{
-		ArtifactsRoot:          opt.ArtifactsRoot,
-		Progress:               opt.Progress,
-		Events:                 opt.Events,
-		SafeMode:               job.SafeMode,
-		MaxParallel:            0,
-		StateManager:           sm,
-		ModuleTimeoutSec:       opt.ModuleTimeoutSec,
-		ModuleRetries:          opt.ModuleRetries,
-		Aggressive:             opt.AggressiveMode,
-		ProofMode:              opt.ProofMode,
-		ProofTargetAllowlist:   opt.ProofTargetAllowlist,
-		AuthUserCookie:         opt.AuthUserCookie,
-		AuthAdminCookie:        opt.AuthAdminCookie,
-		AuthAnonHeaders:        opt.AuthAnonHeaders,
-		AuthUserHeaders:        opt.AuthUserHeaders,
-		AuthAdminHeaders:       opt.AuthAdminHeaders,
-		SSRFCanaryHost:         opt.SSRFCanaryHost,
-		SSRFCanaryRedirect:     opt.SSRFCanaryRedirect,
-		OpenRedirectCanaryHost: opt.OpenRedirectCanaryHost,
-		ScoringEnabled:         opt.ScoringEnabled,
-		ChainAnalysisEnabled:   opt.ChainAnalysisEnabled,
-		ExposureOverride:       opt.ExposureOverride,
-		CriticalityOverride:    opt.CriticalityOverride,
-		BrowserCaptureEnabled:  opt.BrowserCaptureEnabled,
-		BrowserCaptureMaxPages: opt.BrowserCaptureMaxPages,
-		BrowserCapturePath:     opt.BrowserCapturePath,
-	}, exploitModules)
-	job.ModuleTelemetry = telemetry
+	exploitOpt := exploit.Options{
+		ArtifactsRoot:                  opt.ArtifactsRoot,
+		Progress:                       opt.Progress,
+		Events:                         opt.Events,
+		SafeMode:                       job.SafeMode,
+		MaxParallel:                    0,
+		StateManager:                   sm,
+		ModuleTimeoutSec:               opt.ModuleTimeoutSec,
+		ModuleRetries:                  opt.ModuleRetries,
+		Aggressive:                     opt.AggressiveMode,
+		ProofMode:                      opt.ProofMode,
+		ProofTargetAllowlist:           opt.ProofTargetAllowlist,
+		AuthUserCookie:                 opt.AuthUserCookie,
+		AuthAdminCookie:                opt.AuthAdminCookie,
+		AuthAnonHeaders:                opt.AuthAnonHeaders,
+		AuthUserHeaders:                opt.AuthUserHeaders,
+		AuthAdminHeaders:               opt.AuthAdminHeaders,
+		SSRFCanaryHost:                 opt.SSRFCanaryHost,
+		SSRFCanaryRedirect:             opt.SSRFCanaryRedirect,
+		OpenRedirectCanaryHost:         opt.OpenRedirectCanaryHost,
+		ScoringEnabled:                 opt.ScoringEnabled,
+		ChainAnalysisEnabled:           opt.ChainAnalysisEnabled,
+		ExposureOverride:               opt.ExposureOverride,
+		CriticalityOverride:            opt.CriticalityOverride,
+		BrowserCaptureEnabled:          opt.BrowserCaptureEnabled,
+		BrowserCaptureMaxPages:         opt.BrowserCaptureMaxPages,
+		BrowserCapturePerPageWaitMs:    opt.BrowserCapturePerPageWaitMs,
+		BrowserCaptureSettleWaitMs:     opt.BrowserCaptureSettleWaitMs,
+		BrowserCaptureScrollSteps:      opt.BrowserCaptureScrollSteps,
+		BrowserCaptureMaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
+		BrowserCapturePath:             opt.BrowserCapturePath,
+	}
+	scoutFindings, scoutTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
+	scoutSignals := buildCorrelationSignals(scoutFindings)
+	mergedSignals := mergeCorrelationSignals(persistedSignals, scoutSignals)
+	_ = saveCorrelationSignalsArtifact(artDir, mergedSignals)
+	correlatedProofModules, correlationSkipped, correlationPreview := correlateProofModules(proofModules, mergedSignals, rs, opt)
+	job.PlanPreview = append(job.PlanPreview, correlationPreview...)
+	correlatedProofModules = prioritizeProofModules(correlatedProofModules, mergedSignals, rs)
+	proofNames := moduleNames(correlatedProofModules)
+	if len(proofNames) > 0 {
+		emit(models.RuntimeEvent{
+			Kind:    "module",
+			Stage:   "exploit.module",
+			Status:  "planned",
+			Message: "exploit.module.wave2 " + strings.Join(proofNames, ","),
+			Target:  job.Target,
+			Counts:  map[string]int{"planned": len(correlatedProofModules)},
+		})
+	}
+	proofFindings, proofTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, correlatedProofModules)
+	exploitFindings := append(scoutFindings, proofFindings...)
+	telemetry := append(scoutTelemetry, proofTelemetry...)
+	job.ModuleTelemetry = append(append(telemetry, plannerSkipped...), correlationSkipped...)
 	if ctx.Err() == context.Canceled {
 		job.Status = models.JobCancelled
 		job.FinishedAt = time.Now().UTC()
@@ -440,6 +470,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return nil
 	}
+	rawExploitFindings := append([]models.ExploitFinding(nil), exploitFindings...)
 	preFilterCount := len(exploitFindings)
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
@@ -528,6 +559,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
 	exploitFindings = reliableFindings
 	job.FilteredCount += reliabilityFiltered
+	job.ModuleTelemetry = annotateModuleTelemetryYield(job.ModuleTelemetry, rawExploitFindings, exploitFindings)
 
 	if opt.ScoringEnabled {
 		meta := riskscoring.TargetMeta{
@@ -941,6 +973,45 @@ func writeExploitFindingsJSONL(findings []models.ExploitFinding, artDir string, 
 	return nil
 }
 
+func annotateModuleTelemetryYield(in []models.ExploitModuleTelemetry, rawFindings []models.ExploitFinding, acceptedFindings []models.ExploitFinding) []models.ExploitModuleTelemetry {
+	if len(in) == 0 {
+		return in
+	}
+	rawByModule := countFindingsByModule(rawFindings)
+	acceptedByModule := countFindingsByModule(acceptedFindings)
+	out := make([]models.ExploitModuleTelemetry, len(in))
+	for i, item := range in {
+		key := strings.ToLower(strings.TrimSpace(item.Module))
+		raw := item.FindingsCount
+		if counted := rawByModule[key]; counted > raw {
+			raw = counted
+		}
+		item.FindingsCount = raw
+		item.AcceptedCount = acceptedByModule[key]
+		if item.AcceptedCount > item.FindingsCount {
+			item.AcceptedCount = item.FindingsCount
+		}
+		item.FilteredCount = item.FindingsCount - item.AcceptedCount
+		if item.FilteredCount < 0 {
+			item.FilteredCount = 0
+		}
+		out[i] = item
+	}
+	return out
+}
+
+func countFindingsByModule(findings []models.ExploitFinding) map[string]int {
+	out := make(map[string]int, len(findings))
+	for _, finding := range findings {
+		module := strings.ToLower(strings.TrimSpace(finding.Module))
+		if module == "" {
+			continue
+		}
+		out[module]++
+	}
+	return out
+}
+
 func writeJobReport(job *models.Job, artifactsRoot string) error {
 	if job == nil {
 		return nil
@@ -1156,43 +1227,44 @@ type ModuleInfo struct {
 	Name         string
 	Description  string
 	SafeReadOnly bool
+	Group        string
 }
 
 func registeredModuleInfos() []ModuleInfo {
 	return []ModuleInfo{
-		{"security-headers", "Detects missing/weak security headers", true},
-		{"open-redirect", "Detects potential open redirect vectors", true},
-		{"info-disclosure", "Probes common exposed files/endpoints", true},
-		{"cors-poc", "Validates risky CORS findings", true},
-		{"secrets-validator", "Validates leaked key/JWT patterns", true},
-		{"bypass-poc", "Builds PoC from discovered 403 bypasses", true},
-		{"port-service", "Classifies risky exposed network services", true},
-		{"nuclei-triage", "Triages nuclei phase1 results", true},
-		{"subdomain-takeover", "Checks takeover signatures", true},
-		{"api-surface", "Finds exposed API specs/graphql endpoints", true},
-		{"cookie-security", "Checks cookie flag hardening", true},
-		{"http-method-tampering", "Checks dangerous HTTP methods", true},
-		{"js-endpoints", "Scores JS-discovered endpoint risk", true},
-		{"admin-surface", "Finds exposed admin/debug surfaces", true},
-		{"exposed-files", "Finds exposed sensitive files/config", true},
-		{"tls-audit", "Validates TLS certificate and handshake security", true},
-		{"dns-check", "Validates DNS/email security configuration", true},
-		{"csp-audit", "Validates Content Security Policy headers", true},
-		{"http-response", "Detects HTTP response anomalies and information leaks", true},
-		{"session-abuse", "Detects risky session/token handling surfaces", true},
-		{"privilege-path", "Maps probable privilege escalation endpoint paths", true},
-		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true},
-		{"state-change", "Detects risky state-changing endpoint patterns", true},
-		{"upload-abuse", "Detects upload attack surface and retrieval risks", true},
-		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true},
-		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true},
-		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true},
-		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true},
-		{"ssrf-prober", "Detects SSRF via parameters, headers, and bodies", true},
-		{"crlf-injection", "Detects CRLF injection in headers/params", true},
-		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true},
-		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true},
-		{"idor-size", "Response size-based IDOR detection", true},
+		{"security-headers", "Detects missing/weak security headers", true, "context"},
+		{"open-redirect", "Detects potential open redirect vectors", true, "exploit-core"},
+		{"info-disclosure", "Probes common exposed files/endpoints", true, "exploit-core"},
+		{"cors-poc", "Validates risky CORS findings", true, "exploit-core"},
+		{"secrets-validator", "Validates leaked key/JWT patterns", true, "exploit-core"},
+		{"bypass-poc", "Builds PoC from discovered 403 bypasses", true, "exploit-core"},
+		{"port-service", "Classifies risky exposed network services", true, "context"},
+		{"nuclei-triage", "Triages nuclei phase1 results", true, "exploit-core"},
+		{"subdomain-takeover", "Checks takeover signatures", true, "exploit-core"},
+		{"api-surface", "Finds exposed API specs/graphql endpoints", true, "context"},
+		{"cookie-security", "Checks cookie flag hardening", true, "context"},
+		{"http-method-tampering", "Checks dangerous HTTP methods", true, "exploit-core"},
+		{"js-endpoints", "Scores JS-discovered endpoint risk", true, "exploit-core"},
+		{"admin-surface", "Finds exposed admin/debug surfaces", true, "context"},
+		{"exposed-files", "Finds exposed sensitive files/config", true, "exploit-core"},
+		{"tls-audit", "Validates TLS certificate and handshake security", true, "context"},
+		{"dns-check", "Validates DNS/email security configuration", true, "context"},
+		{"csp-audit", "Validates Content Security Policy headers", true, "context"},
+		{"http-response", "Detects HTTP response anomalies and information leaks", true, "context"},
+		{"session-abuse", "Detects risky session/token handling surfaces", true, "exploit-core"},
+		{"privilege-path", "Maps probable privilege escalation endpoint paths", true, "exploit-core"},
+		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true, "exploit-core"},
+		{"state-change", "Detects risky state-changing endpoint patterns", true, "exploit-core"},
+		{"upload-abuse", "Detects upload attack surface and retrieval risks", true, "exploit-core"},
+		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true, "exploit-core"},
+		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true, "exploit-core"},
+		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true, "exploit-core"},
+		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true, "exploit-core"},
+		{"ssrf-prober", "Detects SSRF via parameters, headers, and bodies", true, "exploit-core"},
+		{"crlf-injection", "Detects CRLF injection in headers/params", true, "exploit-core"},
+		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true, "exploit-core"},
+		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true, "exploit-core"},
+		{"idor-size", "Response size-based IDOR detection", true, "exploit-core"},
 	}
 }
 
@@ -1203,27 +1275,18 @@ func RegisteredModuleInfos() []ModuleInfo {
 	return out
 }
 
-func registeredModuleInstances() []exploit.Module {
+func registeredExploitCoreModuleInstances() []exploit.Module {
 	return []exploit.Module{
-		headers.New(),
 		openredirect.New(),
 		infodisclosure.New(),
 		cors.New(),
 		secretsvalidator.New(),
 		bypasspoc.New(),
-		portservice.New(),
 		nucleitriage.New(),
 		subt.New(),
-		apisurface.New(),
-		cookiesecurity.New(),
 		httpmethods.New(),
 		jsendpoints.New(),
-		adminsurface.New(),
 		exposedfiles.New(),
-		tlsaudit.New(),
-		dnscheck.New(),
-		cspaudit.New(),
-		httpresponse.New(),
 		sessionabuse.New(),
 		privpath.New(),
 		graphqlabuse.New(),
@@ -1240,6 +1303,543 @@ func registeredModuleInstances() []exploit.Module {
 		rsqlinjection.New(),
 		idorsize.New(),
 	}
+}
+
+func registeredContextModuleInstances() []exploit.Module {
+	return []exploit.Module{
+		headers.New(),
+		portservice.New(),
+		apisurface.New(),
+		cookiesecurity.New(),
+		adminsurface.New(),
+		tlsaudit.New(),
+		dnscheck.New(),
+		cspaudit.New(),
+		httpresponse.New(),
+	}
+}
+
+func registeredAllModuleInstances() []exploit.Module {
+	all := make([]exploit.Module, 0, len(registeredExploitCoreModuleInstances())+len(registeredContextModuleInstances()))
+	all = append(all, registeredContextModuleInstances()...)
+	all = append(all, registeredExploitCoreModuleInstances()...)
+	return all
+}
+
+func selectedModuleInstances(opt Options) []exploit.Module {
+	includeContext := opt.ValidationOnly || strings.EqualFold(strings.TrimSpace(opt.ScanProfile), "deep")
+	if strings.TrimSpace(opt.OnlyModules) != "" {
+		includeContext = true
+	}
+	if includeContext {
+		return registeredAllModuleInstances()
+	}
+	return registeredExploitCoreModuleInstances()
+}
+
+func planExploitModules(mods []exploit.Module, rs models.ReconSummary, opt Options) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
+	if len(mods) == 0 {
+		return nil, nil, nil
+	}
+	planned := make([]exploit.Module, 0, len(mods))
+	skipped := make([]models.ExploitModuleTelemetry, 0, len(mods))
+	preview := make([]string, 0, len(mods)+1)
+	preview = append(preview, fmt.Sprintf("Exploit planner evaluating %d module(s) against recon/auth prerequisites", len(mods)))
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, m := range mods {
+		ready, reason := moduleReadyForExecution(strings.ToLower(strings.TrimSpace(m.Name())), rs, opt)
+		if ready {
+			planned = append(planned, m)
+			preview = append(preview, fmt.Sprintf("Planner selected %s: %s", m.Name(), reason))
+			continue
+		}
+		skipped = append(skipped, models.ExploitModuleTelemetry{
+			Module:        m.Name(),
+			StartedAt:     now,
+			FinishedAt:    now,
+			DurationMs:    0,
+			FindingsCount: 0,
+			ErrorCount:    0,
+			Skipped:       true,
+			SkippedReason: "planner: " + reason,
+		})
+		preview = append(preview, fmt.Sprintf("Planner skipped %s: %s", m.Name(), reason))
+	}
+	if len(preview) > 12 {
+		preview = append(preview[:12], fmt.Sprintf("Planner omitted %d additional module decision(s) from preview", len(preview)-12))
+	}
+	return planned, skipped, preview
+}
+
+func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (bool, string) {
+	hasURLs := strings.TrimSpace(rs.URLs.All) != ""
+	hasRankedEndpoints := strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != ""
+	hasLiveHosts := strings.TrimSpace(rs.Live) != ""
+	hasCORS := strings.TrimSpace(rs.Intel.CORSJSON) != ""
+	hasSecrets := strings.TrimSpace(rs.Intel.SecretsJSON) != ""
+	hasBypass := strings.TrimSpace(rs.Intel.BypassJSON) != ""
+	hasNuclei := strings.TrimSpace(rs.Intel.NucleiPhase1JSONL) != ""
+	hasSubT := strings.TrimSpace(rs.Intel.SubdomainTakeoverJSON) != ""
+	hasJS := strings.TrimSpace(rs.Intel.JSEndpointsJSON) != ""
+	hasUserAuth := strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != ""
+	hasAdminAuth := strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != ""
+	hasRealAuth := hasUserAuth && hasAdminAuth
+
+	switch name {
+	case "open-redirect":
+		return hasRankedEndpoints || hasLiveHosts, "redirect candidates available"
+	case "info-disclosure", "exposed-files", "http-method-tampering":
+		return hasLiveHosts, "live host inventory available"
+	case "cors-poc":
+		return hasCORS, "CORS intel available"
+	case "secrets-validator":
+		return hasSecrets, "secret findings available"
+	case "bypass-poc":
+		return hasBypass, "bypass intel available"
+	case "nuclei-triage":
+		return hasNuclei, "nuclei phase1 results available"
+	case "subdomain-takeover":
+		return hasSubT, "subdomain takeover intel available"
+	case "js-endpoints":
+		return hasJS, "JS endpoint intel available"
+	case "session-abuse":
+		return hasURLs || hasRankedEndpoints, "session/auth candidates available"
+	case "privilege-path", "rsql-injection":
+		return hasRankedEndpoints, "ranked endpoint candidates available"
+	case "graphql-abuse":
+		return hasURLs || hasRankedEndpoints, "GraphQL candidate collection available"
+	case "state-change", "upload-abuse", "crlf-injection", "jwt-access":
+		return hasURLs, "URL corpus available"
+	case "auth-bypass":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		if !hasURLs {
+			return false, "requires URL corpus"
+		}
+		if !hasCORS && !hasRealAuth {
+			return false, "requires CORS intel or real auth contexts"
+		}
+		return true, "auth chain prerequisites available"
+	case "mutation-engine", "advanced-injection", "ssrf-prober", "idor-size":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		if !hasURLs && !hasRankedEndpoints {
+			return false, "requires URL or ranked endpoint corpus"
+		}
+		return true, "aggressive probe corpus available"
+	case "idor-playbook":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		if !opt.ProofMode {
+			return false, "requires proof mode"
+		}
+		if !hasURLs {
+			return false, "requires URL corpus"
+		}
+		if !hasRealAuth {
+			return false, "requires real user/admin auth contexts"
+		}
+		return true, "proof and auth prerequisites available"
+	case "saml-probe":
+		if hasURLs {
+			return true, "URL corpus available"
+		}
+		if strings.Contains(strings.ToLower(rs.Live), "saml") || strings.Contains(strings.ToLower(rs.Live), "sso") {
+			return true, "SSO hints in live host inventory"
+		}
+		return false, "requires SSO hints or URL corpus"
+	default:
+		return true, "no planner constraint"
+	}
+}
+
+func splitModulesByPlannerStage(mods []exploit.Module) ([]exploit.Module, []exploit.Module) {
+	scout := make([]exploit.Module, 0, len(mods))
+	proof := make([]exploit.Module, 0, len(mods))
+	for _, m := range mods {
+		if modulePlannerStage(strings.ToLower(strings.TrimSpace(m.Name()))) == "proof" {
+			proof = append(proof, m)
+			continue
+		}
+		scout = append(scout, m)
+	}
+	return scout, proof
+}
+
+func modulePlannerStage(name string) string {
+	switch name {
+	case "auth-bypass", "idor-playbook", "state-change", "upload-abuse", "mutation-engine", "jwt-access", "ssrf-prober", "crlf-injection", "advanced-injection", "rsql-injection", "idor-size", "saml-probe":
+		return "proof"
+	default:
+		return "scout"
+	}
+}
+
+type correlationSignals struct {
+	modules map[string]int
+}
+
+func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary, opt Options) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
+	if len(mods) == 0 {
+		return nil, nil, nil
+	}
+	planned := make([]exploit.Module, 0, len(mods))
+	skipped := make([]models.ExploitModuleTelemetry, 0, len(mods))
+	preview := make([]string, 0, len(mods)+1)
+	preview = append(preview, fmt.Sprintf("Correlation planner evaluating %d proof module(s) from scout findings/signals", len(mods)))
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, m := range mods {
+		ready, reason := moduleReadyByCorrelation(strings.ToLower(strings.TrimSpace(m.Name())), signals, rs, opt)
+		if ready {
+			planned = append(planned, m)
+			preview = append(preview, fmt.Sprintf("Correlation selected %s: %s", m.Name(), reason))
+			continue
+		}
+		skipped = append(skipped, models.ExploitModuleTelemetry{
+			Module:        m.Name(),
+			StartedAt:     now,
+			FinishedAt:    now,
+			DurationMs:    0,
+			FindingsCount: 0,
+			ErrorCount:    0,
+			Skipped:       true,
+			SkippedReason: "correlation: " + reason,
+		})
+		preview = append(preview, fmt.Sprintf("Correlation skipped %s: %s", m.Name(), reason))
+	}
+	if len(preview) > 12 {
+		preview = append(preview[:12], fmt.Sprintf("Correlation planner omitted %d additional module decision(s) from preview", len(preview)-12))
+	}
+	return planned, skipped, preview
+}
+
+func buildCorrelationSignals(findings []models.ExploitFinding) correlationSignals {
+	s := correlationSignals{modules: make(map[string]int, len(findings))}
+	for _, f := range findings {
+		name := strings.ToLower(strings.TrimSpace(f.Module))
+		if name == "" {
+			continue
+		}
+		strength := findingCorrelationStrength(f)
+		if strength > s.modules[name] {
+			s.modules[name] = strength
+		}
+	}
+	return s
+}
+
+func mergeCorrelationSignals(parts ...correlationSignals) correlationSignals {
+	merged := correlationSignals{modules: map[string]int{}}
+	for _, part := range parts {
+		for name, strength := range part.modules {
+			if strength > merged.modules[name] {
+				merged.modules[name] = strength
+			}
+		}
+	}
+	return merged
+}
+
+func (s correlationSignals) hasModule(name string) bool {
+	return s.strength(name) > 0
+}
+
+func (s correlationSignals) strength(name string) int {
+	return s.modules[strings.ToLower(strings.TrimSpace(name))]
+}
+
+func (s correlationSignals) hasModuleAtLeast(name string, min int) bool {
+	return s.strength(name) >= min
+}
+
+func findingCorrelationStrength(f models.ExploitFinding) int {
+	strength := validationStrength(f.Validation)
+	sev := strings.ToUpper(strings.TrimSpace(f.Severity))
+	if band := strings.ToUpper(strings.TrimSpace(string(f.RiskScore.Band))); band != "" {
+		sev = band
+	}
+	switch sev {
+	case "CRITICAL", "HIGH":
+		strength++
+	}
+	if strength > 5 {
+		strength = 5
+	}
+	return strength
+}
+
+func validationStrength(v string) int {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "weaponized":
+		return 4
+	case "confirmed":
+		return 3
+	case "verified":
+		return 2
+	case "signal":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func saveCorrelationSignalsArtifact(artDir string, signals correlationSignals) error {
+	if strings.TrimSpace(artDir) == "" {
+		return nil
+	}
+	names := make([]string, 0, len(signals.modules))
+	modules := make(map[string]int, len(signals.modules))
+	for name, strength := range signals.modules {
+		if strength <= 0 {
+			continue
+		}
+		names = append(names, name)
+		modules[name] = strength
+	}
+	sort.Strings(names)
+	payload := map[string]any{
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+		"modules":      modules,
+		"ordered":      names,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(filepath.Join(artDir, "correlation_signals.json"), b, 0o644)
+}
+
+func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
+	signals := correlationSignals{modules: map[string]int{}}
+	if strings.TrimSpace(artDir) == "" {
+		return signals
+	}
+	b, err := os.ReadFile(filepath.Join(artDir, "correlation_signals.json"))
+	if err != nil || len(b) == 0 {
+		return signals
+	}
+	var payload struct {
+		Modules json.RawMessage `json:"modules"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return signals
+	}
+	var oldFormat []string
+	if err := json.Unmarshal(payload.Modules, &oldFormat); err == nil {
+		for _, name := range oldFormat {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" {
+				signals.modules[name] = 1
+			}
+		}
+		return signals
+	}
+	var newFormat map[string]int
+	if err := json.Unmarshal(payload.Modules, &newFormat); err == nil {
+		for name, strength := range newFormat {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" && strength > 0 {
+				signals.modules[name] = strength
+			}
+		}
+	}
+	return signals
+}
+
+func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
+	_ = opt
+	switch name {
+	case "auth-bypass":
+		if signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2) {
+			return true, fmt.Sprintf("strong redirect/session/CORS scout lead available (strength=%d)", maxCorrelationStrength(signals, "cors-poc", "open-redirect", "session-abuse", "privilege-path"))
+		}
+		if strings.TrimSpace(rs.Intel.CORSJSON) != "" {
+			return true, "CORS intel available without scout confirmation"
+		}
+		return false, "needs strong redirect/session/CORS lead from scouts"
+	case "idor-playbook":
+		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+			return true, fmt.Sprintf("authorization/object-access scout lead available (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
+		}
+		return false, "needs strong privilege/session/graphql/object lead from scouts"
+	case "state-change":
+		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+			return true, fmt.Sprintf("state-change lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "cors-poc", "graphql-abuse", "js-endpoints"))
+		}
+		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}); matches >= 2 {
+			return true, fmt.Sprintf("multiple state-changing URL patterns detected in recon corpus (%d)", matches)
+		}
+		return false, "needs state-change lead from scouts or URL corpus"
+	case "upload-abuse":
+		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"upload", "file", "attachment", "import", "avatar", "image"}); matches >= 2 {
+			return true, fmt.Sprintf("multiple upload-oriented URL patterns detected (%d)", matches)
+		}
+		return false, "needs upload-oriented URLs"
+	case "mutation-engine":
+		if signals.hasModuleAtLeast("bypass-poc", 2) || signals.hasModuleAtLeast("nuclei-triage", 1) || signals.hasModuleAtLeast("http-method-tampering", 1) {
+			return true, fmt.Sprintf("mutation/bypass lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "bypass-poc", "nuclei-triage", "http-method-tampering"))
+		}
+		return false, "needs bypass or method tampering scout lead"
+	case "jwt-access":
+		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("secrets-validator", 2) {
+			return true, fmt.Sprintf("auth token lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "secrets-validator"))
+		}
+		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}); matches >= 2 {
+			return true, fmt.Sprintf("multiple token-oriented URL patterns detected (%d)", matches)
+		}
+		return false, "needs token/auth lead from scouts or URL corpus"
+	case "ssrf-prober":
+		if signals.hasModuleAtLeast("open-redirect", 2) {
+			return true, fmt.Sprintf("URL-forwarding lead available from open-redirect scout (strength=%d)", signals.strength("open-redirect"))
+		}
+		urlMatches := reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"})
+		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"})
+		if urlMatches+endpointMatches >= 2 {
+			return true, fmt.Sprintf("stacked SSRF-oriented URL/endpoint patterns detected (%d)", urlMatches+endpointMatches)
+		}
+		return false, "needs SSRF-style forwarding lead"
+	case "crlf-injection":
+		if signals.hasModuleAtLeast("open-redirect", 1) || signals.hasModuleAtLeast("http-method-tampering", 1) {
+			return true, fmt.Sprintf("header/redirect manipulation lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "open-redirect", "http-method-tampering"))
+		}
+		return false, "needs redirect or header manipulation scout lead"
+	case "advanced-injection", "rsql-injection":
+		if signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
+			return true, fmt.Sprintf("query/injection lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "graphql-abuse", "js-endpoints", "nuclei-triage"))
+		}
+		paramMatches := reconCorpusMatchCount(rs.Intel.ParamsRankedJSON, []string{"id", "query", "search", "filter", "where", "sort"})
+		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"search", "query", "filter", "graphql", "api"})
+		if paramMatches+endpointMatches >= 2 {
+			return true, fmt.Sprintf("stacked query-oriented parameter or endpoint patterns detected (%d)", paramMatches+endpointMatches)
+		}
+		return false, "needs query/injection lead from scouts or ranked params"
+	case "idor-size":
+		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+			return true, fmt.Sprintf("object-access lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
+		}
+		return false, "needs object-access lead from scouts"
+	case "saml-probe":
+		if signals.hasModuleAtLeast("session-abuse", 2) {
+			return true, fmt.Sprintf("session/auth scout lead available (strength=%d)", signals.strength("session-abuse"))
+		}
+		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"saml", "sso", "assertion", "acs", "metadata"}); matches >= 2 {
+			return true, fmt.Sprintf("multiple SAML/SSO URL patterns detected (%d)", matches)
+		}
+		return false, "needs SAML/SSO lead from scouts or URL corpus"
+	default:
+		return true, "no correlation constraint"
+	}
+}
+
+func maxCorrelationStrength(signals correlationSignals, names ...string) int {
+	best := 0
+	for _, name := range names {
+		if strength := signals.strength(name); strength > best {
+			best = strength
+		}
+	}
+	return best
+}
+
+func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary) []exploit.Module {
+	if len(mods) <= 1 {
+		return mods
+	}
+	base := prioritizeModules(mods, rs)
+	order := make(map[string]int, len(base))
+	for i, m := range base {
+		order[strings.ToLower(strings.TrimSpace(m.Name()))] = i
+	}
+	out := make([]exploit.Module, len(base))
+	copy(out, base)
+	sort.SliceStable(out, func(i, j int) bool {
+		aName := strings.ToLower(strings.TrimSpace(out[i].Name()))
+		bName := strings.ToLower(strings.TrimSpace(out[j].Name()))
+		aScore := correlationPriorityScore(aName, signals, rs)
+		bScore := correlationPriorityScore(bName, signals, rs)
+		if aScore != bScore {
+			return aScore > bScore
+		}
+		return order[aName] < order[bName]
+	})
+	return out
+}
+
+func correlationPriorityScore(name string, signals correlationSignals, rs models.ReconSummary) int {
+	score := maxCorrelationStrength(signals, name) * 100
+	switch name {
+	case "auth-bypass":
+		score += maxCorrelationStrength(signals, "cors-poc", "open-redirect", "session-abuse", "privilege-path") * 30
+		if strings.TrimSpace(rs.Intel.CORSJSON) != "" {
+			score += 15
+		}
+	case "idor-playbook":
+		score += maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints") * 30
+	case "state-change":
+		score += maxCorrelationStrength(signals, "session-abuse", "cors-poc", "graphql-abuse", "js-endpoints") * 30
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}) * 5
+	case "upload-abuse":
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"upload", "file", "attachment", "import", "avatar", "image"}) * 10
+	case "mutation-engine":
+		score += maxCorrelationStrength(signals, "bypass-poc", "nuclei-triage", "http-method-tampering") * 30
+	case "jwt-access":
+		score += maxCorrelationStrength(signals, "session-abuse", "secrets-validator") * 30
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}) * 5
+	case "ssrf-prober":
+		score += maxCorrelationStrength(signals, "open-redirect") * 35
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"}) * 5
+		score += reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"}) * 5
+	case "crlf-injection":
+		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 30
+	case "advanced-injection", "rsql-injection":
+		score += maxCorrelationStrength(signals, "graphql-abuse", "js-endpoints", "nuclei-triage") * 30
+		score += reconCorpusMatchCount(rs.Intel.ParamsRankedJSON, []string{"id", "query", "search", "filter", "where", "sort"}) * 5
+		score += reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"search", "query", "filter", "graphql", "api"}) * 5
+	case "idor-size":
+		score += maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints") * 30
+	case "saml-probe":
+		score += maxCorrelationStrength(signals, "session-abuse") * 30
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"saml", "sso", "assertion", "acs", "metadata"}) * 5
+	}
+	return score
+}
+
+func reconCorpusContainsAny(path string, needles []string) bool {
+	return reconCorpusMatchCount(path, needles) > 0
+}
+
+func reconCorpusMatchCount(path string, needles []string) int {
+	path = strings.TrimSpace(path)
+	if path == "" || len(needles) == 0 {
+		return 0
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return 0
+	}
+	text := strings.ToLower(string(b))
+	seen := map[string]struct{}{}
+	for _, needle := range needles {
+		needle = strings.ToLower(strings.TrimSpace(needle))
+		if needle == "" {
+			continue
+		}
+		if strings.Contains(text, needle) {
+			seen[needle] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func moduleNames(mods []exploit.Module) []string {
+	out := make([]string, 0, len(mods))
+	for _, m := range mods {
+		out = append(out, m.Name())
+	}
+	return out
 }
 
 // RegisteredModules returns the names of all exploit modules in registration order.
@@ -1277,9 +1877,16 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 	if strings.Contains(strings.ToLower(rs.Live), "saml") || strings.Contains(strings.ToLower(rs.Live), "sso") {
 		score["saml-probe"] = 15
 	}
-	// keep broad context modules early too.
-	score["api-surface"] = 18
-	score["admin-surface"] = 24
+	// If context modules are explicitly enabled, keep them informative but secondary.
+	score["api-surface"] = 48
+	score["admin-surface"] = 52
+	score["security-headers"] = 85
+	score["cookie-security"] = 86
+	score["http-response"] = 87
+	score["csp-audit"] = 88
+	score["tls-audit"] = 89
+	score["dns-check"] = 90
+	score["port-service"] = 91
 
 	out := make([]exploit.Module, len(mods))
 	copy(out, mods)
@@ -1361,16 +1968,23 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 		"target":         job.Target,
 		"mode":           job.Mode,
 		"config": map[string]any{
-			"scan_profile":                  opt.ScanProfile,
-			"min_severity":                  opt.MinSeverity,
-			"skip_modules":                  opt.SkipModules,
-			"only_modules":                  opt.OnlyModules,
-			"validation_only":               opt.ValidationOnly,
-			"report_formats":                opt.ReportFormats,
-			"rate_limit_rps":                opt.RateLimitRPS,
-			"webhook_findings":              opt.WebhookFindings,
-			"webhook_module_progress":       opt.WebhookModuleProgress,
-			"webhook_findings_min_severity": opt.WebhookFindingsMinSeverity,
+			"scan_profile":                        opt.ScanProfile,
+			"min_severity":                        opt.MinSeverity,
+			"skip_modules":                        opt.SkipModules,
+			"only_modules":                        opt.OnlyModules,
+			"validation_only":                     opt.ValidationOnly,
+			"report_formats":                      opt.ReportFormats,
+			"rate_limit_rps":                      opt.RateLimitRPS,
+			"webhook_findings":                    opt.WebhookFindings,
+			"webhook_module_progress":             opt.WebhookModuleProgress,
+			"webhook_findings_min_severity":       opt.WebhookFindingsMinSeverity,
+			"browser_capture":                     opt.BrowserCaptureEnabled,
+			"browser_capture_max_pages":           opt.BrowserCaptureMaxPages,
+			"browser_capture_per_page_wait_ms":    opt.BrowserCapturePerPageWaitMs,
+			"browser_capture_settle_wait_ms":      opt.BrowserCaptureSettleWaitMs,
+			"browser_capture_scroll_steps":        opt.BrowserCaptureScrollSteps,
+			"browser_capture_max_routes_per_page": opt.BrowserCaptureMaxRoutesPerPage,
+			"browser_capture_path":                opt.BrowserCapturePath,
 		},
 	}
 	b, err := json.MarshalIndent(payload, "", "  ")

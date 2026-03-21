@@ -17,6 +17,8 @@ func ApplyFindingOverrides(input ScoreInput, title, validation string) ScoreInpu
 		return applyAPISurfaceOverrides(input, lt)
 	case "http-response":
 		return applyHTTPResponseOverrides(input, lt)
+	case "info-disclosure":
+		return applyInfoDisclosureOverrides(input, lt)
 	case "privilege-path":
 		return applyPrivilegePathOverrides(input, lt, validation)
 	case "cookie-security":
@@ -181,6 +183,41 @@ func applyHTTPResponseOverrides(input ScoreInput, title string) ScoreInput {
 		input.Scope = ScopeUnchanged
 		input.ConfidentialityImpact = ImpactLow
 		input.IntegrityImpact = ImpactLow
+		input.AvailabilityImpact = ImpactNone
+	}
+	return input
+}
+
+func applyInfoDisclosureOverrides(input ScoreInput, title string) ScoreInput {
+	switch {
+	case strings.Contains(title, "exposed git repository metadata"),
+		strings.Contains(title, "potential information disclosure"):
+		input.AttackVector = AVNetwork
+		input.AttackComplexity = ACHigh
+		input.PrivilegesRequired = PRNone
+		input.UserInteraction = UINone
+		input.Scope = ScopeUnchanged
+		input.ConfidentialityImpact = ImpactLow
+		input.IntegrityImpact = ImpactNone
+		input.AvailabilityImpact = ImpactNone
+	case strings.Contains(title, "exposed apache server-status endpoint"),
+		strings.Contains(title, "exposed .ds_store index file"):
+		input.AttackVector = AVNetwork
+		input.AttackComplexity = ACHigh
+		input.PrivilegesRequired = PRNone
+		input.UserInteraction = UINone
+		input.Scope = ScopeUnchanged
+		input.ConfidentialityImpact = ImpactLow
+		input.IntegrityImpact = ImpactNone
+		input.AvailabilityImpact = ImpactNone
+	case strings.Contains(title, "exposed spring actuator endpoint"):
+		input.AttackVector = AVNetwork
+		input.AttackComplexity = ACLow
+		input.PrivilegesRequired = PRNone
+		input.UserInteraction = UINone
+		input.Scope = ScopeUnchanged
+		input.ConfidentialityImpact = ImpactLow
+		input.IntegrityImpact = ImpactNone
 		input.AvailabilityImpact = ImpactNone
 	}
 	return input

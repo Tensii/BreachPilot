@@ -25,6 +25,19 @@ func TestGetProfileDeep(t *testing.T) {
 	}
 }
 
+func TestGetProfileExploit(t *testing.T) {
+	p, ok := GetProfile("exploit")
+	if !ok {
+		t.Fatal("expected exploit profile")
+	}
+	if p.MaxParallel != 3 {
+		t.Fatalf("expected MaxParallel=3, got %d", p.MaxParallel)
+	}
+	if p.OnlyModules == "" {
+		t.Fatal("expected OnlyModules set for exploit")
+	}
+}
+
 func TestGetProfileUnknown(t *testing.T) {
 	_, ok := GetProfile("unknown")
 	if ok {

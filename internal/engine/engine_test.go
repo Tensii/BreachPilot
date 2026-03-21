@@ -126,3 +126,32 @@ func TestFileAndFullProduceCompatibleCounts(t *testing.T) {
 		t.Fatalf("incompatible exploit counts: %d vs %d", jobFile.ExploitFindingsCount, jobFull.ExploitFindingsCount)
 	}
 }
+
+func TestAnnotateModuleTelemetryYield(t *testing.T) {
+	in := []models.ExploitModuleTelemetry{
+		{Module: "ssrf-prober", FindingsCount: 3},
+		{Module: "cookie-security", FindingsCount: 2},
+		{Module: "planner-only", Skipped: true},
+	}
+	raw := []models.ExploitFinding{
+		{Module: "ssrf-prober"},
+		{Module: "ssrf-prober"},
+		{Module: "ssrf-prober"},
+		{Module: "cookie-security"},
+		{Module: "cookie-security"},
+	}
+	accepted := []models.ExploitFinding{
+		{Module: "ssrf-prober"},
+	}
+
+	out := annotateModuleTelemetryYield(in, raw, accepted)
+	if out[0].AcceptedCount != 1 || out[0].FilteredCount != 2 {
+		t.Fatalf("expected ssrf-prober yield 1 accepted / 2 filtered, got %+v", out[0])
+	}
+	if out[1].AcceptedCount != 0 || out[1].FilteredCount != 2 {
+		t.Fatalf("expected cookie-security to be fully filtered, got %+v", out[1])
+	}
+	if out[2].AcceptedCount != 0 || out[2].FilteredCount != 0 {
+		t.Fatalf("expected skipped planner entry to remain zero-yield, got %+v", out[2])
+	}
+}

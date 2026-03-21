@@ -26,14 +26,14 @@ func TestFormatCLISummaryTopModules(t *testing.T) {
 		Mode:                 "full",
 		ExploitFindingsCount: 5,
 		ModuleTelemetry: []models.ExploitModuleTelemetry{
-			{Module: "idorplaybook", FindingsCount: 3},
-			{Module: "authbypass", FindingsCount: 2},
-			{Module: "headers", FindingsCount: 1},
+			{Module: "idorplaybook", FindingsCount: 3, AcceptedCount: 3},
+			{Module: "authbypass", FindingsCount: 2, AcceptedCount: 1},
+			{Module: "headers", FindingsCount: 1, AcceptedCount: 0},
 		},
 	}
 	lines := formatCLISummary(job, "full")
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Top exploit modules: idorplaybook=3, authbypass=2, headers=1") {
+	if !strings.Contains(joined, "Top exploit modules: idorplaybook=3/3, authbypass=1/2, headers=0/1") {
 		t.Fatalf("missing top module summary: %s", joined)
 	}
 }

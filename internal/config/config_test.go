@@ -55,3 +55,23 @@ func TestValidateProofModeNoAllowlistIsValid(t *testing.T) {
 		t.Fatalf("expected no validation error when allowlist is empty, got: %v", err)
 	}
 }
+
+func TestLoadBrowserCaptureOptions(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE", "true")
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES", "9")
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS", "5000")
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS", "2000")
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS", "5")
+	_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", "14")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS")
+	defer os.Unsetenv("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE")
+
+	cfg := Load()
+	if !cfg.BrowserCaptureEnabled || cfg.BrowserCaptureMaxPages != 9 || cfg.BrowserCapturePerPageWaitMs != 5000 || cfg.BrowserCaptureSettleWaitMs != 2000 || cfg.BrowserCaptureScrollSteps != 5 || cfg.BrowserCaptureMaxRoutesPerPage != 14 {
+		t.Fatalf("browser capture options did not load correctly: %+v", cfg)
+	}
+}

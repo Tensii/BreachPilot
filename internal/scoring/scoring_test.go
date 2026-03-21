@@ -163,6 +163,41 @@ func TestApplyFindingOverridesCookieMissingSecureIsMedium(t *testing.T) {
 	}
 }
 
+func TestApplyFindingOverridesGitMetadataIsMedium(t *testing.T) {
+	input := ScoreInput{
+		Module:      "info-disclosure",
+		RawSeverity: "MEDIUM",
+		Exposure:    ExposureInternet,
+		Criticality: CriticalitySupporting,
+	}
+
+	input = ApplyFindingOverrides(input, "Exposed Git repository metadata", "verified")
+	score := Score(input)
+
+	if score.Band != BandMedium {
+		t.Fatalf("exposed git metadata should rank medium, got %.1f (%s)", score.Final, score.Band)
+	}
+	if score.Final >= 7.0 {
+		t.Fatalf("exposed git metadata should not rank high, got %.1f (%s)", score.Final, score.Band)
+	}
+}
+
+func TestApplyFindingOverridesEnvConfigCanStayHigh(t *testing.T) {
+	input := ScoreInput{
+		Module:      "info-disclosure",
+		RawSeverity: "HIGH",
+		Exposure:    ExposureInternet,
+		Criticality: CriticalitySupporting,
+	}
+
+	input = ApplyFindingOverrides(input, "Exposed environment configuration file", "verified")
+	score := Score(input)
+
+	if score.Band != BandHigh {
+		t.Fatalf("exposed environment config should remain high, got %.1f (%s)", score.Final, score.Band)
+	}
+}
+
 func TestAnalyzeChains(t *testing.T) {
 	findings := []FindingMeta{
 		{ID: "f1", Module: "open-redirect", URL: "http://target/redirect?url=http://evil.com"},
