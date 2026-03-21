@@ -55,6 +55,7 @@ import (
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
+	oob "breachpilot/internal/exploit/oob"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/policy"
@@ -412,6 +413,16 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Target:  job.Target,
 		Counts:  map[string]int{"planned": len(scoutModules)},
 	})
+
+	// Initialize OOB Provider
+	var oobProvider oob.Provider
+	if opt.AggressiveMode {
+		if p, err := oob.NewInteractshProvider(); err == nil {
+			oobProvider = p
+			defer p.Close()
+		}
+	}
+
 	sharedState := exploit.NewSharedState()
 	exploitOpt := exploit.Options{
 		ArtifactsRoot:                  opt.ArtifactsRoot,
@@ -445,6 +456,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		BrowserCaptureMaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
 		BrowserCapturePath:             opt.BrowserCapturePath,
 		SharedState:                    sharedState,
+		OOBProvider:                    oobProvider,
 	}
 	scoutFindings, scoutTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
@@ -476,6 +488,77 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return nil
 	}
 	rawExploitFindings := append([]models.ExploitFinding(nil), exploitFindings...)
+
+	// --- OOB Verification Phase ---
+	if oobProvider != nil && ctx.Err() == nil {
+		emit(models.RuntimeEvent{
+			Kind:    "oob",
+			Stage:   "exploit.oob.verify",
+			Status:  "polling",
+			Message: "Waiting up to 10s for asynchronous OOB callbacks...",
+			Target:  job.Target,
+		})
+		
+		// Wait to allow asynchronous payloads (like Blind XSS / Blind RCE) to fire
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+		}
+
+		if hits, err := oobProvider.Poll(ctx); err == nil && len(hits) > 0 {
+			emit(models.RuntimeEvent{
+				Kind:    "oob",
+				Stage:   "exploit.oob.verify",
+				Status:  "hits",
+				Message: fmt.Sprintf("Received %d OOB interaction(s)", len(hits)),
+				Target:  job.Target,
+				Counts:  map[string]int{"oob_hits": len(hits)},
+			})
+
+			for _, hit := range hits {
+				// We expect correlation metadata to be formatted as: module-uuid
+				parts := strings.SplitN(hit.CorrelationMeta, "-", 2)
+				moduleName := "oob-listener"
+				if len(parts) == 2 {
+					moduleName = parts[0]
+				}
+
+				title := fmt.Sprintf("Out-Of-Band %s Interaction Received", strings.ToUpper(hit.Protocol))
+				evidence := fmt.Sprintf("protocol=%s source_ip=%s correlation_id=%s timestamp=%s", 
+					hit.Protocol, hit.SourceIP, hit.CorrelationMeta, hit.Timestamp.Format(time.RFC3339))
+				
+				// Create an artifact for the raw request
+				artifactPath := ""
+				if hit.RawRequest != "" && job != nil {
+					ap, err := exploit.SaveValidationArtifact(opt.ArtifactsRoot, job.ID, moduleName,
+						"oob_"+exploit.SafeArtifactName(hit.CorrelationMeta),
+						job.Target, "confirmed", title,
+						nil, nil, "raw_oob_interaction", hit.RawRequest, 0)
+					if err == nil {
+						artifactPath = ap
+					}
+				}
+
+				oobFinding := models.ExploitFinding{
+					Module:       moduleName,
+					Severity:     "CRITICAL",
+					Confidence:   100,
+					Validation:   "confirmed",
+					Target:       job.Target, // We might not know the exact path without more correlation state, but the module knows
+					Title:        title,
+					Evidence:     evidence,
+					ArtifactPath: artifactPath,
+					PoCHint:      "Review OOB interaction payload for execution proof",
+					Tags:         []string{"oob", "blind-execution", strings.ToLower(hit.Protocol)},
+					Timestamp:    exploit.NowISO(),
+				}
+				
+				exploitFindings = append(exploitFindings, oobFinding)
+				rawExploitFindings = append(rawExploitFindings, oobFinding)
+			}
+		}
+	}
+
 	preFilterCount := len(exploitFindings)
 	exploitFindings = filter.BySeverity(exploitFindings, opt.MinSeverity)
 	job.FilteredCount = preFilterCount - len(exploitFindings)
