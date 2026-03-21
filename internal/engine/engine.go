@@ -44,8 +44,10 @@ import (
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
 	portservice "breachpilot/internal/exploit/modules/portservice"
 	privpath "breachpilot/internal/exploit/modules/privpath"
+	racecondition "breachpilot/internal/exploit/modules/racecondition"
 	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
 	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
+	schemaprobe "breachpilot/internal/exploit/modules/schemaprobe"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
 	sessionabuse "breachpilot/internal/exploit/modules/sessionabuse"
 	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
@@ -410,6 +412,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Target:  job.Target,
 		Counts:  map[string]int{"planned": len(scoutModules)},
 	})
+	sharedState := exploit.NewSharedState()
 	exploitOpt := exploit.Options{
 		ArtifactsRoot:                  opt.ArtifactsRoot,
 		Progress:                       opt.Progress,
@@ -441,6 +444,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		BrowserCaptureScrollSteps:      opt.BrowserCaptureScrollSteps,
 		BrowserCaptureMaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
 		BrowserCapturePath:             opt.BrowserCapturePath,
+		SharedState:                    sharedState,
 	}
 	scoutFindings, scoutTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
@@ -1304,6 +1308,8 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		rsqlinjection.New(),
 		idorsize.New(),
 		massassign.New(),
+		schemaprobe.New(),
+		racecondition.New(),
 	}
 }
 
@@ -1431,6 +1437,26 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 			return false, "requires URL or ranked endpoint corpus"
 		}
 		return true, "aggressive probe corpus available"
+	case "schema-probe":
+		// Schema probing is passive discovery — only requires live hosts or URL corpus
+		if !hasURLs && !hasLiveHosts {
+			return false, "requires live hosts or URL corpus"
+		}
+		return true, "host corpus available for schema discovery"
+	case "race-condition":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		if !opt.ProofMode {
+			return false, "requires proof mode"
+		}
+		if !hasRealAuth {
+			return false, "requires real auth contexts"
+		}
+		if !hasURLs && !hasRankedEndpoints {
+			return false, "requires URL or ranked endpoint corpus"
+		}
+		return true, "race condition prerequisites available"
 	case "idor-playbook":
 		if !opt.AggressiveMode {
 			return false, "requires aggressive mode"
