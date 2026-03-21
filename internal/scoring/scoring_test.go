@@ -48,6 +48,41 @@ func TestScore(t *testing.T) {
 	}
 }
 
+func TestApplyFindingOverridesMissingCSPLowersScore(t *testing.T) {
+	input := ScoreInput{
+		Module:      "csp-audit",
+		RawSeverity: "LOW",
+		Exposure:    ExposureInternet,
+		Criticality: CriticalitySupporting,
+	}
+
+	input = ApplyFindingOverrides(input, "Missing Content-Security-Policy header", "verified")
+	score := Score(input)
+
+	if score.Final >= 4.0 {
+		t.Fatalf("missing CSP should not score medium or higher, got %.1f (%s)", score.Final, score.Band)
+	}
+	if score.Band != BandLow {
+		t.Fatalf("missing CSP should be low, got %s", score.Band)
+	}
+}
+
+func TestApplyFindingOverridesUnsafeEvalStaysMediumOrAbove(t *testing.T) {
+	input := ScoreInput{
+		Module:      "csp-audit",
+		RawSeverity: "HIGH",
+		Exposure:    ExposureInternet,
+		Criticality: CriticalitySupporting,
+	}
+
+	input = ApplyFindingOverrides(input, "CSP allows unsafe-eval", "verified")
+	score := Score(input)
+
+	if score.Final < 4.0 {
+		t.Fatalf("unsafe-eval should remain materially ranked, got %.1f (%s)", score.Final, score.Band)
+	}
+}
+
 func TestAnalyzeChains(t *testing.T) {
 	findings := []FindingMeta{
 		{ID: "f1", Module: "open-redirect", URL: "http://target/redirect?url=http://evil.com"},

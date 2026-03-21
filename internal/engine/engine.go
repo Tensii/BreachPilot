@@ -517,6 +517,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				Criticality: criticality,
 				ChainBonus:  bonus,
 			}
+			input = riskscoring.ApplyFindingOverrides(input, f.Title, f.Validation)
 
 			rsScore := riskscoring.Score(input)
 			rsScore.Chains = chains
