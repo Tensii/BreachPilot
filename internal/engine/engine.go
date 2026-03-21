@@ -38,6 +38,7 @@ import (
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
 	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
+	massassign "breachpilot/internal/exploit/modules/massassign"
 	mutationengine "breachpilot/internal/exploit/modules/mutationengine"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
 	openredirect "breachpilot/internal/exploit/modules/openredirect"
@@ -1302,6 +1303,7 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		samlprobe.New(),
 		rsqlinjection.New(),
 		idorsize.New(),
+		massassign.New(),
 	}
 }
 
@@ -1421,7 +1423,7 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 			return false, "requires CORS intel or real auth contexts"
 		}
 		return true, "auth chain prerequisites available"
-	case "mutation-engine", "advanced-injection", "ssrf-prober", "idor-size":
+	case "mutation-engine", "advanced-injection", "ssrf-prober", "idor-size", "mass-assign":
 		if !opt.AggressiveMode {
 			return false, "requires aggressive mode"
 		}
