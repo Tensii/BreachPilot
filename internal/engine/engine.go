@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -422,8 +423,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	var oobProvider oob.Provider
 	if opt.AggressiveMode {
 		if p, err := oob.NewInteractshProvider(); err == nil {
-			oobProvider = p
-			defer p.Close()
+			oobProvider = oob.NewTrackingProvider(p)
+			defer oobProvider.Close()
 		}
 	}
 
@@ -502,7 +503,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Message: "Waiting up to 10s for asynchronous OOB callbacks...",
 			Target:  job.Target,
 		})
-		
+
 		// Wait to allow asynchronous payloads (like Blind XSS / Blind RCE) to fire
 		select {
 		case <-ctx.Done():
@@ -520,24 +521,54 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			})
 
 			for _, hit := range hits {
-				// We expect correlation metadata to be formatted as: module-uuid
-				parts := strings.SplitN(hit.CorrelationMeta, "-", 2)
+				corr, hasCorr := oob.LookupCorrelation(oobProvider, hit.CorrelationMeta)
 				moduleName := "oob-listener"
-				if len(parts) == 2 {
-					moduleName = parts[0]
+				if hasCorr && strings.TrimSpace(corr.Module) != "" {
+					moduleName = corr.Module
+				} else {
+					parts := strings.SplitN(hit.CorrelationMeta, "-", 2)
+					if len(parts) == 2 {
+						moduleName = parts[0]
+					}
 				}
 
 				title := fmt.Sprintf("Out-Of-Band %s Interaction Received", strings.ToUpper(hit.Protocol))
-				evidence := fmt.Sprintf("protocol=%s source_ip=%s correlation_id=%s timestamp=%s", 
-					hit.Protocol, hit.SourceIP, hit.CorrelationMeta, hit.Timestamp.Format(time.RFC3339))
-				
+				if hasCorr && strings.TrimSpace(corr.Title) != "" {
+					title = corr.Title
+				}
+				evidenceParts := make([]string, 0, 5)
+				if hasCorr && strings.TrimSpace(corr.Evidence) != "" {
+					evidenceParts = append(evidenceParts, corr.Evidence)
+				}
+				evidenceParts = append(evidenceParts,
+					fmt.Sprintf("protocol=%s", hit.Protocol),
+					fmt.Sprintf("source_ip=%s", hit.SourceIP),
+					fmt.Sprintf("correlation_id=%s", hit.CorrelationMeta),
+					fmt.Sprintf("timestamp=%s", hit.Timestamp.Format(time.RFC3339)),
+				)
+				evidence := strings.Join(evidenceParts, " ")
+
 				// Create an artifact for the raw request
 				artifactPath := ""
-				if hit.RawRequest != "" && job != nil {
+				if job != nil {
+					probeEx := exploit.ProofExchange{}
+					if hasCorr && strings.TrimSpace(corr.RequestURL) != "" {
+						probeEx = exploit.GenericExchange(
+							"probe",
+							emptyIfBlank(corr.RequestMethod, http.MethodGet),
+							corr.RequestURL,
+							corr.RequestHeaders,
+							corr.RequestBody,
+							0,
+							nil,
+							"",
+							"",
+						)
+					}
 					ap, err := exploit.SaveValidationArtifact(opt.ArtifactsRoot, job.ID, moduleName,
 						"oob_"+exploit.SafeArtifactName(hit.CorrelationMeta),
-						job.Target, "confirmed", title,
-						exploit.ProofExchange{}, exploit.ProofExchange{}, "raw_oob_interaction", hit.RawRequest, 0)
+						emptyIfBlank(corr.Target, job.Target), emptyIfBlank(corr.Validation, "confirmed"), title,
+						exploit.ProofExchange{}, probeEx, "raw_oob_interaction", hit.RawRequest, 0)
 					if err == nil {
 						artifactPath = ap
 					}
@@ -545,18 +576,19 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 				oobFinding := models.ExploitFinding{
 					Module:       moduleName,
-					Severity:     "CRITICAL",
-					Confidence:   100,
-					Validation:   "confirmed",
-					Target:       job.Target, // We might not know the exact path without more correlation state, but the module knows
+					Severity:     emptyIfBlank(corr.Severity, "CRITICAL"),
+					Confidence:   intOrDefault(corr.Confidence, 100),
+					Validation:   emptyIfBlank(corr.Validation, "confirmed"),
+					Target:       emptyIfBlank(corr.Target, job.Target),
 					Title:        title,
 					Evidence:     evidence,
 					ArtifactPath: artifactPath,
-					PoCHint:      "Review OOB interaction payload for execution proof",
-					Tags:         []string{"oob", "blind-execution", strings.ToLower(hit.Protocol)},
+					PoCHint:      emptyIfBlank(corr.PoCHint, "Review OOB interaction payload for execution proof"),
+					Tags:         appendUniqueStrings(corr.Tags, []string{"oob", "blind-execution", strings.ToLower(hit.Protocol)}),
+					CWE:          corr.CWE,
 					Timestamp:    exploit.NowISO(),
 				}
-				
+
 				exploitFindings = append(exploitFindings, oobFinding)
 				rawExploitFindings = append(rawExploitFindings, oobFinding)
 			}
@@ -608,23 +640,23 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 						if strings.Contains(req.URL, marker) || strings.Contains(req.PostData, marker) {
 							title := "Stored Vulnerability (Second-Order) Detected"
 							evidence := fmt.Sprintf("Payload injected via %s, executed and logged during cross-site crawl at %s", source, req.URL)
-							
+
 							finding := models.ExploitFinding{
-								Module:       "stored-verification",
-								Severity:     "CRITICAL",
-								Confidence:   95,
-								Validation:   "confirmed",
-								Target:       source, 
-								Title:        title,
-								Evidence:     evidence,
-								PoCHint:      "The payload injected on the target endpoint persisted and fired asynchronously on another user's session.",
-								Tags:         []string{"stored-xss", "second-order", "owasp-a03"},
-								CWE:          "CWE-79",
-								Timestamp:    exploit.NowISO(),
+								Module:     "stored-verification",
+								Severity:   "CRITICAL",
+								Confidence: 95,
+								Validation: "confirmed",
+								Target:     source,
+								Title:      title,
+								Evidence:   evidence,
+								PoCHint:    "The payload injected on the target endpoint persisted and fired asynchronously on another user's session.",
+								Tags:       []string{"stored-xss", "second-order", "owasp-a03"},
+								CWE:        "CWE-79",
+								Timestamp:  exploit.NowISO(),
 							}
 							exploitFindings = append(exploitFindings, finding)
 							rawExploitFindings = append(rawExploitFindings, finding)
-							
+
 							// Remove so we don't alert multiple times for the same payload
 							delete(storedMarkers, marker)
 						}
@@ -1171,6 +1203,37 @@ func countFindingsByModule(findings []models.ExploitFinding) map[string]int {
 			continue
 		}
 		out[module]++
+	}
+	return out
+}
+
+func emptyIfBlank(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}
+
+func intOrDefault(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+func appendUniqueStrings(a, b []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, item := range append(append([]string{}, a...), b...) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
 	}
 	return out
 }
