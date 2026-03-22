@@ -24,6 +24,9 @@ ReconHarvest is vendored under `tools/reconharvest/` for portable full-mode runs
 # resume an interrupted job
 ./breachpilot resume artifacts/example.com/1/.breachpilot.state
 
+# per-run aggressive + boundless execution
+./breachpilot full example.com aggressive boundless
+
 # machine-readable output
 ./breachpilot full example.com json
 
@@ -48,12 +51,17 @@ Use:
 
 BreachPilot automatically loads `./breachpilot.env`. You can override it with `BREACHPILOT_CONFIG=/path/to/file`.
 
+`BREACHPILOT_AGGRESSIVE` and `BREACHPILOT_BOUNDLESS` work as run defaults from `breachpilot.env`.
+- If they are `true` in `breachpilot.env`, you do not need to pass `aggressive` or `boundless` on every command.
+- If they are `false` in `breachpilot.env`, you can enable them only for the current run by adding `aggressive` and/or `boundless` to the CLI command.
+
 ## Recommended Config
 For exploit-focused runs, these are the high-value settings:
 
 ```env
 BREACHPILOT_SCAN_PROFILE=exploit
 BREACHPILOT_AGGRESSIVE=true
+BREACHPILOT_BOUNDLESS=false
 BREACHPILOT_PROOF_MODE=true
 
 BREACHPILOT_BROWSER_CAPTURE=true
@@ -78,8 +86,15 @@ CLI flags override `breachpilot.env`. For example:
 
 ```bash
 ./breachpilot full example.com aggressive
+./breachpilot full example.com aggressive boundless
 ./breachpilot file artifacts/example.com/1/recon/summary.json json aggressive
+./breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive boundless
 ```
+
+Behavior summary:
+- `breachpilot.env` applies generally to all runs on that machine or checkout.
+- CLI options such as `aggressive` and `boundless` apply only to the current command.
+- CLI options can enable a mode for one run even if the env default is `false`.
 
 ## Profiles
 - `quick`: fast surface scan
@@ -92,6 +107,7 @@ CLI flags override `breachpilot.env`. For example:
 ## Important Environment Variables
 - `BREACHPILOT_SCAN_PROFILE`
 - `BREACHPILOT_AGGRESSIVE`
+- `BREACHPILOT_BOUNDLESS`
 - `BREACHPILOT_PROOF_MODE`
 - `BREACHPILOT_PROOF_TARGET_ALLOWLIST`
 - `BREACHPILOT_ONLY_MODULES`

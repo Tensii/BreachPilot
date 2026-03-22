@@ -105,6 +105,7 @@ type Options struct {
 	ModuleTimeoutSec               int
 	ModuleRetries                  int
 	AggressiveMode                 bool
+	BoundlessMode                  bool
 	ProofMode                      bool
 	ProofTargetAllowlist           string
 	AuthUserCookie                 string
@@ -453,6 +454,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		ModuleTimeoutSec:               opt.ModuleTimeoutSec,
 		ModuleRetries:                  opt.ModuleRetries,
 		Aggressive:                     opt.AggressiveMode,
+		Boundless:                      opt.BoundlessMode,
 		ProofMode:                      opt.ProofMode,
 		ProofTargetAllowlist:           opt.ProofTargetAllowlist,
 		AuthUserCookie:                 opt.AuthUserCookie,

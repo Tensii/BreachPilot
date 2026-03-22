@@ -69,6 +69,7 @@ func main() {
 
 	jsonOut := false
 	aggressiveFlag := false
+	boundlessFlag := false
 	skipNucleiFlag := false
 	if cfg.BrowserCaptureEnabled {
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE", "1")
@@ -91,6 +92,10 @@ func main() {
 			aggressiveFlag = true
 			continue
 		}
+		if n == "--boundless" || n == "boundless" {
+			boundlessFlag = true
+			continue
+		}
 		if n == "--skip-nuclei" {
 			skipNucleiFlag = true
 			continue
@@ -99,6 +104,9 @@ func main() {
 	}
 	if aggressiveFlag {
 		cfg.AggressiveMode = true
+	}
+	if boundlessFlag {
+		cfg.BoundlessMode = true
 	}
 	if skipNucleiFlag {
 		cfg.SkipNuclei = true
@@ -163,6 +171,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		ModuleTimeoutSec:               cfg.ModuleTimeoutSec,
 		ModuleRetries:                  cfg.ModuleRetries,
 		AggressiveMode:                 cfg.AggressiveMode,
+		BoundlessMode:                  cfg.BoundlessMode,
 		ProofMode:                      cfg.ProofMode,
 		ProofTargetAllowlist:           cfg.ProofTargetAllowlist,
 		AuthUserCookie:                 cfg.AuthUserCookie,
@@ -696,7 +705,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t boundless=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.BoundlessMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
 	fmt.Printf("%s[ENGINE  ]%s default exploit lane=exploit-core context_modules=explicit-only|validation_only|deep\n", gray, reset)
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
@@ -705,6 +714,9 @@ func printStartupBanner(cfg config.Config) {
 	}
 	if cfg.AggressiveMode {
 		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ☠️ AGGRESSIVE MODE ENABLED — active verification probes ON\n")
+	}
+	if cfg.BoundlessMode {
+		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ∞ BOUNDLESS MODE ENABLED — module limits and timeouts relaxed for this run\n")
 	}
 }
 
@@ -743,19 +755,20 @@ func renderStage(stage string) string {
 func printUsage() {
 	fmt.Println(`Usage:
 	  breachpilot setup
-	  breachpilot full <target> [json] [aggressive]
-	  breachpilot file <summary.json> [json] [aggressive]
-	  breachpilot resume <path/to/.breachpilot.state> [json] [aggressive]
+		  breachpilot full <target> [json] [aggressive] [boundless]
+		  breachpilot file <summary.json> [json] [aggressive] [boundless]
+		  breachpilot resume <path/to/.breachpilot.state> [json] [aggressive] [boundless]
 	  breachpilot list-modules
 	  breachpilot doctor
 
 	Examples:
-	  breachpilot full example.com aggressive
-	  breachpilot aggressive full example.com
-	  breachpilot file recon/summary.json aggressive
-	  breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive
-	  (CLI args override breachpilot.env settings)
-	`)
+		  breachpilot full example.com aggressive
+		  breachpilot full example.com aggressive boundless
+		  breachpilot aggressive full example.com
+		  breachpilot file recon/summary.json aggressive boundless
+		  breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive boundless
+		  (CLI args override breachpilot.env settings)
+		`)
 }
 
 func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
