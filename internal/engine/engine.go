@@ -320,6 +320,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
 	if strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1") {
 		args = append(args, "-concurrency", "10")
+	} else {
+		args = append(args, "-c", "50", "-bs", "25")
 	}
 	if len(job.Templates) > 0 {
 		args = append(args, "-t", strings.Join(job.Templates, ","))
@@ -1105,7 +1107,7 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 			if u, ok := m["url"].(string); ok {
 				appendURL(u)
 			}
-			if len(items) >= 500 {
+			if len(items) >= 50 {
 				break
 			}
 		}
