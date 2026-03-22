@@ -26,6 +26,7 @@ import (
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
+	cmdinject "breachpilot/internal/exploit/modules/cmdinject"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
 	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
@@ -43,6 +44,7 @@ import (
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
 	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
+	lfi "breachpilot/internal/exploit/modules/lfi"
 	massassign "breachpilot/internal/exploit/modules/massassign"
 	mutationengine "breachpilot/internal/exploit/modules/mutationengine"
 	nucleitriage "breachpilot/internal/exploit/modules/nucleitriage"
@@ -51,6 +53,7 @@ import (
 	privpath "breachpilot/internal/exploit/modules/privpath"
 	racecondition "breachpilot/internal/exploit/modules/racecondition"
 	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
+	rxss "breachpilot/internal/exploit/modules/rxss"
 	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
 	schemaprobe "breachpilot/internal/exploit/modules/schemaprobe"
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
@@ -1511,12 +1514,15 @@ func registeredModuleInfos() []ModuleInfo {
 		{"session-abuse", "Detects risky session/token handling surfaces", true, "exploit-core"},
 		{"privilege-path", "Maps probable privilege escalation endpoint paths", true, "exploit-core"},
 		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true, "exploit-core"},
+		{"lfi", "Detects local file inclusion and path traversal", true, "exploit-core"},
 		{"state-change", "Detects risky state-changing endpoint patterns", true, "exploit-core"},
 		{"upload-abuse", "Detects upload attack surface and retrieval risks", true, "exploit-core"},
 		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true, "exploit-core"},
+		{"cmdinject", "Detects OS command injection (blind timing and OOB)", true, "exploit-core"},
 		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true, "exploit-core"},
 		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true, "exploit-core"},
 		{"jwt-access", "Detects JWT-specific vulnerabilities (none alg, header injection)", true, "exploit-core"},
+		{"rxss", "Detects reflected XSS without browser via marker reflection", true, "exploit-core"},
 		{"ssrf-prober", "Detects SSRF via parameters, headers, and bodies", true, "exploit-core"},
 		{"crlf-injection", "Detects CRLF injection in headers/params", true, "exploit-core"},
 		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true, "exploit-core"},
@@ -1547,12 +1553,15 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		sessionabuse.New(),
 		privpath.New(),
 		graphqlabuse.New(),
+		lfi.New(),
 		statechange.New(),
 		uploadabuse.New(),
 		authbypass.New(),
+		cmdinject.New(),
 		mutationengine.New(),
 		idorplaybook.New(),
 		jwtaccess.New(),
+		rxss.New(),
 		advancedinjection.New(),
 		ssrfprober.New(),
 		crlfinjection.New(),
@@ -1681,6 +1690,8 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 		return hasRankedEndpoints, "ranked endpoint candidates available"
 	case "graphql-abuse":
 		return hasURLs || hasRankedEndpoints, "GraphQL candidate collection available"
+	case "lfi", "rxss":
+		return hasURLs || hasRankedEndpoints, "URL or endpoint corpus available"
 	case "state-change", "upload-abuse", "crlf-injection", "jwt-access":
 		switch name {
 		case "state-change":
@@ -1712,16 +1723,25 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 			return false, "requires CORS intel or real auth contexts"
 		}
 		return true, "auth chain prerequisites available"
-	case "mutation-engine", "advanced-injection", "ssrf-prober", "idor-size", "mass-assign":
+	case "advanced-injection":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		if wf.QueryLikeSteps > 0 {
+			return true, fmt.Sprintf("browser workflow captured %d parameterized/query-like step(s)", wf.QueryLikeSteps)
+		}
+		return true, "aggressive mode enabled; correlation planner will gate injection leads"
+	case "cmdinject":
+		if !opt.AggressiveMode {
+			return false, "requires aggressive mode"
+		}
+		return hasURLs || hasRankedEndpoints, "URL or endpoint corpus available"
+	case "mutation-engine", "ssrf-prober", "idor-size", "mass-assign":
 		if !opt.AggressiveMode {
 			return false, "requires aggressive mode"
 		}
 		if !hasURLs && !hasRankedEndpoints {
 			switch name {
-			case "advanced-injection":
-				if wf.QueryLikeSteps > 0 {
-					return true, fmt.Sprintf("browser workflow captured %d parameterized/query-like step(s)", wf.QueryLikeSteps)
-				}
 			case "ssrf-prober":
 				if wf.SSRFLikeSteps > 0 {
 					return true, fmt.Sprintf("browser workflow captured %d SSRF-style forwarding step(s)", wf.SSRFLikeSteps)
@@ -2033,10 +2053,17 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if wf.AuthLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d auth/token step(s)", wf.AuthLikeSteps)
 		}
+		hasURLs := strings.TrimSpace(rs.URLs.All) != ""
+		if hasURLs && reconCorpusMatchCount(rs.URLs.All, []string{"api/", "auth/", "token", "session", "login", "authorize", "oauth"}) >= 1 {
+			return true, "URL corpus has auth/API endpoint(s) — direct JWT probe"
+		}
 		return false, "needs token/auth lead from scouts or URL corpus"
 	case "ssrf-prober":
 		if signals.hasModuleAtLeast("open-redirect", 2) {
 			return true, fmt.Sprintf("URL-forwarding lead available from open-redirect scout (strength=%d)", signals.strength("open-redirect"))
+		}
+		if paramCount := reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "src=", "source=", "fetch=", "load=", "path=", "file=", "dest=", "destination=", "target=", "endpoint=", "proxy=", "callback=", "webhook=", "host=", "redirect=", "return=", "link=", "img=", "image="}); paramCount >= 1 {
+			return true, fmt.Sprintf("URL corpus has %d SSRF-like parameter(s) — direct probe without scout confirmation", paramCount)
 		}
 		urlMatches := reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"})
 		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"})
@@ -2064,7 +2091,22 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if wf.QueryLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d parameterized/query-like step(s)", wf.QueryLikeSteps)
 		}
+		if paramCount := reconCorpusMatchCount(rs.URLs.All, []string{"id=", "q=", "search=", "filter=", "query=", "page=", "user=", "name=", "type=", "category=", "sort=", "order=", "key=", "token=", "data=", "input=", "value=", "param="}); paramCount >= 1 {
+			return true, fmt.Sprintf("URL corpus has %d parameterised endpoint(s) — direct injection probe", paramCount)
+		}
 		return false, "needs query/injection lead from scouts or ranked params"
+	case "lfi":
+		return true, "no correlation constraint"
+	case "cmdinject":
+		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
+			return true, fmt.Sprintf("injection scout lead available (strength=%d)", maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage"))
+		}
+		if strings.TrimSpace(rs.URLs.All) != "" {
+			return true, "URL corpus available for command injection probe"
+		}
+		return false, "needs URL corpus or injection scout lead"
+	case "rxss":
+		return strings.TrimSpace(rs.URLs.All) != "", "URL corpus available for XSS probe"
 	case "idor-size":
 		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
 			return true, fmt.Sprintf("object-access lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
@@ -2222,6 +2264,11 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 		score["crlf-injection"] = 30
 		score["ssrf-prober"] = 35
 		score["rsql-injection"] = 40
+	}
+	if strings.TrimSpace(rs.URLs.All) != "" || strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
+		score["rxss"] = 28
+		score["cmdinject"] = 30
+		score["lfi"] = 35
 	}
 	if strings.Contains(strings.ToLower(rs.Live), "saml") || strings.Contains(strings.ToLower(rs.Live), "sso") {
 		score["saml-probe"] = 15

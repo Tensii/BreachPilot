@@ -14,7 +14,7 @@ var profiles = map[string]ScanProfile{
 	"quick": {
 		Name:        "quick",
 		Description: "Fast surface-level scan",
-		OnlyModules: "security-headers,cookie-security,csp-audit,http-response",
+		OnlyModules: "security-headers,cookie-security,csp-audit,http-response,rxss",
 		MaxParallel: 8,
 	},
 	"standard": {
@@ -25,7 +25,7 @@ var profiles = map[string]ScanProfile{
 	"exploit": {
 		Name:        "exploit",
 		Description: "Exploit-focused scan with proof-oriented modules",
-		OnlyModules: "auth-bypass,session-abuse,idor-playbook,idor-size,ssrf-prober,advanced-injection,mutation-engine,jwt-access,graphql-abuse,state-change,upload-abuse,open-redirect",
+		OnlyModules: "auth-bypass,session-abuse,idor-playbook,idor-size,ssrf-prober,advanced-injection,mutation-engine,jwt-access,graphql-abuse,state-change,upload-abuse,open-redirect,lfi,cmdinject,rxss",
 		MaxParallel: 3,
 	},
 	"deep": {

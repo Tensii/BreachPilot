@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"breachpilot/internal/exploit/browsercapture"
@@ -22,6 +23,22 @@ func TestRegistryIncludesNewModules(t *testing.T) {
 		}
 		if !ok {
 			t.Fatalf("missing module %s", w)
+		}
+	}
+}
+
+func TestNewModulesRegistered(t *testing.T) {
+	names := RegisteredModules()
+	for _, want := range []string{"lfi", "cmdinject", "rxss"} {
+		found := false
+		for _, name := range names {
+			if name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing module %s", want)
 		}
 	}
 }
@@ -174,11 +191,11 @@ func TestCorrelateProofModulesSkipsWeakReconSignals(t *testing.T) {
 
 	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "advanced-injection,jwt-access"}), "advanced-injection,jwt-access", "")
 	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
-	if len(planned) != 0 {
-		t.Fatalf("expected weak recon hints to skip proof modules, got %d planned module(s)", len(planned))
+	if len(planned) != 1 || planned[0].Name() != "jwt-access" {
+		t.Fatalf("expected only jwt-access planned from auth URL fallback, got %v", moduleNames(planned))
 	}
-	if len(skipped) != 2 {
-		t.Fatalf("expected 2 correlation skips for weak recon hints, got %d", len(skipped))
+	if len(skipped) != 1 || skipped[0].Module != "advanced-injection" {
+		t.Fatalf("expected only advanced-injection skipped for weak recon hints, got %+v", skipped)
 	}
 }
 
@@ -208,6 +225,26 @@ func TestCorrelateProofModulesUsesSavedBrowserWorkflowSignals(t *testing.T) {
 	}
 	if len(planned) != 3 {
 		t.Fatalf("expected 3 proof modules planned from browser workflow signals, got %d", len(planned))
+	}
+}
+
+func TestCorrelationPlannerAllowsInjectionOnURLCorpus(t *testing.T) {
+	dir := t.TempDir()
+	urls := filepath.Join(dir, "urls.txt")
+	if err := os.WriteFile(urls, []byte("https://example.com/?id=1\nhttps://example.com/?q=test\nhttps://example.com/?file=home\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rs := models.ReconSummary{}
+	rs.URLs.All = urls
+
+	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "lfi,rxss,advanced-injection"}), "lfi,rxss,advanced-injection", "")
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	if len(planned) != 3 {
+		t.Fatalf("expected lfi, rxss, and advanced-injection planned, got %d", len(planned))
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("expected no correlation skips, got %d", len(skipped))
 	}
 }
 
@@ -265,5 +302,21 @@ func TestCorrelationSignalsArtifactSupportsLegacyListFormat(t *testing.T) {
 	loaded := loadCorrelationSignalsArtifact(dir)
 	if loaded.strength("open-redirect") != 1 || loaded.strength("session-abuse") != 1 {
 		t.Fatalf("expected legacy correlation signals to load with strength 1, got %#v", loaded.modules)
+	}
+}
+
+func TestLFIAndRXSSInExploitProfile(t *testing.T) {
+	p, ok := GetProfile("exploit")
+	if !ok {
+		t.Fatal("expected exploit profile")
+	}
+	if !strings.Contains(p.OnlyModules, "lfi") {
+		t.Fatalf("expected exploit profile to include lfi, got %s", p.OnlyModules)
+	}
+	if !strings.Contains(p.OnlyModules, "rxss") {
+		t.Fatalf("expected exploit profile to include rxss, got %s", p.OnlyModules)
+	}
+	if !strings.Contains(p.OnlyModules, "cmdinject") {
+		t.Fatalf("expected exploit profile to include cmdinject, got %s", p.OnlyModules)
 	}
 }
