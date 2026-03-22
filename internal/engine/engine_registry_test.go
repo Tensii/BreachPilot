@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"breachpilot/internal/exploit/browsercapture"
 	"breachpilot/internal/models"
 )
 
@@ -178,6 +179,35 @@ func TestCorrelateProofModulesSkipsWeakReconSignals(t *testing.T) {
 	}
 	if len(skipped) != 2 {
 		t.Fatalf("expected 2 correlation skips for weak recon hints, got %d", len(skipped))
+	}
+}
+
+func TestCorrelateProofModulesUsesSavedBrowserWorkflowSignals(t *testing.T) {
+	dir := t.TempDir()
+	artifact := browsercapture.Artifact{
+		Workflows: []browsercapture.CapturedWorkflow{{
+			ID:       "wf-1",
+			StartURL: "https://example.com/app",
+			PageURL:  "https://example.com/app",
+			Steps: []browsercapture.WorkflowStep{
+				{Kind: "request", URL: "https://example.com/api/search", Method: "POST", Fields: []string{"query", "filter"}},
+				{Kind: "request", URL: "https://example.com/render", Method: "POST", Fields: []string{"url"}},
+				{Kind: "request", URL: "https://example.com/account/profile", Method: "POST", Fields: []string{"display_name"}},
+			},
+		}},
+	}
+	if err := browsercapture.SaveArtifact(filepath.Join(dir, "browser_capture_artifact.json"), artifact); err != nil {
+		t.Fatal(err)
+	}
+
+	rs := models.ReconSummary{Workdir: dir}
+	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "advanced-injection,ssrf-prober,state-change"}), "advanced-injection,ssrf-prober,state-change", "")
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	if len(skipped) != 0 {
+		t.Fatalf("expected browser workflow signals to avoid correlation skips, got %d", len(skipped))
+	}
+	if len(planned) != 3 {
+		t.Fatalf("expected 3 proof modules planned from browser workflow signals, got %d", len(planned))
 	}
 }
 

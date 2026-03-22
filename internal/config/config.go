@@ -29,6 +29,7 @@ type Config struct {
 	PreviousReportPath             string
 	ReportFormats                  string
 	ScanProfile                    string
+	MaxParallel                    int
 	RateLimitRPS                   int
 	WebhookFindings                bool
 	WebhookModuleProgress          bool
@@ -94,6 +95,7 @@ func Load() Config {
 		PreviousReportPath:             getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
 		ReportFormats:                  getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
 		ScanProfile:                    getEnv("BREACHPILOT_SCAN_PROFILE", ""),
+		MaxParallel:                    getEnvInt("BREACHPILOT_MAX_PARALLEL", 0),
 		RateLimitRPS:                   getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
 		WebhookFindings:                getEnvBool("BREACHPILOT_WEBHOOK_FINDINGS", true),
 		WebhookModuleProgress:          getEnvBool("BREACHPILOT_WEBHOOK_MODULE_PROGRESS", false),
@@ -179,6 +181,9 @@ func (c Config) Validate() error {
 	if c.ModuleRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")
 	}
+	if c.MaxParallel < 0 {
+		return fmt.Errorf("invalid BREACHPILOT_MAX_PARALLEL: must be >= 0")
+	}
 	if c.BrowserCaptureEnabled {
 		if c.BrowserCaptureMaxPages <= 0 {
 			return fmt.Errorf("invalid BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES: must be > 0")
@@ -250,8 +255,8 @@ func (c Config) RedactedSummary() string {
 	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s rateLimitRPS=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.RateLimitRPS, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d moduleTimeout=%ds scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.ModuleTimeoutSec, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
 }
 
 func loadEnvFile(path string) error {

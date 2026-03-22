@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,5 +154,69 @@ func TestAnnotateModuleTelemetryYield(t *testing.T) {
 	}
 	if out[2].AcceptedCount != 0 || out[2].FilteredCount != 0 {
 		t.Fatalf("expected skipped planner entry to remain zero-yield, got %+v", out[2])
+	}
+}
+
+func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T) {
+	dir := t.TempDir()
+	job := &models.Job{ID: "cfg/1", Target: "example.com", Mode: "full"}
+	opt := Options{
+		ArtifactsRoot:                  dir,
+		ScanProfile:                    "exploit",
+		MaxParallel:                    6,
+		ModuleTimeoutSec:               900,
+		ModuleRetries:                  2,
+		AggressiveMode:                 true,
+		ProofMode:                      true,
+		SkipNuclei:                     true,
+		AuthUserHeaders:                "Authorization: Bearer user",
+		BrowserCaptureEnabled:          true,
+		BrowserCaptureMaxPages:         8,
+		BrowserCapturePerPageWaitMs:    1000,
+		BrowserCaptureSettleWaitMs:     500,
+		BrowserCaptureScrollSteps:      2,
+		BrowserCaptureMaxRoutesPerPage: 10,
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, job.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRuntimeConfigSnapshot(job, opt); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, job.ID, "runtime_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Config map[string]any `json:"config"`
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if got := int(parsed.Config["max_parallel"].(float64)); got != 6 {
+		t.Fatalf("expected max_parallel=6, got %d", got)
+	}
+	if got := int(parsed.Config["module_timeout_sec"].(float64)); got != 900 {
+		t.Fatalf("expected module_timeout_sec=900, got %d", got)
+	}
+	if got := int(parsed.Config["module_retries"].(float64)); got != 2 {
+		t.Fatalf("expected module_retries=2, got %d", got)
+	}
+	if got := parsed.Config["aggressive_mode"].(bool); !got {
+		t.Fatal("expected aggressive_mode=true")
+	}
+	if got := parsed.Config["proof_mode"].(bool); !got {
+		t.Fatal("expected proof_mode=true")
+	}
+	if got := parsed.Config["skip_nuclei"].(bool); !got {
+		t.Fatal("expected skip_nuclei=true")
+	}
+	if got := parsed.Config["has_auth_user_context"].(bool); !got {
+		t.Fatal("expected has_auth_user_context=true")
+	}
+	if got := parsed.Config["has_auth_admin_context"].(bool); got {
+		t.Fatal("expected has_auth_admin_context=false")
 	}
 }

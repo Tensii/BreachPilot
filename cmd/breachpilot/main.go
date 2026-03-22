@@ -155,6 +155,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		PreviousReportPath:             cfg.PreviousReportPath,
 		ReportFormats:                  cfg.ReportFormats,
 		ScanProfile:                    cfg.ScanProfile,
+		MaxParallel:                    cfg.MaxParallel,
 		RateLimitRPS:                   cfg.RateLimitRPS,
 		WebhookFindings:                cfg.WebhookFindings,
 		WebhookModuleProgress:          cfg.WebhookModuleProgress,

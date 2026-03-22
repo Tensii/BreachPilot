@@ -38,6 +38,31 @@ func TestWebhookModuleProgressDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestLoadMaxParallel(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_MAX_PARALLEL", "6")
+	defer os.Unsetenv("BREACHPILOT_MAX_PARALLEL")
+
+	cfg := Load()
+	if cfg.MaxParallel != 6 {
+		t.Fatalf("expected max parallel 6, got %d", cfg.MaxParallel)
+	}
+}
+
+func TestValidateRejectsNegativeMaxParallel(t *testing.T) {
+	cfg := Config{
+		NucleiBin:        "echo",
+		WebhookRetries:   1,
+		ReconTimeoutSec:  1,
+		ReconRetries:     0,
+		NucleiTimeoutSec: 1,
+		ModuleTimeoutSec: 1,
+		MaxParallel:      -1,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for negative max parallel")
+	}
+}
+
 func TestValidateProofModeNoAllowlistIsValid(t *testing.T) {
 	// Proof mode without an allowlist is now valid — empty allowlist means "allow all targets".
 	// This removes the friction of listing every domain for internal security teams.

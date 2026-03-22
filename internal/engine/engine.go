@@ -97,6 +97,7 @@ type Options struct {
 	PreviousReportPath             string
 	ReportFormats                  string
 	ScanProfile                    string
+	MaxParallel                    int
 	RateLimitRPS                   int
 	WebhookFindings                bool
 	WebhookModuleProgress          bool
@@ -147,7 +148,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			if !opt.SkipNuclei {
 				opt.SkipNuclei = p.SkipNuclei
 			}
+			if opt.MaxParallel <= 0 && p.MaxParallel > 0 {
+				opt.MaxParallel = p.MaxParallel
+			}
 		}
+	}
+	if opt.MaxParallel <= 0 {
+		opt.MaxParallel = exploit.DefaultMaxParallel
 	}
 	job.StartedAt = time.Now().UTC()
 	job.Status = models.JobRunning
@@ -441,7 +448,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Progress:                       opt.Progress,
 		Events:                         opt.Events,
 		SafeMode:                       job.SafeMode,
-		MaxParallel:                    0,
+		MaxParallel:                    opt.MaxParallel,
 		StateManager:                   sm,
 		ModuleTimeoutSec:               opt.ModuleTimeoutSec,
 		ModuleRetries:                  opt.ModuleRetries,
@@ -758,6 +765,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		job.RiskScore = job.RiskSummary.OverallScore
 	}
 
+	leadFindings := exploit.SignalOnlyFindings(exploitFindings)
 	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
 	exploitFindings = reliableFindings
 	job.FilteredCount += reliabilityFiltered
@@ -893,6 +901,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	rptOpts := exploit.ReportOptions{
 		Formats:            opt.ReportFormats,
 		PreviousReportPath: opt.PreviousReportPath,
+		LeadFindings:       leadFindings,
 		Secrets:            loadSecretsIntel(rs.Intel.SecretsJSON),
 		CORS:               loadCORSIntel(rs.Intel.CORSJSON),
 	}
@@ -1463,6 +1472,19 @@ type ModuleInfo struct {
 	Group        string
 }
 
+type browserWorkflowSignals struct {
+	Available        bool
+	RequestSteps     int
+	WriteSteps       int
+	UploadSteps      int
+	QueryLikeSteps   int
+	AuthLikeSteps    int
+	SSRFLikeSteps    int
+	RouteCount       int
+	FormCount        int
+	RecordedWorkflow int
+}
+
 func registeredModuleInfos() []ModuleInfo {
 	return []ModuleInfo{
 		{"security-headers", "Detects missing/weak security headers", true, "context"},
@@ -1623,6 +1645,7 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 	hasUserAuth := strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != ""
 	hasAdminAuth := strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != ""
 	hasRealAuth := hasUserAuth && hasAdminAuth
+	wf := loadBrowserWorkflowSignals(rs)
 
 	switch name {
 	case "deserialization":
@@ -1657,6 +1680,24 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 	case "graphql-abuse":
 		return hasURLs || hasRankedEndpoints, "GraphQL candidate collection available"
 	case "state-change", "upload-abuse", "crlf-injection", "jwt-access":
+		switch name {
+		case "state-change":
+			if wf.WriteSteps > 0 {
+				return true, fmt.Sprintf("browser workflow captured %d write-like step(s)", wf.WriteSteps)
+			}
+		case "upload-abuse":
+			if wf.UploadSteps > 0 {
+				return true, fmt.Sprintf("browser workflow captured %d upload-like step(s)", wf.UploadSteps)
+			}
+		case "jwt-access":
+			if wf.AuthLikeSteps > 0 {
+				return true, fmt.Sprintf("browser workflow captured %d auth/token step(s)", wf.AuthLikeSteps)
+			}
+		case "crlf-injection":
+			if wf.RequestSteps > 0 {
+				return true, fmt.Sprintf("browser workflow captured %d replayable request step(s)", wf.RequestSteps)
+			}
+		}
 		return hasURLs, "URL corpus available"
 	case "auth-bypass":
 		if !opt.AggressiveMode {
@@ -1674,6 +1715,28 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 			return false, "requires aggressive mode"
 		}
 		if !hasURLs && !hasRankedEndpoints {
+			switch name {
+			case "advanced-injection":
+				if wf.QueryLikeSteps > 0 {
+					return true, fmt.Sprintf("browser workflow captured %d parameterized/query-like step(s)", wf.QueryLikeSteps)
+				}
+			case "ssrf-prober":
+				if wf.SSRFLikeSteps > 0 {
+					return true, fmt.Sprintf("browser workflow captured %d SSRF-style forwarding step(s)", wf.SSRFLikeSteps)
+				}
+			case "mutation-engine":
+				if wf.WriteSteps > 0 || wf.RequestSteps > 0 {
+					return true, fmt.Sprintf("browser workflow captured %d replayable request step(s)", wf.RequestSteps)
+				}
+			case "mass-assign":
+				if wf.WriteSteps > 0 {
+					return true, fmt.Sprintf("browser workflow captured %d body-backed write step(s)", wf.WriteSteps)
+				}
+			case "idor-size":
+				if wf.AuthLikeSteps > 0 || wf.WriteSteps > 0 {
+					return true, fmt.Sprintf("browser workflow captured %d authenticated/object workflow step(s)", wf.AuthLikeSteps+wf.WriteSteps)
+				}
+			}
 			return false, "requires URL or ranked endpoint corpus"
 		}
 		return true, "aggressive probe corpus available"
@@ -1919,6 +1982,7 @@ func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
 
 func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
 	_ = opt
+	wf := loadBrowserWorkflowSignals(rs)
 	switch name {
 	case "auth-bypass":
 		if signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2) {
@@ -1940,10 +2004,16 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple state-changing URL patterns detected in recon corpus (%d)", matches)
 		}
+		if wf.WriteSteps > 0 {
+			return true, fmt.Sprintf("browser workflow retained %d write-like step(s)", wf.WriteSteps)
+		}
 		return false, "needs state-change lead from scouts or URL corpus"
 	case "upload-abuse":
 		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"upload", "file", "attachment", "import", "avatar", "image"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple upload-oriented URL patterns detected (%d)", matches)
+		}
+		if wf.UploadSteps > 0 {
+			return true, fmt.Sprintf("browser workflow retained %d upload-like step(s)", wf.UploadSteps)
 		}
 		return false, "needs upload-oriented URLs"
 	case "mutation-engine":
@@ -1958,6 +2028,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple token-oriented URL patterns detected (%d)", matches)
 		}
+		if wf.AuthLikeSteps > 0 {
+			return true, fmt.Sprintf("browser workflow retained %d auth/token step(s)", wf.AuthLikeSteps)
+		}
 		return false, "needs token/auth lead from scouts or URL corpus"
 	case "ssrf-prober":
 		if signals.hasModuleAtLeast("open-redirect", 2) {
@@ -1967,6 +2040,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"})
 		if urlMatches+endpointMatches >= 2 {
 			return true, fmt.Sprintf("stacked SSRF-oriented URL/endpoint patterns detected (%d)", urlMatches+endpointMatches)
+		}
+		if wf.SSRFLikeSteps > 0 {
+			return true, fmt.Sprintf("browser workflow retained %d SSRF-style forwarding step(s)", wf.SSRFLikeSteps)
 		}
 		return false, "needs SSRF-style forwarding lead"
 	case "crlf-injection":
@@ -1982,6 +2058,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"search", "query", "filter", "graphql", "api"})
 		if paramMatches+endpointMatches >= 2 {
 			return true, fmt.Sprintf("stacked query-oriented parameter or endpoint patterns detected (%d)", paramMatches+endpointMatches)
+		}
+		if wf.QueryLikeSteps > 0 {
+			return true, fmt.Sprintf("browser workflow retained %d parameterized/query-like step(s)", wf.QueryLikeSteps)
 		}
 		return false, "needs query/injection lead from scouts or ranked params"
 	case "idor-size":
@@ -2237,15 +2316,23 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 		"mode":           job.Mode,
 		"config": map[string]any{
 			"scan_profile":                        opt.ScanProfile,
+			"max_parallel":                        opt.MaxParallel,
 			"min_severity":                        opt.MinSeverity,
 			"skip_modules":                        opt.SkipModules,
 			"only_modules":                        opt.OnlyModules,
 			"validation_only":                     opt.ValidationOnly,
 			"report_formats":                      opt.ReportFormats,
 			"rate_limit_rps":                      opt.RateLimitRPS,
+			"module_timeout_sec":                  opt.ModuleTimeoutSec,
+			"module_retries":                      opt.ModuleRetries,
+			"aggressive_mode":                     opt.AggressiveMode,
+			"proof_mode":                          opt.ProofMode,
+			"skip_nuclei":                         opt.SkipNuclei,
 			"webhook_findings":                    opt.WebhookFindings,
 			"webhook_module_progress":             opt.WebhookModuleProgress,
 			"webhook_findings_min_severity":       opt.WebhookFindingsMinSeverity,
+			"has_auth_user_context":               strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != "",
+			"has_auth_admin_context":              strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != "",
 			"browser_capture":                     opt.BrowserCaptureEnabled,
 			"browser_capture_max_pages":           opt.BrowserCaptureMaxPages,
 			"browser_capture_per_page_wait_ms":    opt.BrowserCapturePerPageWaitMs,
@@ -2268,6 +2355,50 @@ func setJobError(job *models.Job, code string, msg string) {
 	}
 	job.ErrorCode = strings.TrimSpace(code)
 	job.Error = strings.TrimSpace(msg)
+}
+
+func loadBrowserWorkflowSignals(rs models.ReconSummary) browserWorkflowSignals {
+	workdir := strings.TrimSpace(rs.Workdir)
+	if workdir == "" {
+		return browserWorkflowSignals{}
+	}
+	artifact, err := browsercapture.LoadArtifact(filepath.Join(workdir, "browser_capture_artifact.json"))
+	if err != nil {
+		return browserWorkflowSignals{}
+	}
+	signals := browserWorkflowSignals{
+		Available:        len(artifact.Requests) > 0 || len(artifact.Routes) > 0 || len(artifact.Forms) > 0 || len(artifact.Workflows) > 0,
+		RouteCount:       len(artifact.Routes),
+		FormCount:        len(artifact.Forms),
+		RecordedWorkflow: len(artifact.Workflows),
+	}
+	for _, wf := range artifact.Workflows {
+		for _, step := range wf.Steps {
+			kind := strings.ToLower(strings.TrimSpace(step.Kind))
+			method := strings.ToUpper(strings.TrimSpace(step.Method))
+			target := strings.ToLower(strings.TrimSpace(step.URL))
+			fieldsJoined := strings.Join(step.Fields, ",")
+			if kind == "request" || kind == "form" {
+				signals.RequestSteps++
+			}
+			if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete || kind == "form" {
+				signals.WriteSteps++
+			}
+			if strings.Contains(target, "upload") || strings.Contains(target, "import") || strings.Contains(target, "avatar") || strings.Contains(fieldsJoined, "file") || strings.Contains(fieldsJoined, "image") {
+				signals.UploadSteps++
+			}
+			if strings.Contains(target, "query") || strings.Contains(target, "search") || strings.Contains(target, "filter") || strings.Contains(fieldsJoined, "query") || strings.Contains(fieldsJoined, "search") || strings.Contains(fieldsJoined, "filter") || strings.Contains(fieldsJoined, "id") || strings.Contains(fieldsJoined, "sort") {
+				signals.QueryLikeSteps++
+			}
+			if strings.Contains(target, "token") || strings.Contains(target, "oauth") || strings.Contains(target, "login") || strings.Contains(target, "auth") || strings.Contains(fieldsJoined, "token") || strings.Contains(fieldsJoined, "authorization") {
+				signals.AuthLikeSteps++
+			}
+			if strings.Contains(target, "url=") || strings.Contains(target, "uri=") || strings.Contains(target, "redirect=") || strings.Contains(target, "next=") || strings.Contains(target, "/proxy") || strings.Contains(target, "/fetch") || strings.Contains(target, "/render") || strings.Contains(fieldsJoined, "url") || strings.Contains(fieldsJoined, "uri") || strings.Contains(fieldsJoined, "callback") || strings.Contains(fieldsJoined, "dest") {
+				signals.SSRFLikeSteps++
+			}
+		}
+	}
+	return signals
 }
 
 func writeArtifactManifest(job *models.Job, artifactsRoot string) error {
