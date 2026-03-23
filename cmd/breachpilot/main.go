@@ -178,6 +178,8 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		BoundlessMode:                  cfg.BoundlessMode,
 		ProofMode:                      cfg.ProofMode,
 		ProofTargetAllowlist:           cfg.ProofTargetAllowlist,
+		OOBHTTPListenAddr:              cfg.OOBHTTPListenAddr,
+		OOBHTTPPublicBaseURL:           cfg.OOBHTTPPublicBaseURL,
 		AuthUserCookie:                 cfg.AuthUserCookie,
 		AuthAdminCookie:                cfg.AuthAdminCookie,
 		AuthAnonHeaders:                cfg.AuthAnonHeaders,

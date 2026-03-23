@@ -168,6 +168,8 @@ func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T)
 		ModuleRetries:                  2,
 		AggressiveMode:                 true,
 		ProofMode:                      true,
+		OOBHTTPListenAddr:              "127.0.0.1:9091",
+		OOBHTTPPublicBaseURL:           "https://oob.example.com/callback",
 		SkipNuclei:                     true,
 		AuthUserHeaders:                "Authorization: Bearer user",
 		BrowserCaptureEnabled:          true,
@@ -213,6 +215,9 @@ func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T)
 	if got := parsed.Config["proof_mode"].(bool); !got {
 		t.Fatal("expected proof_mode=true")
 	}
+	if got := parsed.Config["oob_provider"].(string); got != "builtin-http" {
+		t.Fatalf("expected builtin-http oob provider, got %q", got)
+	}
 	if got := parsed.Config["skip_nuclei"].(bool); !got {
 		t.Fatal("expected skip_nuclei=true")
 	}
@@ -221,5 +226,17 @@ func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T)
 	}
 	if got := parsed.Config["has_auth_admin_context"].(bool); got {
 		t.Fatal("expected has_auth_admin_context=false")
+	}
+}
+
+func TestResolvedOOBProviderLabel(t *testing.T) {
+	if got := resolvedOOBProviderLabel(Options{}); got != "disabled" {
+		t.Fatalf("expected disabled provider label, got %q", got)
+	}
+	if got := resolvedOOBProviderLabel(Options{ProofMode: true}); got != "interactsh" {
+		t.Fatalf("expected interactsh provider label, got %q", got)
+	}
+	if got := resolvedOOBProviderLabel(Options{OOBHTTPPublicBaseURL: "https://oob.example.com/callback"}); got != "builtin-http" {
+		t.Fatalf("expected builtin-http provider label, got %q", got)
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -45,6 +46,8 @@ type Config struct {
 	BoundlessMode                  bool
 	ProofMode                      bool
 	ProofTargetAllowlist           string
+	OOBHTTPListenAddr              string
+	OOBHTTPPublicBaseURL           string
 	AuthUserCookie                 string
 	AuthAdminCookie                string
 	AuthAnonHeaders                string
@@ -117,6 +120,8 @@ func Load() Config {
 		BoundlessMode:                  getEnvBool("BREACHPILOT_BOUNDLESS", false),
 		ProofMode:                      getEnvBool("BREACHPILOT_PROOF_MODE", false),
 		ProofTargetAllowlist:           getEnv("BREACHPILOT_PROOF_TARGET_ALLOWLIST", ""),
+		OOBHTTPListenAddr:              getEnv("BREACHPILOT_OOB_HTTP_LISTEN_ADDR", ""),
+		OOBHTTPPublicBaseURL:           getEnv("BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL", ""),
 		AuthUserCookie:                 getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
 		AuthAdminCookie:                getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
 		AuthAnonHeaders:                getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
@@ -241,6 +246,18 @@ func (c Config) Validate() error {
 	if !validSevs[strings.ToUpper(strings.TrimSpace(c.WebhookFindingsMinSeverity))] {
 		return fmt.Errorf("invalid BREACHPILOT_WEBHOOK_FINDINGS_MIN_SEVERITY: %q (valid: INFO LOW MEDIUM HIGH CRITICAL)", c.WebhookFindingsMinSeverity)
 	}
+	if base := strings.TrimSpace(c.OOBHTTPPublicBaseURL); base != "" {
+		parsed, err := url.Parse(base)
+		if err != nil {
+			return fmt.Errorf("invalid BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("invalid BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL: scheme must be http or https")
+		}
+		if strings.TrimSpace(parsed.Host) == "" {
+			return fmt.Errorf("invalid BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL: host is required")
+		}
+	}
 	return nil
 }
 
@@ -282,8 +299,8 @@ func (c Config) RedactedSummary() string {
 	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
 }
 
 func loadEnvFile(path string) error {

@@ -127,6 +127,8 @@ type Options struct {
 	BoundlessMode                  bool
 	ProofMode                      bool
 	ProofTargetAllowlist           string
+	OOBHTTPListenAddr              string
+	OOBHTTPPublicBaseURL           string
 	AuthUserCookie                 string
 	AuthAdminCookie                string
 	AuthAnonHeaders                string
@@ -476,10 +478,27 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// Initialize OOB Provider
 	var oobProvider oob.Provider
-	if opt.AggressiveMode {
-		if p, err := oob.NewInteractshProvider(); err == nil {
-			oobProvider = oob.NewTrackingProvider(p)
+	if opt.AggressiveMode || opt.ProofMode {
+		provider, providerLabel, err := newOOBProvider(opt)
+		switch {
+		case err == nil && provider != nil:
+			oobProvider = oob.NewTrackingProvider(provider)
 			defer oobProvider.Close()
+			emit(models.RuntimeEvent{
+				Kind:    "oob",
+				Stage:   "exploit.oob",
+				Status:  "ready",
+				Message: fmt.Sprintf("exploit.oob provider=%s ready", providerLabel),
+				Target:  job.Target,
+			})
+		case err != nil:
+			emit(models.RuntimeEvent{
+				Kind:    "oob",
+				Stage:   "exploit.oob",
+				Status:  "warning",
+				Message: fmt.Sprintf("exploit.oob unavailable: %v", err),
+				Target:  job.Target,
+			})
 		}
 	}
 
@@ -2719,6 +2738,9 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 			"module_retries":                      opt.ModuleRetries,
 			"aggressive_mode":                     opt.AggressiveMode,
 			"proof_mode":                          opt.ProofMode,
+			"oob_http_listen_addr":                opt.OOBHTTPListenAddr,
+			"oob_http_public_base_url":            opt.OOBHTTPPublicBaseURL,
+			"oob_provider":                        resolvedOOBProviderLabel(opt),
 			"skip_nuclei":                         opt.SkipNuclei,
 			"webhook_findings":                    opt.WebhookFindings,
 			"webhook_module_progress":             opt.WebhookModuleProgress,
@@ -2887,4 +2909,29 @@ func resolvedHTTPMaxInFlight(opt Options) int {
 		derived = 64
 	}
 	return derived
+}
+
+func newOOBProvider(opt Options) (oob.Provider, string, error) {
+	if strings.TrimSpace(opt.OOBHTTPPublicBaseURL) != "" {
+		p, err := oob.NewHTTPProvider(opt.OOBHTTPListenAddr, opt.OOBHTTPPublicBaseURL)
+		if err != nil {
+			return nil, "", err
+		}
+		return p, "builtin-http", nil
+	}
+	p, err := oob.NewInteractshProvider()
+	if err != nil {
+		return nil, "", err
+	}
+	return p, "interactsh", nil
+}
+
+func resolvedOOBProviderLabel(opt Options) string {
+	if strings.TrimSpace(opt.OOBHTTPPublicBaseURL) != "" {
+		return "builtin-http"
+	}
+	if opt.AggressiveMode || opt.ProofMode {
+		return "interactsh"
+	}
+	return "disabled"
 }

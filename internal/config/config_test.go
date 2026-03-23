@@ -72,6 +72,18 @@ func TestLoadHTTPTransportOptions(t *testing.T) {
 	}
 }
 
+func TestLoadOOBHTTPOptions(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_OOB_HTTP_LISTEN_ADDR", "127.0.0.1:9091")
+	_ = os.Setenv("BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL", "https://oob.example.com/callback")
+	defer os.Unsetenv("BREACHPILOT_OOB_HTTP_LISTEN_ADDR")
+	defer os.Unsetenv("BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL")
+
+	cfg := Load()
+	if cfg.OOBHTTPListenAddr != "127.0.0.1:9091" || cfg.OOBHTTPPublicBaseURL != "https://oob.example.com/callback" {
+		t.Fatalf("oob http options did not load correctly: %+v", cfg)
+	}
+}
+
 func TestValidateRejectsNegativeMaxParallel(t *testing.T) {
 	cfg := Config{
 		NucleiBin:        "echo",
@@ -117,6 +129,21 @@ func TestValidateProofModeNoAllowlistIsValid(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected no validation error when allowlist is empty, got: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidOOBHTTPPublicBaseURL(t *testing.T) {
+	cfg := Config{
+		NucleiBin:            "echo",
+		WebhookRetries:       1,
+		ReconTimeoutSec:      1,
+		ReconRetries:         0,
+		NucleiTimeoutSec:     1,
+		ModuleTimeoutSec:     1,
+		OOBHTTPPublicBaseURL: "://bad-url",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid OOB public base URL")
 	}
 }
 
