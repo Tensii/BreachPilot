@@ -8,14 +8,29 @@ import (
 	"strings"
 	"testing"
 
+	configpkg "breachpilot/internal/config"
 	"breachpilot/internal/models"
 )
 
 func TestProcessReconTimeout(t *testing.T) {
 	dir := t.TempDir()
+	reconScript := filepath.Join(dir, "sleepy_recon.sh")
+	script := `#!/usr/bin/env bash
+set -e
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+usage: reconHarvest.py [-h] [--run] [--resume RESUME] [-o OUTPUT] [target]
+EOF
+  exit 0
+fi
+sleep 2
+`
+	if err := os.WriteFile(reconScript, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	job := &models.Job{ID: "j1", Target: "example.com", Mode: "full", SafeMode: true}
 	opt := Options{
-		ReconHarvestCmd: "bash -lc 'sleep 2'",
+		ReconHarvestCmd: reconScript,
 		ReconTimeoutSec: 1,
 		NucleiBin:       "true",
 		ArtifactsRoot:   dir,
@@ -54,6 +69,80 @@ func TestProcessFileModeWritesReport(t *testing.T) {
 	b, _ := os.ReadFile(job.ReportPath)
 	if !strings.Contains(string(b), "\"schema_version\": \"1\"") {
 		t.Fatalf("schema version missing in job report")
+	}
+}
+
+func TestProcessFullModeAdaptsToOlderReconHarvestFlags(t *testing.T) {
+	dir := t.TempDir()
+	reconScript := filepath.Join(dir, "fake_recon.py")
+	script := `#!/usr/bin/env bash
+set -e
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+usage: reconHarvest.py [-h] [--run] [--resume RESUME] [-o OUTPUT] [--skip-nuclei] [--overwrite] [target]
+EOF
+  exit 0
+fi
+for arg in "$@"; do
+  if [[ "$arg" == "--arjun-threads" || "$arg" == "--vhost-threads" ]]; then
+    echo "unexpected unsupported arg: $arg" >&2
+    exit 2
+  fi
+done
+out=""
+target=""
+resume=""
+while (($#)); do
+  case "$1" in
+    --run|--skip-nuclei|--overwrite)
+      shift
+      ;;
+    --resume)
+      resume="$2"
+      shift 2
+      ;;
+    -o|--output)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      if [[ -z "$target" ]]; then
+        target="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+if [[ -n "$resume" ]]; then
+  out="$resume"
+fi
+mkdir -p "$out"
+cat > "$out/summary.json" <<EOF
+{"workdir":"$out","live_hosts":"$out/live_hosts.txt","urls":{"all":""},"intel":{"endpoints_ranked_json":"","params_ranked_json":""}}
+EOF
+echo "https://${target:-example.com}" > "$out/live_hosts.txt"
+`
+	if err := os.WriteFile(reconScript, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	job := &models.Job{ID: "compat-recon", Target: "example.com", Mode: "full", SafeMode: true}
+	opt := Options{
+		ReconHarvestCmd: reconScript,
+		ReconTimeoutSec: 10,
+		ReconRetries:    0,
+		NucleiBin:       "true",
+		ArtifactsRoot:   dir,
+		SkipNuclei:      true,
+	}
+	if err := Process(context.Background(), job, opt); err != nil {
+		t.Fatalf("expected compatible recon run, got %v", err)
+	}
+	if job.Status != models.JobDone {
+		t.Fatalf("expected successful job, got %s error=%s", job.Status, job.Error)
+	}
+	if strings.TrimSpace(job.ReconPath) == "" {
+		t.Fatalf("expected recon path to be populated")
 	}
 }
 
@@ -238,5 +327,56 @@ func TestResolvedOOBProviderLabel(t *testing.T) {
 	}
 	if got := resolvedOOBProviderLabel(Options{OOBHTTPPublicBaseURL: "https://oob.example.com/callback"}); got != "builtin-http" {
 		t.Fatalf("expected builtin-http provider label, got %q", got)
+	}
+}
+
+func TestBuildReconHarvestExecutionArgsOmitsUnsupportedOptionalFlags(t *testing.T) {
+	caps := configpkg.ReconHarvestCapabilities{}
+	args := buildReconHarvestExecutionArgs("example.com", "run", "", false, caps)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "example.com --run -o run") {
+		t.Fatalf("unexpected base recon args: %v", args)
+	}
+	if strings.Contains(joined, "--arjun-threads") || strings.Contains(joined, "--vhost-threads") || strings.Contains(joined, "--skip-nuclei") {
+		t.Fatalf("expected unsupported optional flags to be omitted, got %v", args)
+	}
+}
+
+func TestProcessDoesNotEmitReconStartedWhenReconPreflightFails(t *testing.T) {
+	dir := t.TempDir()
+	job := &models.Job{ID: "preflight-fail", Target: "example.com", Mode: "full", SafeMode: true}
+	var events []models.RuntimeEvent
+	opt := Options{
+		ReconHarvestCmd: "",
+		ArtifactsRoot:   dir,
+		NucleiBin:       "true",
+		Events: func(ev models.RuntimeEvent) {
+			events = append(events, ev)
+		},
+	}
+
+	err := Process(context.Background(), job, opt)
+	if err == nil {
+		t.Fatal("expected recon preflight error")
+	}
+	for _, ev := range events {
+		if ev.Message == "recon.started" {
+			t.Fatalf("did not expect recon.started event on preflight failure: %+v", events)
+		}
+	}
+}
+
+func TestFindPartialReconWorkdirFindsNestedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "outputs", "example.com", "run")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "workspace_meta.json"), []byte(`{"target":"example.com"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findPartialReconWorkdir(dir); got != workdir {
+		t.Fatalf("expected nested recon workdir %q, got %q", workdir, got)
 	}
 }

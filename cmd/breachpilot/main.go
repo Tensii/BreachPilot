@@ -418,6 +418,7 @@ func runDoctor(cfg config.Config, opt engine.Options) error {
 		check("recon command configured", fmt.Errorf("BREACHPILOT_RECONHARVEST_CMD is empty"))
 	} else {
 		check("recon command executable", probeCommand(opt.ReconHarvestCmd, "--help"))
+		check("recon command compatible", checkReconCommandCompatibility(opt.ReconHarvestCmd))
 	}
 	check("artifacts writable", ensureWritableDir(opt.ArtifactsRoot))
 	check("recon webhook reachable", checkWebhookReachable(cfg.ReconWebhookURL))
@@ -655,6 +656,17 @@ func probeCommand(raw string, extraArgs ...string) error {
 			return fmt.Errorf("command timed out")
 		}
 		return err
+	}
+	return nil
+}
+
+func checkReconCommandCompatibility(raw string) error {
+	caps, err := config.ProbeReconHarvestCapabilities(raw)
+	if err != nil {
+		return err
+	}
+	if !caps.SupportsCoreExecution() {
+		return fmt.Errorf("missing required reconHarvest flags; expected support for --run, -o/--output, and --resume")
 	}
 	return nil
 }

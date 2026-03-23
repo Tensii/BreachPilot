@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	configpkg "breachpilot/internal/config"
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/browsercapture"
 	"breachpilot/internal/exploit/filter"
@@ -234,9 +235,14 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				}
 			}
 		} else {
+			reconPlan, err := prepareReconHarvestRun(job, opt)
+			if err != nil {
+				_ = writeJobReport(job, opt.ArtifactsRoot)
+				return err
+			}
 			notify("recon.started")
 			reconStart := time.Now()
-			summaryPath, err := runReconHarvest(ctx, job, opt)
+			summaryPath, err := runReconHarvest(ctx, job, opt, reconPlan)
 			job.ReconDurationSec = time.Since(reconStart).Seconds()
 			if err != nil {
 				_ = writeJobReport(job, opt.ArtifactsRoot)
@@ -1033,17 +1039,53 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	return nil
 }
 
-func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string, error) {
+type reconExecutionPlan struct {
+	baseArgv           []string
+	caps               configpkg.ReconHarvestCapabilities
+	reconDir           string
+	preferredSummary   string
+	resumeDir          string
+	freshOutputName    string
+	capabilityProbeErr error
+}
+
+func prepareReconHarvestRun(job *models.Job, opt Options) (reconExecutionPlan, error) {
 	if strings.TrimSpace(opt.ReconHarvestCmd) == "" {
-		return "", fmt.Errorf("recon harvest command is not configured")
+		return reconExecutionPlan{}, fmt.Errorf("recon harvest command is not configured")
 	}
+
 	reconDir := filepath.Join(opt.ArtifactsRoot, job.ID, "recon")
 	if err := os.MkdirAll(reconDir, 0o755); err != nil {
-		return "", err
+		return reconExecutionPlan{}, err
 	}
-	summaryPath := filepath.Join(reconDir, "summary.json")
-	if st, err := os.Stat(summaryPath); err == nil && st.Size() > 0 {
-		if _, vErr := validateReconSummary(summaryPath, job.Target); vErr != nil {
+
+	baseArgv, err := shlex.Split(strings.TrimSpace(opt.ReconHarvestCmd))
+	if err != nil || len(baseArgv) == 0 {
+		return reconExecutionPlan{}, fmt.Errorf("invalid recon command: %q", opt.ReconHarvestCmd)
+	}
+	if _, err := exec.LookPath(baseArgv[0]); err != nil {
+		return reconExecutionPlan{}, fmt.Errorf("recon command executable not found: %w", err)
+	}
+
+	reconCaps, reconCapsErr := configpkg.ProbeReconHarvestCapabilities(opt.ReconHarvestCmd)
+	if reconCapsErr == nil && !reconCaps.SupportsCoreExecution() {
+		return reconExecutionPlan{}, fmt.Errorf("recon command is incompatible: missing required support for --run, -o/--output, and --resume")
+	}
+
+	return reconExecutionPlan{
+		baseArgv:           baseArgv,
+		caps:               reconCaps,
+		reconDir:           reconDir,
+		preferredSummary:   existingReconSummaryPath(reconDir),
+		resumeDir:          findPartialReconWorkdir(reconDir),
+		freshOutputName:    "run",
+		capabilityProbeErr: reconCapsErr,
+	}, nil
+}
+
+func runReconHarvest(ctx context.Context, job *models.Job, opt Options, plan reconExecutionPlan) (string, error) {
+	if plan.preferredSummary != "" {
+		if _, vErr := validateReconSummary(plan.preferredSummary, job.Target); vErr != nil {
 			return "", fmt.Errorf("resume validation failed: %w", vErr)
 		}
 		if opt.Events != nil {
@@ -1060,18 +1102,28 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 			opt.Progress("recon.resume existing summary found; skipping recon rerun")
 		}
 		job.EvidencePath = filepath.Join(opt.ArtifactsRoot, job.ID)
-		return summaryPath, nil
+		return plan.preferredSummary, nil
 	}
-	logPath := filepath.Join(reconDir, "reconharvest.log")
+	logPath := filepath.Join(plan.reconDir, "reconharvest.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return "", err
 	}
 	defer logFile.Close()
 
-	baseArgv, err := shlex.Split(strings.TrimSpace(opt.ReconHarvestCmd))
-	if err != nil || len(baseArgv) == 0 {
-		return "", fmt.Errorf("invalid recon command: %q", opt.ReconHarvestCmd)
+	reconCaps := plan.caps
+	if plan.capabilityProbeErr != nil {
+		reconCaps = configpkg.ReconHarvestCapabilities{}
+		if opt.Events != nil {
+			opt.Events(models.RuntimeEvent{
+				Kind:      "stage",
+				Stage:     "recon",
+				Status:    "warning",
+				Message:   fmt.Sprintf("recon.compatibility probe failed; using minimal arg set: %v", plan.capabilityProbeErr),
+				Target:    job.Target,
+				Timestamp: time.Now().UTC(),
+			})
+		}
 	}
 	attempts := opt.ReconRetries + 1
 	if attempts < 1 {
@@ -1083,21 +1135,18 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		if opt.ReconTimeoutSec > 0 {
 			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
 		}
-		argv := append([]string{}, baseArgv...)
-		// If the recon dir already has partial work (e.g. from a previous interrupted run),
-		// pass --resume so reconHarvest picks up where it left off.
-		// On a fresh run the dir was just created empty, so --overwrite is safe.
-		if hasPartialRecon(reconDir) {
+		argv := append([]string{}, plan.baseArgv...)
+		resumeDir := findPartialReconWorkdir(plan.reconDir)
+		if resumeDir != "" {
 			// Pass --resume <workdir> so reconHarvest picks up its existing state.
 			// Do NOT pass -o or the target positional arg; reconHarvest derives both
 			// from workspace_meta.json when --resume is used.
-			argv = append(argv, "--run", "--resume", reconDir,
-				"--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+			argv = append(argv, buildReconHarvestExecutionArgs(job.Target, plan.freshOutputName, resumeDir, true, reconCaps)...)
 		} else {
-			argv = append(argv, job.Target, "--run", "-o", reconDir, "--overwrite",
-				"--skip-nuclei", "--arjun-threads", "20", "--vhost-threads", "80")
+			argv = append(argv, buildReconHarvestExecutionArgs(job.Target, plan.freshOutputName, "", false, reconCaps)...)
 		}
 		cmd := exec.CommandContext(reconCtx, argv[0], argv[1:]...)
+		cmd.Dir = plan.reconDir
 		if opt.ReconWebhookURL != "" {
 			cmd.Env = append(os.Environ(), "RECONHARVEST_WEBHOOK="+opt.ReconWebhookURL)
 		}
@@ -1109,14 +1158,10 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 		pw.Flush() // Flush any partial output left in the progress writer buffer
 		cancelRecon()
 		if err == nil {
-			if _, statErr := os.Stat(summaryPath); statErr == nil {
+			summaryPath := existingReconSummaryPath(plan.reconDir)
+			if summaryPath != "" {
 				job.EvidencePath = filepath.Join(opt.ArtifactsRoot, job.ID)
 				return summaryPath, nil
-			}
-			// Fallback: search for summary.json inside recon subdirectories
-			if alt := findSummaryJSON(reconDir); alt != "" {
-				job.EvidencePath = filepath.Join(opt.ArtifactsRoot, job.ID)
-				return alt, nil
 			}
 			return "", fmt.Errorf("recon summary missing after successful run")
 		}
@@ -1155,17 +1200,46 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options) (string,
 	return "", fmt.Errorf("reconHarvest failed")
 }
 
-// hasPartialRecon returns true if the recon dir already has work files from a
-// previous (interrupted) run. This determines whether we pass --resume vs
-// --overwrite to reconHarvest.py.
-func hasPartialRecon(reconDir string) bool {
+func hasReconMarkers(dir string) bool {
 	markers := []string{"run.log", "workspace_meta.json", "live_hosts.txt", "run_commands.sh"}
 	for _, m := range markers {
-		if st, err := os.Stat(filepath.Join(reconDir, m)); err == nil && st.Size() > 0 {
+		if st, err := os.Stat(filepath.Join(dir, m)); err == nil && st.Size() > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+func findPartialReconWorkdir(reconDir string) string {
+	if hasReconMarkers(reconDir) {
+		return reconDir
+	}
+
+	var newestDir string
+	var newestMod time.Time
+	_ = filepath.Walk(reconDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if info.Name() != "workspace_meta.json" || info.Size() == 0 {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		if newestDir == "" || info.ModTime().After(newestMod) {
+			newestDir = dir
+			newestMod = info.ModTime()
+		}
+		return nil
+	})
+	return newestDir
+}
+
+func existingReconSummaryPath(reconDir string) string {
+	summaryPath := filepath.Join(reconDir, "summary.json")
+	if st, err := os.Stat(summaryPath); err == nil && st.Size() > 0 {
+		return summaryPath
+	}
+	return findSummaryJSON(reconDir)
 }
 
 // findSummaryJSON walks reconDir looking for any summary.json file.
@@ -1182,6 +1256,32 @@ func findSummaryJSON(reconDir string) string {
 		return nil
 	})
 	return found
+}
+
+func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partial bool, caps configpkg.ReconHarvestCapabilities) []string {
+	args := []string{}
+	if !partial {
+		args = append(args, target)
+	}
+	args = append(args, "--run")
+	if partial {
+		args = append(args, "--resume", resumeDir)
+	} else {
+		args = append(args, "-o", outputName)
+		if caps.Supports("--overwrite") {
+			args = append(args, "--overwrite")
+		}
+	}
+	if caps.Supports("--skip-nuclei") {
+		args = append(args, "--skip-nuclei")
+	}
+	if caps.Supports("--arjun-threads") {
+		args = append(args, "--arjun-threads", "20")
+	}
+	if caps.Supports("--vhost-threads") {
+		args = append(args, "--vhost-threads", "80")
+	}
+	return args
 }
 
 func buildRankedNucleiInput(path string, artDir string) (string, int) {
@@ -1610,6 +1710,7 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 	if err := json.Unmarshal(b, &rs); err != nil {
 		return rs, fmt.Errorf("decode summary struct: %w", err)
 	}
+	ingest.NormalizeReconSummaryPaths(summaryPath, &rs)
 	live := strings.TrimSpace(rs.Live)
 	if live == "" {
 		live = filepath.Join(rs.Workdir, "live_hosts.txt")
