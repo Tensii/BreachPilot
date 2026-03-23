@@ -384,8 +384,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		exploitStart := time.Now()
 		nucleiCtx := ctx
 		cancelNuclei := func() {}
-		if opt.NucleiTimeoutSec > 0 {
-			nucleiCtx, cancelNuclei = context.WithTimeout(ctx, time.Duration(opt.NucleiTimeoutSec)*time.Second)
+		nucleiTimeoutSec := effectiveNucleiTimeoutSec(opt)
+		if nucleiTimeoutSec > 0 {
+			nucleiCtx, cancelNuclei = context.WithTimeout(ctx, time.Duration(nucleiTimeoutSec)*time.Second)
 		}
 		defer cancelNuclei()
 
@@ -1116,8 +1117,9 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options, plan rec
 	for attempt := 1; attempt <= attempts; attempt++ {
 		reconCtx := ctx
 		cancelRecon := func() {}
-		if opt.ReconTimeoutSec > 0 {
-			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(opt.ReconTimeoutSec)*time.Second)
+		reconTimeoutSec := effectiveReconTimeoutSec(opt)
+		if reconTimeoutSec > 0 {
+			reconCtx, cancelRecon = context.WithTimeout(ctx, time.Duration(reconTimeoutSec)*time.Second)
 		}
 		argv := append([]string{}, plan.baseArgv...)
 		resumeDir := findPartialReconWorkdir(plan.reconDir)
@@ -1445,6 +1447,20 @@ func intOrDefault(v, def int) int {
 		return def
 	}
 	return v
+}
+
+func effectiveReconTimeoutSec(opt Options) int {
+	if opt.BoundlessMode {
+		return 0
+	}
+	return opt.ReconTimeoutSec
+}
+
+func effectiveNucleiTimeoutSec(opt Options) int {
+	if opt.BoundlessMode {
+		return 0
+	}
+	return opt.NucleiTimeoutSec
 }
 
 func appendUniqueStrings(a, b []string) []string {

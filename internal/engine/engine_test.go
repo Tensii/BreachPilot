@@ -413,3 +413,21 @@ func TestFindPartialReconWorkdirFindsNestedWorkspace(t *testing.T) {
 		t.Fatalf("expected nested recon workdir %q, got %q", workdir, got)
 	}
 }
+
+func TestEffectiveReconTimeoutSecDisablesTimeoutInBoundlessMode(t *testing.T) {
+	if got := effectiveReconTimeoutSec(Options{ReconTimeoutSec: 3600, BoundlessMode: true}); got != 0 {
+		t.Fatalf("expected boundless recon timeout to be disabled, got %d", got)
+	}
+	if got := effectiveReconTimeoutSec(Options{ReconTimeoutSec: 3600, BoundlessMode: false}); got != 3600 {
+		t.Fatalf("expected recon timeout to remain set, got %d", got)
+	}
+}
+
+func TestEffectiveNucleiTimeoutSecDisablesTimeoutInBoundlessMode(t *testing.T) {
+	if got := effectiveNucleiTimeoutSec(Options{NucleiTimeoutSec: 3600, BoundlessMode: true}); got != 0 {
+		t.Fatalf("expected boundless nuclei timeout to be disabled, got %d", got)
+	}
+	if got := effectiveNucleiTimeoutSec(Options{NucleiTimeoutSec: 3600, BoundlessMode: false}); got != 3600 {
+		t.Fatalf("expected nuclei timeout to remain set, got %d", got)
+	}
+}

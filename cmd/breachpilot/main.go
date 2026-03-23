@@ -723,7 +723,13 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Println(cyan + "┃  \"quiet in logs, loud in findings\"                                    ┃" + reset)
 	fmt.Println(cyan + "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛" + reset)
 	fmt.Printf("%s[WEBHOOKS]%s recon=%s exploit=%s retries=%d\n", green, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
-	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%ds nuclei_timeout=%ds\n", green, reset, cfg.NucleiBin, cfg.ReconTimeoutSec, cfg.NucleiTimeoutSec)
+	reconTimeoutLabel := fmt.Sprintf("%ds", cfg.ReconTimeoutSec)
+	nucleiTimeoutLabel := fmt.Sprintf("%ds", cfg.NucleiTimeoutSec)
+	if cfg.BoundlessMode {
+		reconTimeoutLabel = "off(boundless)"
+		nucleiTimeoutLabel = "off(boundless)"
+	}
+	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%s nuclei_timeout=%s\n", green, reset, cfg.NucleiBin, reconTimeoutLabel, nucleiTimeoutLabel)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
 	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t boundless=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.BoundlessMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
