@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,6 +87,11 @@ const (
 	ErrNetwork      = "network-blocked"
 	ErrParse        = "parse-failed"
 	ErrExecution    = "execution-failed"
+)
+
+var (
+	progressFractionRE = regexp.MustCompile(`(?i)\b(\d+)\s*/\s*(\d+)\s*(?:\((\d{1,3})%\))?`)
+	progressPercentRE  = regexp.MustCompile(`(?i)\b(\d{1,3})%\b`)
 )
 
 type Options struct {
@@ -316,6 +322,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return fmt.Errorf("live hosts file not accessible: %w", err)
 	}
+	liveHostsTotal, err := countLines(hostsPath)
+	if err != nil {
+		_ = writeJobReport(job, opt.ArtifactsRoot)
+		return err
+	}
 
 	artDir = filepath.Join(opt.ArtifactsRoot, job.ID)
 	if err := os.MkdirAll(artDir, 0o755); err != nil {
@@ -326,17 +337,32 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	job.EvidencePath = artDir
 
 	nucleiInput := hostsPath
+	nucleiTargetsTotal := liveHostsTotal
 	if rankedInput, rankedCount := buildRankedNucleiInput(rs.Intel.EndpointsRankedJSON, artDir); rankedCount > 0 {
 		nucleiInput = rankedInput
+		nucleiTargetsTotal = rankedCount
 		emit(models.RuntimeEvent{
-			Kind:    "stage",
-			Stage:   "exploit.targeting",
-			Status:  "info",
-			Message: fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount),
-			Target:  job.Target,
-			Counts:  map[string]int{"ranked_endpoints": rankedCount},
+			Kind:     "stage",
+			Stage:    "exploit.targeting",
+			Status:   "info",
+			Message:  fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount),
+			Target:   job.Target,
+			Counts:   map[string]int{"ranked_endpoints": rankedCount},
+			Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
 		})
 	}
+	emit(models.RuntimeEvent{
+		Kind:    "stage",
+		Stage:   "exploit.targeting",
+		Status:  "info",
+		Message: fmt.Sprintf("exploit.targeting inventory live_hosts=%d nuclei_targets=%d", liveHostsTotal, nucleiTargetsTotal),
+		Target:  job.Target,
+		Counts: map[string]int{
+			"live_hosts":     liveHostsTotal,
+			"nuclei_targets": nucleiTargetsTotal,
+		},
+		Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
+	})
 
 	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
 	if strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1") {
@@ -439,12 +465,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	scoutModules = prioritizeModules(scoutModules, rs)
 	scoutNames := moduleNames(scoutModules)
 	emit(models.RuntimeEvent{
-		Kind:    "module",
-		Stage:   "exploit.module",
-		Status:  "planned",
-		Message: "exploit.module.wave1 " + strings.Join(scoutNames, ","),
-		Target:  job.Target,
-		Counts:  map[string]int{"planned": len(scoutModules)},
+		Kind:     "module",
+		Stage:    "exploit.module",
+		Status:   "planned",
+		Message:  "exploit.module.wave1 " + strings.Join(scoutNames, ","),
+		Target:   job.Target,
+		Counts:   map[string]int{"planned": len(scoutModules)},
+		Progress: runtimeStageProgress("modules", "modules", 0, len(scoutModules)),
 	})
 
 	// Initialize OOB Provider
@@ -512,12 +539,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	proofNames := moduleNames(correlatedProofModules)
 	if len(proofNames) > 0 {
 		emit(models.RuntimeEvent{
-			Kind:    "module",
-			Stage:   "exploit.module",
-			Status:  "planned",
-			Message: "exploit.module.wave2 " + strings.Join(proofNames, ","),
-			Target:  job.Target,
-			Counts:  map[string]int{"planned": len(correlatedProofModules)},
+			Kind:     "module",
+			Stage:    "exploit.module",
+			Status:   "planned",
+			Message:  "exploit.module.wave2 " + strings.Join(proofNames, ","),
+			Target:   job.Target,
+			Counts:   map[string]int{"planned": len(correlatedProofModules)},
+			Progress: runtimeStageProgress("modules", "modules", 0, len(correlatedProofModules)),
 		})
 	}
 	proofFindings, proofTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, correlatedProofModules)
@@ -1347,6 +1375,7 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		w.buf = w.buf[i+1:]
 		if line != "" {
 			msg := fmt.Sprintf("%s %s", w.stage, line)
+			progress := parseRuntimeLogProgress(w.stage, line)
 			if w.cb != nil {
 				w.cb(msg)
 			}
@@ -1358,6 +1387,7 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 					Message:   msg,
 					Target:    w.target,
 					Timestamp: time.Now().UTC(),
+					Progress:  progress,
 				})
 			}
 		}
@@ -1374,6 +1404,7 @@ func (w *progressWriter) Flush() {
 	w.buf = nil
 	if line != "" {
 		msg := fmt.Sprintf("%s %s", w.stage, line)
+		progress := parseRuntimeLogProgress(w.stage, line)
 		if w.cb != nil {
 			w.cb(msg)
 		}
@@ -1385,8 +1416,109 @@ func (w *progressWriter) Flush() {
 				Message:   msg,
 				Target:    w.target,
 				Timestamp: time.Now().UTC(),
+				Progress:  progress,
 			})
 		}
+	}
+}
+
+func runtimeStageProgress(label, unit string, completed, total int) *models.RuntimeProgress {
+	if total <= 0 {
+		return nil
+	}
+	if completed < 0 {
+		completed = 0
+	}
+	if completed > total {
+		completed = total
+	}
+	return &models.RuntimeProgress{
+		Label:     strings.TrimSpace(label),
+		Unit:      strings.TrimSpace(unit),
+		Completed: completed,
+		Total:     total,
+		Percent:   completed * 100 / total,
+	}
+}
+
+func parseRuntimeLogProgress(stage, line string) *models.RuntimeProgress {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+	lineLower := strings.ToLower(line)
+	looksLikeProgress := strings.Contains(line, "%") ||
+		strings.Contains(lineLower, "progress") ||
+		strings.Contains(lineLower, "target") ||
+		strings.Contains(lineLower, "host") ||
+		strings.Contains(lineLower, "request") ||
+		strings.Contains(lineLower, "template")
+	if !looksLikeProgress {
+		return nil
+	}
+	if matches := progressFractionRE.FindStringSubmatch(line); len(matches) == 4 {
+		completed, errA := strconv.Atoi(matches[1])
+		total, errB := strconv.Atoi(matches[2])
+		if errA == nil && errB == nil && total > 0 {
+			percent := completed * 100 / total
+			if matches[3] != "" {
+				if parsedPercent, err := strconv.Atoi(matches[3]); err == nil {
+					percent = parsedPercent
+				}
+			}
+			if percent < 0 {
+				percent = 0
+			}
+			if percent > 100 {
+				percent = 100
+			}
+			return &models.RuntimeProgress{
+				Label:     progressLabelForStage(stage),
+				Unit:      progressUnitForStage(stage),
+				Completed: completed,
+				Total:     total,
+				Percent:   percent,
+			}
+		}
+	}
+	if matches := progressPercentRE.FindStringSubmatch(line); len(matches) == 2 {
+		percent, err := strconv.Atoi(matches[1])
+		if err == nil {
+			if percent < 0 {
+				percent = 0
+			}
+			if percent > 100 {
+				percent = 100
+			}
+			return &models.RuntimeProgress{
+				Label:   progressLabelForStage(stage),
+				Unit:    progressUnitForStage(stage),
+				Percent: percent,
+			}
+		}
+	}
+	return nil
+}
+
+func progressLabelForStage(stage string) string {
+	switch {
+	case strings.HasPrefix(stage, "exploit.log"):
+		return "targets"
+	case strings.HasPrefix(stage, "recon.log"):
+		return "recon"
+	default:
+		return "progress"
+	}
+}
+
+func progressUnitForStage(stage string) string {
+	switch {
+	case strings.HasPrefix(stage, "exploit.log"):
+		return "targets"
+	case strings.HasPrefix(stage, "recon.log"):
+		return "steps"
+	default:
+		return ""
 	}
 }
 

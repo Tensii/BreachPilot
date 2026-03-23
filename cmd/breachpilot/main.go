@@ -379,6 +379,9 @@ func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhoo
 			if len(ev.Counts) > 0 {
 				payload["counts"] = ev.Counts
 			}
+			if ev.Progress != nil {
+				payload["progress"] = ev.Progress
+			}
 			nf.SendGeneric("exploit.module.progress", payload)
 		}
 	}

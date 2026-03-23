@@ -123,15 +123,24 @@ type ExploitModuleTelemetry struct {
 }
 
 type RuntimeEvent struct {
-	Kind      string          `json:"kind"`
-	Stage     string          `json:"stage,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Module    string          `json:"module,omitempty"`
-	Target    string          `json:"target,omitempty"`
-	Timestamp time.Time       `json:"timestamp"`
-	Counts    map[string]int  `json:"counts,omitempty"`
-	Finding   *FindingPreview `json:"finding,omitempty"`
+	Kind      string           `json:"kind"`
+	Stage     string           `json:"stage,omitempty"`
+	Status    string           `json:"status,omitempty"`
+	Message   string           `json:"message,omitempty"`
+	Module    string           `json:"module,omitempty"`
+	Target    string           `json:"target,omitempty"`
+	Timestamp time.Time        `json:"timestamp"`
+	Counts    map[string]int   `json:"counts,omitempty"`
+	Progress  *RuntimeProgress `json:"progress,omitempty"`
+	Finding   *FindingPreview  `json:"finding,omitempty"`
+}
+
+type RuntimeProgress struct {
+	Label     string `json:"label,omitempty"`
+	Unit      string `json:"unit,omitempty"`
+	Completed int    `json:"completed,omitempty"`
+	Total     int    `json:"total,omitempty"`
+	Percent   int    `json:"percent,omitempty"`
 }
 
 type FindingPreview struct {

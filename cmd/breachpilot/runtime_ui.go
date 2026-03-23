@@ -24,6 +24,7 @@ type cliRuntimeTracker struct {
 	totalFindings   int
 	severityCounts  map[string]int
 	recentFindings  []models.FindingPreview
+	lastProgress    *models.RuntimeProgress
 	lastStageDetail string
 }
 
@@ -57,12 +58,18 @@ func (t *cliRuntimeTracker) Handle(ev models.RuntimeEvent) {
 		t.handleSummary(ev)
 	case "log":
 		if strings.HasPrefix(ev.Stage, "recon.log") || strings.HasPrefix(ev.Stage, "exploit.log") {
-			fmt.Fprintln(t.out, renderRuntimeLog(ev))
+			t.trackProgress(ev)
+			if ev.Progress != nil {
+				fmt.Fprintln(t.out, renderRuntimeProgress(ev, t.snapshot()))
+			} else {
+				fmt.Fprintln(t.out, renderRuntimeLog(ev))
+			}
 		}
 	}
 }
 
 func (t *cliRuntimeTracker) handleStage(ev models.RuntimeEvent) {
+	t.trackProgress(ev)
 	if ev.Stage != "" {
 		t.currentStage = ev.Stage
 	}
@@ -73,7 +80,10 @@ func (t *cliRuntimeTracker) handleStage(ev models.RuntimeEvent) {
 }
 
 func (t *cliRuntimeTracker) handleModule(ev models.RuntimeEvent) {
-	if planned, ok := ev.Counts["planned"]; ok && planned > 0 {
+	t.trackProgress(ev)
+	if ev.Progress != nil && ev.Progress.Total > 0 && strings.EqualFold(ev.Progress.Label, "modules") {
+		t.totalModules = ev.Progress.Total
+	} else if planned, ok := ev.Counts["planned"]; ok && planned > 0 {
 		t.totalModules = planned
 	}
 	state := t.moduleStates[ev.Module]
@@ -102,32 +112,62 @@ func (t *cliRuntimeTracker) handleFinding(ev models.RuntimeEvent) {
 }
 
 func (t *cliRuntimeTracker) handleSummary(ev models.RuntimeEvent) {
+	t.trackProgress(ev)
 	fmt.Fprintln(t.out, renderRuntimeSummary(ev, t.snapshot()))
+}
+
+func (t *cliRuntimeTracker) trackProgress(ev models.RuntimeEvent) {
+	if ev.Progress == nil {
+		return
+	}
+	progress := *ev.Progress
+	t.lastProgress = &progress
 }
 
 func (t *cliRuntimeTracker) snapshot() string {
 	running := 0
 	done := 0
+	errored := 0
 	skipped := 0
-	for _, st := range t.moduleStates {
+	activeModules := make([]string, 0, 3)
+	for name, st := range t.moduleStates {
 		switch st.Status {
 		case "started":
 			running++
+			if len(activeModules) < 3 {
+				activeModules = append(activeModules, name)
+			}
 		case "completed":
 			done++
+		case "error":
+			errored++
 		case "skipped":
 			skipped++
 		}
 	}
 	moduleProgress := "modules=0"
+	accounted := done + errored + skipped
 	switch {
 	case t.totalModules > 0:
-		moduleProgress = fmt.Sprintf("modules=%d/%d running=%d skipped=%d", done, t.totalModules, running, skipped)
+		moduleProgress = fmt.Sprintf("modules=%d/%d running=%d failed=%d skipped=%d", accounted, t.totalModules, running, errored, skipped)
 	case len(t.moduleStates) > 0:
-		moduleProgress = fmt.Sprintf("modules=%d running=%d skipped=%d", done, running, skipped)
+		moduleProgress = fmt.Sprintf("modules=%d running=%d failed=%d skipped=%d", accounted, running, errored, skipped)
 	}
 	elapsed := time.Since(t.startedAt).Round(time.Second)
-	return fmt.Sprintf("elapsed=%s findings=%d high+critical=%d %s", elapsed, t.totalFindings, t.severityCounts["CRITICAL"]+t.severityCounts["HIGH"], moduleProgress)
+	parts := []string{
+		fmt.Sprintf("elapsed=%s", elapsed),
+		fmt.Sprintf("findings=%d", t.totalFindings),
+		fmt.Sprintf("C/H/M=%d/%d/%d", t.severityCounts["CRITICAL"], t.severityCounts["HIGH"], t.severityCounts["MEDIUM"]),
+		moduleProgress,
+	}
+	if t.lastProgress != nil {
+		parts = append(parts, "progress="+formatRuntimeProgress(*t.lastProgress))
+	}
+	if len(activeModules) > 0 {
+		sort.Strings(activeModules)
+		parts = append(parts, "active="+strings.Join(activeModules, ","))
+	}
+	return strings.Join(parts, " ")
 }
 
 func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
@@ -167,6 +207,10 @@ func renderRuntimeSummary(ev models.RuntimeEvent, snapshot string) string {
 	exploit := ev.Counts["exploit"]
 	filtered := ev.Counts["filtered"]
 	return fmt.Sprintf("\x1b[35m[SUMMARY]\x1b[0m nuclei=%d exploit=%d filtered=%d %s", nuclei, exploit, filtered, snapshot)
+}
+
+func renderRuntimeProgress(ev models.RuntimeEvent, snapshot string) string {
+	return fmt.Sprintf("\x1b[34m[PROGRESS]\x1b[0m %s | %s", strings.TrimSpace(ev.Message), snapshot)
 }
 
 func renderRuntimeLog(ev models.RuntimeEvent) string {
@@ -217,6 +261,21 @@ func snapshotWithDetail(snapshot, detail string) string {
 		detail = detail[:90] + "..."
 	}
 	return detail + " | " + snapshot
+}
+
+func formatRuntimeProgress(progress models.RuntimeProgress) string {
+	label := strings.TrimSpace(progress.Label)
+	if label == "" {
+		label = "progress"
+	}
+	switch {
+	case progress.Total > 0:
+		return fmt.Sprintf("%s %d/%d (%d%%)", label, progress.Completed, progress.Total, progress.Percent)
+	case progress.Percent > 0:
+		return fmt.Sprintf("%s %d%%", label, progress.Percent)
+	default:
+		return label
+	}
 }
 
 func summarizeTopModules(job *models.Job) string {
