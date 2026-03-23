@@ -91,6 +91,50 @@ CLI flags override `breachpilot.env`. For example:
 ./breachpilot resume artifacts/example.com/1/.breachpilot.state aggressive boundless
 ```
 
+## Architecture & Data Flow
+
+BreachPilot follows a modular, phase-based architecture designed for efficiency and clear transitions between recon and exploit surface analysis.
+
+### High-Level Data Flow
+
+```mermaid
+graph TD
+    A[Target Input] --> B[Recon Phase: ReconHarvest]
+    B --> C{Recon Summary<br/>summary.json}
+    C --> D[Exploit Phase 1: Nuclei]
+    C --> E[Exploit Phase 2: Custom Modules]
+    D --> F[Findings Collection]
+    E --> F
+    F --> G[OOB & Stored Verification]
+    G --> H[Scoring & Risk Analysis]
+    H --> I[Reports: JSON, MD, HTML, SARIF]
+
+    subgraph "Custom Modules (Two-Wave)"
+        E --> E1[Wave 1: Scout Modules]
+        E1 --> E2[Correlation Signals]
+        E2 --> E3[Wave 2: Proof Modules]
+    end
+```
+
+### Scan Lifecycle & State Machine
+
+BreachPilot manages its execution state using a persistent state machine defined in [internal/engine/state.go](file:///home/ubuntu/.openclaw/workspace/BreachPilot/internal/engine/state.go). This allows for job resumption and ensures each phase completes successfully before moving to the next.
+
+| State | Description | Triggered By |
+|-------|-------------|--------------|
+| `Started` | Job initialized and target validated. | `NewStateManager` |
+| `ReconCompleted` | ReconHarvest has finished and `summary.json` is available. | `MarkReconCompleted` |
+| `NucleiCompleted` | Nuclei scan has finished and `nuclei_findings.jsonl` is written. | `MarkNucleiCompleted` |
+| `ModuleCompleted` | Individual custom exploit modules are tracked as they finish. | `MarkModuleCompleted` |
+
+### Custom Exploit Modules: The Two-Wave Approach
+
+To maximize impact while minimizing noise, custom modules are executed in two waves:
+
+1.  **Scout Wave**: Broad analysis to identify potential vulnerability "signals" (e.g., discovering a sensitive endpoint or specific tech stack).
+2.  **Proof Wave**: Targeted modules that use **Correlation Signals** from the Scout wave to perform specialized verification and Proof of Concept (PoC) generation.
+
+
 Behavior summary:
 - `breachpilot.env` applies generally to all runs on that machine or checkout.
 - CLI options such as `aggressive` and `boundless` apply only to the current command.
