@@ -134,6 +134,8 @@ To maximize impact while minimizing noise, custom modules are executed in two wa
 1.  **Scout Wave**: Broad analysis to identify potential vulnerability "signals" (e.g., discovering a sensitive endpoint or specific tech stack).
 2.  **Proof Wave**: Targeted modules that use **Correlation Signals** from the Scout wave to perform specialized verification and Proof of Concept (PoC) generation.
 
+For detailed information on creating new modules and using shared state patterns, see the [Exploit Module Developer Guide](file:///home/ubuntu/.openclaw/workspace/BreachPilot/internal/exploit/DEVELOPER_GUIDE.md).
+
 
 Behavior summary:
 - `breachpilot.env` applies generally to all runs on that machine or checkout.
