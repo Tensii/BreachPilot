@@ -93,3 +93,36 @@ func TestWebhookJobCompletedPreservesNormalQueueOrder(t *testing.T) {
 		t.Fatalf("unexpected event order: %v", events)
 	}
 }
+
+func TestWebhookFindingsCapPreventsSpam(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		count int
+	)
+	srv := testutil.NewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if payload["event"] == "exploit.finding" {
+			mu.Lock()
+			count++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	nf := &Webhook{URL: srv.URL, Retries: 1, FindingsCap: 3}
+	for i := 0; i < 10; i++ {
+		nf.SendGeneric("exploit.finding", map[string]any{"job_id": "j1", "idx": i})
+	}
+	nf.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count > 3 {
+		t.Fatalf("expected finding webhook cap to suppress spam, got %d sends", count)
+	}
+}

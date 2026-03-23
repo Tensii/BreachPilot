@@ -114,10 +114,10 @@ func main() {
 	printStartupBanner(cfg)
 
 	engOpt := buildEngineOptions(cfg)
-	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl")}
+	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl"), FindingsCap: cfg.WebhookFindingsCap}
 	nf.Start()
 	defer nf.Stop()
-	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl")}
+	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl"), FindingsCap: cfg.WebhookFindingsCap}
 	rf.Start()
 	defer rf.Stop()
 	engOpt.Notifier = nf

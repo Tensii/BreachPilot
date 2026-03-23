@@ -38,6 +38,14 @@ func TestWebhookModuleProgressDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestWebhookFindingsCapDefaultTwenty(t *testing.T) {
+	os.Unsetenv("BREACHPILOT_WEBHOOK_FINDINGS_CAP")
+	cfg := Load()
+	if cfg.WebhookFindingsCap != 20 {
+		t.Fatalf("expected webhook findings cap 20 by default, got %d", cfg.WebhookFindingsCap)
+	}
+}
+
 func TestLoadMaxParallel(t *testing.T) {
 	_ = os.Setenv("BREACHPILOT_MAX_PARALLEL", "6")
 	defer os.Unsetenv("BREACHPILOT_MAX_PARALLEL")

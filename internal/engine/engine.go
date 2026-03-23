@@ -25,6 +25,7 @@ import (
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
+	businesslogic "breachpilot/internal/exploit/modules/businesslogic"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cmdinject "breachpilot/internal/exploit/modules/cmdinject"
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
@@ -37,6 +38,8 @@ import (
 	exposedfiles "breachpilot/internal/exploit/modules/exposedfiles"
 	graphqlabuse "breachpilot/internal/exploit/modules/graphqlabuse"
 	headers "breachpilot/internal/exploit/modules/headers"
+	hostheader "breachpilot/internal/exploit/modules/hostheader"
+	hpp "breachpilot/internal/exploit/modules/hpp"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
 	idorplaybook "breachpilot/internal/exploit/modules/idorplaybook"
@@ -64,9 +67,11 @@ import (
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
+	xxeinjection "breachpilot/internal/exploit/modules/xxeinjection"
 	oob "breachpilot/internal/exploit/oob"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
+	notifypkg "breachpilot/internal/notify"
 	"breachpilot/internal/policy"
 	"breachpilot/internal/scope"
 	riskscoring "breachpilot/internal/scoring"
@@ -483,6 +488,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		OOBProvider:                    oobProvider,
 	}
 	scoutFindings, scoutTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
+	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
 	mergedSignals := mergeCorrelationSignals(persistedSignals, scoutSignals)
 	_ = saveCorrelationSignalsArtifact(artDir, mergedSignals)
@@ -853,6 +859,12 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if opt.WebhookFindings {
 			batchCounts := map[string]int{"INFO": 0, "LOW": 0, "MEDIUM": 0}
 			batchSample := make([]map[string]any, 0, 5)
+			suppressedFindingWebhooks := 0
+			findingCap := 0
+			webhookNotifier, _ := opt.Notifier.(*notifypkg.Webhook)
+			if webhookNotifier != nil {
+				findingCap = webhookNotifier.FindingCap()
+			}
 			for _, f := range exploitFindings {
 				sevForFilter := f.Severity
 				if band := strings.ToUpper(strings.TrimSpace(string(f.RiskScore.Band))); band != "" {
@@ -863,16 +875,21 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				}
 				sev := strings.ToUpper(strings.TrimSpace(sevForFilter))
 				if sev == "CRITICAL" || sev == "HIGH" {
+					if webhookNotifier != nil && !webhookNotifier.ShouldSendFinding() {
+						suppressedFindingWebhooks++
+						continue
+					}
 					opt.Notifier.SendGeneric("exploit.finding", map[string]any{
-						"job_id":      job.ID,
-						"target":      f.Target,
-						"module":      f.Module,
-						"severity":    sev,
-						"title":       f.Title,
-						"confidence":  f.Confidence,
-						"validation":  f.Validation,
-						"evidence":    f.Evidence,
-						"report_path": job.ExploitReportPath,
+						"_bp_finding_cap_checked": true,
+						"job_id":                  job.ID,
+						"target":                  f.Target,
+						"module":                  f.Module,
+						"severity":                sev,
+						"title":                   f.Title,
+						"confidence":              f.Confidence,
+						"validation":              f.Validation,
+						"evidence":                f.Evidence,
+						"report_path":             job.ExploitReportPath,
 					})
 					continue
 				}
@@ -883,15 +900,20 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 					}
 				}
 			}
-			if batchCounts["INFO"]+batchCounts["LOW"]+batchCounts["MEDIUM"] > 0 {
-				opt.Notifier.SendGeneric("exploit.findings.batch", map[string]any{
+			if batchCounts["INFO"]+batchCounts["LOW"]+batchCounts["MEDIUM"] > 0 || suppressedFindingWebhooks > 0 {
+				payload := map[string]any{
 					"job_id":  job.ID,
 					"target":  job.Target,
 					"counts":  batchCounts,
 					"sample":  batchSample,
 					"min_sev": opt.WebhookFindingsMinSeverity,
 					"note":    "low-priority findings aggregated",
-				})
+				}
+				if suppressedFindingWebhooks > 0 && findingCap > 0 {
+					payload["note"] = fmt.Sprintf("individual finding webhooks capped at %d — see batch for full list", findingCap)
+					payload["suppressed_individual_findings"] = suppressedFindingWebhooks
+				}
+				opt.Notifier.SendGeneric("exploit.findings.batch", payload)
 			}
 		}
 	}
@@ -1514,10 +1536,14 @@ func registeredModuleInfos() []ModuleInfo {
 		{"session-abuse", "Detects risky session/token handling surfaces", true, "exploit-core"},
 		{"privilege-path", "Maps probable privilege escalation endpoint paths", true, "exploit-core"},
 		{"graphql-abuse", "Detects GraphQL abuse opportunities and exposed consoles", true, "exploit-core"},
+		{"hostheader", "Detects host header injection and cache poisoning", true, "exploit-core"},
+		{"hpp", "Detects HTTP parameter pollution", true, "exploit-core"},
 		{"lfi", "Detects local file inclusion and path traversal", true, "exploit-core"},
+		{"xxeinjection", "Detects XXE via file read and OOB probes", true, "exploit-core"},
 		{"state-change", "Detects risky state-changing endpoint patterns", true, "exploit-core"},
 		{"upload-abuse", "Detects upload attack surface and retrieval risks", true, "exploit-core"},
 		{"auth-bypass", "Executes auth bypass chain checks across risky surfaces", true, "exploit-core"},
+		{"businesslogic", "Detects business logic flaws via boundary and type probing", true, "exploit-core"},
 		{"cmdinject", "Detects OS command injection (blind timing and OOB)", true, "exploit-core"},
 		{"mutation-engine", "Runs aggressive mutation probes (method/header/param/content-type)", true, "exploit-core"},
 		{"idor-playbook", "Runs deterministic IDOR privilege hopping playbook", true, "exploit-core"},
@@ -1553,10 +1579,14 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		sessionabuse.New(),
 		privpath.New(),
 		graphqlabuse.New(),
+		hostheader.New(),
+		hpp.New(),
 		lfi.New(),
+		xxeinjection.New(),
 		statechange.New(),
 		uploadabuse.New(),
 		authbypass.New(),
+		businesslogic.New(),
 		cmdinject.New(),
 		mutationengine.New(),
 		idorplaybook.New(),
@@ -1690,8 +1720,12 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 		return hasRankedEndpoints, "ranked endpoint candidates available"
 	case "graphql-abuse":
 		return hasURLs || hasRankedEndpoints, "GraphQL candidate collection available"
-	case "lfi", "rxss":
+	case "hostheader":
+		return hasLiveHosts, "live host inventory available"
+	case "hpp", "lfi", "rxss", "businesslogic":
 		return hasURLs || hasRankedEndpoints, "URL or endpoint corpus available"
+	case "xxeinjection":
+		return hasURLs || hasLiveHosts, "URL or live host corpus available"
 	case "state-change", "upload-abuse", "crlf-injection", "jwt-access":
 		switch name {
 		case "state-change":
@@ -2097,6 +2131,12 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		return false, "needs query/injection lead from scouts or ranked params"
 	case "lfi":
 		return true, "no correlation constraint"
+	case "hostheader":
+		return true, "no correlation constraint"
+	case "hpp":
+		return true, "no correlation constraint"
+	case "xxeinjection":
+		return true, "no correlation constraint"
 	case "cmdinject":
 		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
 			return true, fmt.Sprintf("injection scout lead available (strength=%d)", maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage"))
@@ -2107,6 +2147,14 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		return false, "needs URL corpus or injection scout lead"
 	case "rxss":
 		return strings.TrimSpace(rs.URLs.All) != "", "URL corpus available for XSS probe"
+	case "businesslogic":
+		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("rxss", 1) {
+			return true, "injection signal confirms input processing"
+		}
+		if strings.TrimSpace(rs.URLs.All) != "" {
+			return true, "URL corpus available"
+		}
+		return false, "needs URL corpus"
 	case "idor-size":
 		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
 			return true, fmt.Sprintf("object-access lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
@@ -2179,6 +2227,27 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 	case "jwt-access":
 		score += maxCorrelationStrength(signals, "session-abuse", "secrets-validator") * 30
 		score += reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}) * 5
+	case "lfi":
+		score += maxCorrelationStrength(signals, "info-disclosure", "exposed-files") * 40
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"file=", "page=", "path=", "template=", "include="}) * 10
+	case "rxss":
+		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 25
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"q=", "search=", "query=", "message=", "name=", "comment="}) * 8
+	case "cmdinject":
+		score += maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage") * 50
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"cmd=", "exec=", "command=", "ping=", "host=", "ip="}) * 15
+	case "hostheader":
+		score += maxCorrelationStrength(signals, "open-redirect", "cors-poc") * 20
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"reset", "forgot", "password", "account"}) * 10
+	case "hpp":
+		score += maxCorrelationStrength(signals, "mutation-engine", "http-method-tampering") * 20
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"?"}) * 2
+	case "xxeinjection":
+		score += maxCorrelationStrength(signals, "advanced-injection", "info-disclosure") * 30
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"xml", "soap", "wsdl", "upload", "import"}) * 12
+	case "businesslogic":
+		score += reconCorpusMatchCount(rs.URLs.All, []string{"price=", "amount=", "qty=", "quantity=", "count=", "balance=", "credit=", "discount="}) * 15
+		score += maxCorrelationStrength(signals, "session-abuse", "idor-playbook") * 15
 	case "ssrf-prober":
 		score += maxCorrelationStrength(signals, "open-redirect") * 35
 		score += reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"}) * 5
@@ -2207,19 +2276,40 @@ func reconCorpusMatchCount(path string, needles []string) int {
 	if path == "" || len(needles) == 0 {
 		return 0
 	}
-	b, err := os.ReadFile(path)
-	if err != nil || len(b) == 0 {
+	f, err := os.Open(path)
+	if err != nil {
 		return 0
 	}
-	text := strings.ToLower(string(b))
-	seen := map[string]struct{}{}
+	defer f.Close()
+	lowered := make([]string, 0, len(needles))
 	for _, needle := range needles {
 		needle = strings.ToLower(strings.TrimSpace(needle))
-		if needle == "" {
-			continue
+		if needle != "" {
+			lowered = append(lowered, needle)
 		}
-		if strings.Contains(text, needle) {
-			seen[needle] = struct{}{}
+	}
+	if len(lowered) == 0 {
+		return 0
+	}
+	seen := map[string]struct{}{}
+	scanner := bufio.NewScanner(f)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 100000 {
+			break
+		}
+		line := strings.ToLower(scanner.Text())
+		for _, needle := range lowered {
+			if _, ok := seen[needle]; ok {
+				continue
+			}
+			if strings.Contains(line, needle) {
+				seen[needle] = struct{}{}
+			}
+		}
+		if len(seen) == len(lowered) {
+			break
 		}
 	}
 	return len(seen)
@@ -2231,6 +2321,77 @@ func moduleNames(mods []exploit.Module) []string {
 		out = append(out, m.Name())
 	}
 	return out
+}
+
+func enrichReconSummaryFromSharedState(artDir string, rs *models.ReconSummary, state *exploit.SharedState) bool {
+	if rs == nil || state == nil {
+		return false
+	}
+	rawCount, ok := state.Get("schema.endpoint.count")
+	if !ok {
+		return false
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(rawCount))
+	if err != nil || count <= 0 {
+		return false
+	}
+
+	urls := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		value, ok := state.Get(fmt.Sprintf("schema.endpoint.%d", i))
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(value))
+		if len(fields) >= 2 {
+			urls = append(urls, fields[1])
+		}
+	}
+	if len(urls) == 0 {
+		return false
+	}
+
+	targetPath := strings.TrimSpace(rs.URLs.All)
+	if targetPath == "" {
+		if strings.TrimSpace(artDir) == "" {
+			return false
+		}
+		targetPath = filepath.Join(artDir, "schema_discovered_urls.txt")
+	}
+
+	existing := map[string]struct{}{}
+	if f, err := os.Open(targetPath); err == nil {
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				existing[line] = struct{}{}
+			}
+		}
+		_ = f.Close()
+	}
+
+	f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	wrote := false
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		if _, ok := existing[u]; ok {
+			continue
+		}
+		if _, err := f.WriteString(u + "\n"); err == nil {
+			existing[u] = struct{}{}
+			wrote = true
+		}
+	}
+	rs.URLs.All = targetPath
+	return wrote || len(existing) > 0
 }
 
 // RegisteredModules returns the names of all exploit modules in registration order.
@@ -2261,14 +2422,27 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 	if strings.TrimSpace(rs.URLs.All) != "" {
 		score["graphql-abuse"] = 22
 		score["auth-bypass"] = 26
+		score["rxss"] = 28
+		score["cmdinject"] = 30
+		score["hostheader"] = 32
+		score["xxeinjection"] = 33
+		score["lfi"] = 35
 		score["crlf-injection"] = 30
 		score["ssrf-prober"] = 35
 		score["rsql-injection"] = 40
+		score["hpp"] = 42
+		score["businesslogic"] = 43
 	}
 	if strings.TrimSpace(rs.URLs.All) != "" || strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
+		score["lfi"] = 35
 		score["rxss"] = 28
 		score["cmdinject"] = 30
-		score["lfi"] = 35
+		score["xxeinjection"] = 33
+		score["hpp"] = 42
+		score["businesslogic"] = 43
+	}
+	if strings.TrimSpace(rs.Live) != "" {
+		score["hostheader"] = 32
 	}
 	if strings.Contains(strings.ToLower(rs.Live), "saml") || strings.Contains(strings.ToLower(rs.Live), "sso") {
 		score["saml-probe"] = 15

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"breachpilot/internal/models"
@@ -27,6 +28,7 @@ type Webhook struct {
 	Secret       string
 	Retries      int
 	DebugLogPath string
+	FindingsCap  int
 
 	criticalCh chan webhookEvent
 	normalCh   chan webhookEvent
@@ -35,7 +37,11 @@ type Webhook struct {
 	wg         sync.WaitGroup
 	client     *http.Client
 	logMu      sync.Mutex
+
+	findingsSentThisRun int32
 }
+
+const findingCapCheckedKey = "_bp_finding_cap_checked"
 
 func (w *Webhook) Start() {
 	if w.URL == "" {
@@ -133,6 +139,9 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 		return
 	}
 	w.Start()
+	if eventType == "exploit.finding" && !payloadFindingCapChecked(payload) && !w.ShouldSendFinding() {
+		return
+	}
 	select {
 	case w.normalCh <- webhookEvent{Name: eventType, Payload: payload}:
 	default:
@@ -179,10 +188,65 @@ func (w *Webhook) sendNow(eventName string, job *models.Job) {
 func (w *Webhook) sendNowGeneric(eventName string, payload any) {
 	body := map[string]any{
 		"event":   eventName,
-		"payload": payload,
+		"payload": sanitizeGenericPayload(payload),
 		"ts":      time.Now().UTC().Format(time.RFC3339),
 	}
 	w.postJSON(body)
+}
+
+func (w *Webhook) ShouldSendFinding() bool {
+	if w == nil {
+		return false
+	}
+	if w.FindingsCap < 0 {
+		return false
+	}
+	if w.FindingsCap == 0 {
+		return true
+	}
+	for {
+		cur := atomic.LoadInt32(&w.findingsSentThisRun)
+		if int(cur) >= w.FindingsCap {
+			return false
+		}
+		if atomic.CompareAndSwapInt32(&w.findingsSentThisRun, cur, cur+1) {
+			return true
+		}
+	}
+}
+
+func (w *Webhook) FindingCap() int {
+	if w == nil {
+		return 0
+	}
+	if w.FindingsCap == 0 {
+		return 20
+	}
+	return w.FindingsCap
+}
+
+func payloadFindingCapChecked(payload any) bool {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	checked, _ := m[findingCapCheckedKey].(bool)
+	return checked
+}
+
+func sanitizeGenericPayload(payload any) any {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return payload
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(k, "_bp_") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func (w *Webhook) postJSON(body map[string]any) {

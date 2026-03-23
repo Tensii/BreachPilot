@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"breachpilot/internal/exploit/browsercapture"
 	"breachpilot/internal/models"
@@ -29,7 +30,7 @@ func TestRegistryIncludesNewModules(t *testing.T) {
 
 func TestNewModulesRegistered(t *testing.T) {
 	names := RegisteredModules()
-	for _, want := range []string{"lfi", "cmdinject", "rxss"} {
+	for _, want := range []string{"lfi", "cmdinject", "rxss", "hostheader", "hpp", "xxeinjection", "businesslogic"} {
 		found := false
 		for _, name := range names {
 			if name == want {
@@ -318,5 +319,31 @@ func TestLFIAndRXSSInExploitProfile(t *testing.T) {
 	}
 	if !strings.Contains(p.OnlyModules, "cmdinject") {
 		t.Fatalf("expected exploit profile to include cmdinject, got %s", p.OnlyModules)
+	}
+	if !strings.Contains(p.OnlyModules, "hostheader") || !strings.Contains(p.OnlyModules, "hpp") || !strings.Contains(p.OnlyModules, "xxeinjection") || !strings.Contains(p.OnlyModules, "businesslogic") {
+		t.Fatalf("expected exploit profile to include batch 2 modules, got %s", p.OnlyModules)
+	}
+}
+
+func TestReconCorpusMatchCountLargeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "urls.txt")
+	lines := make([]string, 0, 10000)
+	for i := 0; i < 10000; i++ {
+		line := "https://example.com/path"
+		if i < 500 {
+			line = "https://example.com/?id=1"
+		}
+		lines = append(lines, line)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	got := reconCorpusMatchCount(path, []string{"id="})
+	if got != 1 {
+		t.Fatalf("expected unique match count 1, got %d", got)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("expected scanner implementation to complete quickly, took %s", elapsed)
 	}
 }
