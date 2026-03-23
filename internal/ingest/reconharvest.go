@@ -54,6 +54,11 @@ func resolveReconSummaryPath(summaryDir, workdir, candidate string, requireExist
 	}
 
 	clean := filepath.Clean(p)
+	if st, err := os.Stat(clean); err == nil {
+		if !requireExisting || !st.IsDir() {
+			return clean
+		}
+	}
 	if clean == "." {
 		return summaryDir
 	}

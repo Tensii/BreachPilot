@@ -372,23 +372,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
 	})
 
-	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
-	if strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1") {
-		args = append(args, "-concurrency", "10")
-	} else {
-		args = append(args, "-c", "50", "-bs", "25")
-	}
-	if len(job.Templates) > 0 {
-		args = append(args, "-t", strings.Join(job.Templates, ","))
-	} else if job.SafeMode {
-		args = append(args, "-tags", "misconfig,exposure,tech")
-	} else {
-		args = append(args, "-severity", "medium,high,critical")
-	}
-
-	if opt.RateLimitRPS > 0 {
-		args = append(args, "-rl", strconv.Itoa(opt.RateLimitRPS))
-	}
+	args := buildNucleiExecutionArgs(job, nucleiInput, outJSONL, opt)
 
 	stOut, errOut := os.Stat(outJSONL)
 	if opt.SkipNuclei {
@@ -1280,6 +1264,27 @@ func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partia
 	}
 	if caps.Supports("--vhost-threads") {
 		args = append(args, "--vhost-threads", "80")
+	}
+	return args
+}
+
+func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL string, opt Options) []string {
+	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
+	if job != nil && (strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1")) {
+		args = append(args, "-concurrency", "10", "-max-host-error", "10")
+	} else {
+		args = append(args, "-c", "35", "-bs", "25", "-max-host-error", "35")
+	}
+	if job != nil && len(job.Templates) > 0 {
+		args = append(args, "-t", strings.Join(job.Templates, ","))
+	} else if job != nil && job.SafeMode {
+		args = append(args, "-tags", "misconfig,exposure,tech")
+	} else {
+		args = append(args, "-severity", "medium,high,critical")
+	}
+
+	if opt.RateLimitRPS > 0 {
+		args = append(args, "-rl", strconv.Itoa(opt.RateLimitRPS))
 	}
 	return args
 }

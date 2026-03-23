@@ -1,0 +1,56 @@
+package ingest
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"breachpilot/internal/models"
+)
+
+func TestNormalizeReconSummaryPathsPreservesExistingRepoRelativePaths(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(wd)
+	})
+
+	reconDir := filepath.Join("artifacts", "global.com", "4", "recon")
+	if err := os.MkdirAll(filepath.Join(reconDir, "intel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reconDir, "summary.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reconDir, "live_hosts.txt"), []byte("https://example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reconDir, "intel", "params_ranked.json"), []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rs := models.ReconSummary{
+		Workdir: "artifacts/global.com/4/recon",
+		Live:    "artifacts/global.com/4/recon/live_hosts.txt",
+	}
+	rs.Intel.ParamsRankedJSON = "artifacts/global.com/4/recon/intel/params_ranked.json"
+
+	NormalizeReconSummaryPaths(filepath.Join(reconDir, "summary.json"), &rs)
+
+	if got := filepath.ToSlash(rs.Workdir); got != "artifacts/global.com/4/recon" {
+		t.Fatalf("expected workdir to remain repo-relative, got %q", got)
+	}
+	if got := filepath.ToSlash(rs.Live); got != "artifacts/global.com/4/recon/live_hosts.txt" {
+		t.Fatalf("expected live_hosts path to remain repo-relative, got %q", got)
+	}
+	if got := filepath.ToSlash(rs.Intel.ParamsRankedJSON); got != "artifacts/global.com/4/recon/intel/params_ranked.json" {
+		t.Fatalf("expected intel path to remain repo-relative, got %q", got)
+	}
+}

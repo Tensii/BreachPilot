@@ -342,6 +342,39 @@ func TestBuildReconHarvestExecutionArgsOmitsUnsupportedOptionalFlags(t *testing.
 	}
 }
 
+func TestBuildNucleiExecutionArgsUsesSaneRemoteDefaults(t *testing.T) {
+	job := &models.Job{Target: "example.com", SafeMode: false}
+	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", Options{RateLimitRPS: 5})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-c 35") {
+		t.Fatalf("expected remote nuclei concurrency 35, got %v", args)
+	}
+	if !strings.Contains(joined, "-max-host-error 35") {
+		t.Fatalf("expected remote max-host-error 35, got %v", args)
+	}
+	if strings.Contains(joined, "-c 50") {
+		t.Fatalf("did not expect old remote concurrency, got %v", args)
+	}
+	if !strings.Contains(joined, "-rl 5") {
+		t.Fatalf("expected rate limit to be passed through, got %v", args)
+	}
+}
+
+func TestBuildNucleiExecutionArgsUsesLocalhostDefaults(t *testing.T) {
+	job := &models.Job{Target: "127.0.0.1", SafeMode: true}
+	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", Options{})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-concurrency 10") {
+		t.Fatalf("expected localhost concurrency 10, got %v", args)
+	}
+	if !strings.Contains(joined, "-max-host-error 10") {
+		t.Fatalf("expected localhost max-host-error 10, got %v", args)
+	}
+	if !strings.Contains(joined, "-tags misconfig,exposure,tech") {
+		t.Fatalf("expected safe-mode nuclei tags, got %v", args)
+	}
+}
+
 func TestProcessDoesNotEmitReconStartedWhenReconPreflightFails(t *testing.T) {
 	dir := t.TempDir()
 	job := &models.Job{ID: "preflight-fail", Target: "example.com", Mode: "full", SafeMode: true}
