@@ -21,6 +21,7 @@ import (
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/browsercapture"
 	"breachpilot/internal/exploit/filter"
+	"breachpilot/internal/exploit/httppolicy"
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
@@ -107,6 +108,10 @@ type Options struct {
 	ScanProfile                    string
 	MaxParallel                    int
 	RateLimitRPS                   int
+	HTTPJitterMS                   int
+	HTTPCircuitBreakerThreshold    int
+	HTTPCircuitBreakerCooldownMS   int
+	HTTPCircuitBreakerWait         bool
 	WebhookFindings                bool
 	WebhookModuleProgress          bool
 	WebhookFindingsMinSeverity     string
@@ -452,6 +457,14 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 
 	sharedState := exploit.NewSharedState()
+	httpRuntime := httppolicy.NewRuntime(httppolicy.Config{
+		RateLimitRPS:            opt.RateLimitRPS,
+		Jitter:                  time.Duration(opt.HTTPJitterMS) * time.Millisecond,
+		CircuitBreakerThreshold: opt.HTTPCircuitBreakerThreshold,
+		CircuitBreakerCooldown:  time.Duration(opt.HTTPCircuitBreakerCooldownMS) * time.Millisecond,
+		WaitOnCircuitOpen:       opt.HTTPCircuitBreakerWait,
+	})
+	defer httpRuntime.Close()
 	exploitOpt := exploit.Options{
 		ArtifactsRoot:                  opt.ArtifactsRoot,
 		Progress:                       opt.Progress,
@@ -484,6 +497,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		BrowserCaptureScrollSteps:      opt.BrowserCaptureScrollSteps,
 		BrowserCaptureMaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
 		BrowserCapturePath:             opt.BrowserCapturePath,
+		HTTPRuntime:                    httpRuntime,
 		SharedState:                    sharedState,
 		OOBProvider:                    oobProvider,
 	}
@@ -2546,6 +2560,10 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 			"validation_only":                     opt.ValidationOnly,
 			"report_formats":                      opt.ReportFormats,
 			"rate_limit_rps":                      opt.RateLimitRPS,
+			"http_jitter_ms":                      opt.HTTPJitterMS,
+			"http_circuit_breaker_threshold":      opt.HTTPCircuitBreakerThreshold,
+			"http_circuit_breaker_cooldown_ms":    opt.HTTPCircuitBreakerCooldownMS,
+			"http_circuit_breaker_wait":           opt.HTTPCircuitBreakerWait,
 			"module_timeout_sec":                  opt.ModuleTimeoutSec,
 			"module_retries":                      opt.ModuleRetries,
 			"aggressive_mode":                     opt.AggressiveMode,

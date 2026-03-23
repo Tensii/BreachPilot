@@ -56,6 +56,22 @@ func TestLoadMaxParallel(t *testing.T) {
 	}
 }
 
+func TestLoadHTTPTransportOptions(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_HTTP_JITTER_MS", "125")
+	_ = os.Setenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_THRESHOLD", "4")
+	_ = os.Setenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_COOLDOWN_MS", "2200")
+	_ = os.Setenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_WAIT", "true")
+	defer os.Unsetenv("BREACHPILOT_HTTP_JITTER_MS")
+	defer os.Unsetenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_THRESHOLD")
+	defer os.Unsetenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_COOLDOWN_MS")
+	defer os.Unsetenv("BREACHPILOT_HTTP_CIRCUIT_BREAKER_WAIT")
+
+	cfg := Load()
+	if cfg.HTTPJitterMS != 125 || cfg.HTTPCircuitBreakerThreshold != 4 || cfg.HTTPCircuitBreakerCooldownMS != 2200 || !cfg.HTTPCircuitBreakerWait {
+		t.Fatalf("http transport options did not load correctly: %+v", cfg)
+	}
+}
+
 func TestValidateRejectsNegativeMaxParallel(t *testing.T) {
 	cfg := Config{
 		NucleiBin:        "echo",
@@ -68,6 +84,21 @@ func TestValidateRejectsNegativeMaxParallel(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for negative max parallel")
+	}
+}
+
+func TestValidateRejectsNegativeHTTPJitter(t *testing.T) {
+	cfg := Config{
+		NucleiBin:        "echo",
+		WebhookRetries:   1,
+		ReconTimeoutSec:  1,
+		ReconRetries:     0,
+		NucleiTimeoutSec: 1,
+		ModuleTimeoutSec: 1,
+		HTTPJitterMS:     -1,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for negative http jitter")
 	}
 }
 
