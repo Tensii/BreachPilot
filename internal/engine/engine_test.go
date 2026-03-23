@@ -198,6 +198,9 @@ func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T)
 	if got := int(parsed.Config["max_parallel"].(float64)); got != 6 {
 		t.Fatalf("expected max_parallel=6, got %d", got)
 	}
+	if got := int(parsed.Config["http_max_inflight"].(float64)); got != 12 {
+		t.Fatalf("expected http_max_inflight=12, got %d", got)
+	}
 	if got := int(parsed.Config["module_timeout_sec"].(float64)); got != 900 {
 		t.Fatalf("expected module_timeout_sec=900, got %d", got)
 	}

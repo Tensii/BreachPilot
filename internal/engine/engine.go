@@ -484,12 +484,29 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 
 	sharedState := exploit.NewSharedState()
+	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
 	httpRuntime := httppolicy.NewRuntime(httppolicy.Config{
 		RateLimitRPS:            opt.RateLimitRPS,
+		MaxInFlight:             httpMaxInFlight,
 		Jitter:                  time.Duration(opt.HTTPJitterMS) * time.Millisecond,
 		CircuitBreakerThreshold: opt.HTTPCircuitBreakerThreshold,
 		CircuitBreakerCooldown:  time.Duration(opt.HTTPCircuitBreakerCooldownMS) * time.Millisecond,
 		WaitOnCircuitOpen:       opt.HTTPCircuitBreakerWait,
+		AdaptiveEvent: func(event httppolicy.AdaptiveEvent) {
+			emit(models.RuntimeEvent{
+				Kind:    "stage",
+				Stage:   "exploit.http",
+				Status:  "throttled",
+				Message: fmt.Sprintf("exploit.http adaptive throttle host=%s status=%d delay=%s", event.Host, event.StatusCode, event.Delay.Round(time.Millisecond)),
+				Target:  job.Target,
+				Counts: map[string]int{
+					"status_code":          event.StatusCode,
+					"adaptive_delay_ms":    int(event.Delay / time.Millisecond),
+					"previous_delay_ms":    int(event.PreviousDelay / time.Millisecond),
+					"retry_after_delay_ms": int(event.RetryAfterDelay / time.Millisecond),
+				},
+			})
+		},
 	})
 	defer httpRuntime.Close()
 	exploitOpt := exploit.Options{
@@ -2692,10 +2709,12 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 			"validation_only":                     opt.ValidationOnly,
 			"report_formats":                      opt.ReportFormats,
 			"rate_limit_rps":                      opt.RateLimitRPS,
+			"http_max_inflight":                   resolvedHTTPMaxInFlight(opt),
 			"http_jitter_ms":                      opt.HTTPJitterMS,
 			"http_circuit_breaker_threshold":      opt.HTTPCircuitBreakerThreshold,
 			"http_circuit_breaker_cooldown_ms":    opt.HTTPCircuitBreakerCooldownMS,
 			"http_circuit_breaker_wait":           opt.HTTPCircuitBreakerWait,
+			"http_adaptive_throttle":              true,
 			"module_timeout_sec":                  opt.ModuleTimeoutSec,
 			"module_retries":                      opt.ModuleRetries,
 			"aggressive_mode":                     opt.AggressiveMode,
@@ -2850,4 +2869,22 @@ func countLines(path string) (int, error) {
 		}
 	}
 	return n, s.Err()
+}
+
+func resolvedHTTPMaxInFlight(opt Options) int {
+	maxParallel := opt.MaxParallel
+	if maxParallel <= 0 {
+		maxParallel = exploit.DefaultMaxParallel
+	}
+	derived := maxParallel * 2
+	if opt.RateLimitRPS > 0 && opt.RateLimitRPS < derived {
+		derived = opt.RateLimitRPS
+	}
+	if derived < 2 {
+		derived = 2
+	}
+	if derived > 64 {
+		derived = 64
+	}
+	return derived
 }
