@@ -344,7 +344,7 @@ func TestBuildReconHarvestExecutionArgsOmitsUnsupportedOptionalFlags(t *testing.
 
 func TestBuildNucleiExecutionArgsUsesSaneRemoteDefaults(t *testing.T) {
 	job := &models.Job{Target: "example.com", SafeMode: false}
-	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", Options{RateLimitRPS: 5})
+	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", "/tmp/errors.jsonl", Options{RateLimitRPS: 5})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-c 35") {
 		t.Fatalf("expected remote nuclei concurrency 35, got %v", args)
@@ -358,11 +358,14 @@ func TestBuildNucleiExecutionArgsUsesSaneRemoteDefaults(t *testing.T) {
 	if !strings.Contains(joined, "-rl 5") {
 		t.Fatalf("expected rate limit to be passed through, got %v", args)
 	}
+	if !strings.Contains(joined, "-error-log /tmp/errors.jsonl") {
+		t.Fatalf("expected nuclei error log to be configured, got %v", args)
+	}
 }
 
 func TestBuildNucleiExecutionArgsUsesLocalhostDefaults(t *testing.T) {
 	job := &models.Job{Target: "127.0.0.1", SafeMode: true}
-	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", Options{})
+	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", "/tmp/errors.jsonl", Options{})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-concurrency 10") {
 		t.Fatalf("expected localhost concurrency 10, got %v", args)
@@ -372,6 +375,44 @@ func TestBuildNucleiExecutionArgsUsesLocalhostDefaults(t *testing.T) {
 	}
 	if !strings.Contains(joined, "-tags misconfig,exposure,tech") {
 		t.Fatalf("expected safe-mode nuclei tags, got %v", args)
+	}
+}
+
+func TestClassifyNucleiError(t *testing.T) {
+	cases := []struct {
+		name    string
+		errText string
+		kind    string
+		want    string
+	}{
+		{name: "timeout", errText: "context deadline exceeded", want: "timeout"},
+		{name: "tls", errText: "tls: failed handshake", want: "tls"},
+		{name: "dns", errText: "lookup api.example.com: no such host", want: "dns"},
+		{name: "refused", errText: "port closed or filtered", kind: "network-permanent-error", want: "refused"},
+		{name: "403", errText: "status code 403", want: "blocked_403"},
+		{name: "429", errText: "status code 429", want: "rate_429"},
+	}
+	for _, tc := range cases {
+		if got := classifyNucleiError(tc.errText, tc.kind, nil); got != tc.want {
+			t.Fatalf("%s: expected %q, got %q", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestFormatNucleiErrorSummary(t *testing.T) {
+	summary := formatNucleiErrorSummary(map[string]int{
+		"total":    12,
+		"timeout":  5,
+		"tls":      3,
+		"refused":  2,
+		"other":    2,
+		"http_5xx": 1,
+	})
+	if !strings.Contains(summary, "total=12") {
+		t.Fatalf("expected total in summary, got %q", summary)
+	}
+	if !strings.Contains(summary, "timeout=5") || !strings.Contains(summary, "tls=3") {
+		t.Fatalf("expected top categories in summary, got %q", summary)
 	}
 }
 

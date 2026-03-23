@@ -52,6 +52,13 @@ func TestCLIRuntimeTrackerRendersProgressAndCounts(t *testing.T) {
 			Target:     "https://example.com/admin",
 		},
 	})
+	tracker.Handle(models.RuntimeEvent{
+		Kind:    "stage",
+		Stage:   "exploit.errors",
+		Status:  "warning",
+		Message: "exploit.errors total=12 timeout=5 tls=3",
+		Counts:  map[string]int{"total": 12, "timeout": 5, "tls": 3},
+	})
 
 	out := buf.String()
 	if !strings.Contains(out, "[PROGRESS]") {
@@ -65,5 +72,8 @@ func TestCLIRuntimeTrackerRendersProgressAndCounts(t *testing.T) {
 	}
 	if !strings.Contains(out, "C/H/M=1/0/0") {
 		t.Fatalf("expected severity counts in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "nerr=total=12 timeout=5 tls=3") {
+		t.Fatalf("expected nuclei error summary in snapshot, got:\n%s", out)
 	}
 }

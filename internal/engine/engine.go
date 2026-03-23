@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	configpkg "breachpilot/internal/config"
@@ -341,6 +342,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return err
 	}
 	outJSONL := filepath.Join(artDir, "nuclei_findings.jsonl")
+	outErrors := filepath.Join(artDir, "nuclei_errors.jsonl")
 	outLog := filepath.Join(artDir, "nuclei.log")
 	job.EvidencePath = artDir
 
@@ -372,7 +374,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
 	})
 
-	args := buildNucleiExecutionArgs(job, nucleiInput, outJSONL, opt)
+	args := buildNucleiExecutionArgs(job, nucleiInput, outJSONL, outErrors, opt)
 
 	stOut, errOut := os.Stat(outJSONL)
 	if opt.SkipNuclei {
@@ -396,6 +398,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			return err
 		}
 		defer logFile.Close()
+		errorTracker := newNucleiErrorTracker(job.Target, opt.Events)
+		stopErrorTracker := errorTracker.start(nucleiCtx, outErrors)
+		defer stopErrorTracker()
 		nucleiPW := &progressWriter{stage: "exploit.log", target: job.Target, cb: opt.Progress, eventCB: opt.Events}
 		mw := io.MultiWriter(logFile, nucleiPW)
 		cmd.Stdout = mw
@@ -403,6 +408,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 		nucleiErr := cmd.Run()
 		nucleiPW.Flush()
+		stopErrorTracker()
 		if nucleiErr != nil {
 			job.ExploitDurationSec = time.Since(exploitStart).Seconds()
 			if ctx.Err() == context.Canceled {
@@ -1270,8 +1276,11 @@ func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partia
 	return args
 }
 
-func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL string, opt Options) []string {
+func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors string, opt Options) []string {
 	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
+	if strings.TrimSpace(outErrors) != "" {
+		args = append(args, "-error-log", outErrors)
+	}
 	if job != nil && (strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1")) {
 		args = append(args, "-concurrency", "10", "-max-host-error", "10")
 	} else {
@@ -1478,6 +1487,219 @@ func appendUniqueStrings(a, b []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+type nucleiErrorLogEntry struct {
+	Error string         `json:"error"`
+	Kind  string         `json:"kind"`
+	Attrs map[string]any `json:"attrs"`
+}
+
+type nucleiErrorTracker struct {
+	target      string
+	eventCB     func(models.RuntimeEvent)
+	mu          sync.Mutex
+	offset      int64
+	total       int
+	counts      map[string]int
+	lastEmitted string
+	stopOnce    sync.Once
+	stopped     chan struct{}
+}
+
+func newNucleiErrorTracker(target string, eventCB func(models.RuntimeEvent)) *nucleiErrorTracker {
+	return &nucleiErrorTracker{
+		target:  target,
+		eventCB: eventCB,
+		counts:  map[string]int{},
+		stopped: make(chan struct{}),
+	}
+}
+
+func (t *nucleiErrorTracker) start(ctx context.Context, path string) func() {
+	if t == nil || t.eventCB == nil || strings.TrimSpace(path) == "" {
+		return func() {}
+	}
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				t.consume(path)
+				t.emit()
+				return
+			case <-t.stopped:
+				t.consume(path)
+				t.emit()
+				return
+			case <-ticker.C:
+				t.consume(path)
+				t.emit()
+			}
+		}
+	}()
+	return func() {
+		t.stopOnce.Do(func() {
+			close(t.stopped)
+		})
+	}
+}
+
+func (t *nucleiErrorTracker) consume(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	t.mu.Lock()
+	offset := t.offset
+	t.mu.Unlock()
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return
+	}
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var consumed int64
+	updates := map[string]int{}
+	total := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		consumed += int64(len(scanner.Bytes())) + 1
+		if line == "" {
+			continue
+		}
+		category := classifyNucleiErrorLogLine(line)
+		updates[category]++
+		total++
+	}
+	if total == 0 {
+		t.mu.Lock()
+		t.offset = offset + consumed
+		t.mu.Unlock()
+		return
+	}
+
+	t.mu.Lock()
+	t.offset = offset + consumed
+	t.total += total
+	for k, v := range updates {
+		t.counts[k] += v
+	}
+	t.mu.Unlock()
+}
+
+func (t *nucleiErrorTracker) emit() {
+	if t == nil || t.eventCB == nil {
+		return
+	}
+	t.mu.Lock()
+	total := t.total
+	if total == 0 {
+		t.mu.Unlock()
+		return
+	}
+	counts := make(map[string]int, len(t.counts)+1)
+	for k, v := range t.counts {
+		counts[k] = v
+	}
+	counts["total"] = total
+	summary := formatNucleiErrorSummary(counts)
+	if summary == t.lastEmitted {
+		t.mu.Unlock()
+		return
+	}
+	t.lastEmitted = summary
+	t.mu.Unlock()
+
+	t.eventCB(models.RuntimeEvent{
+		Kind:      "stage",
+		Stage:     "exploit.errors",
+		Status:    "warning",
+		Message:   "exploit.errors " + summary,
+		Target:    t.target,
+		Timestamp: time.Now().UTC(),
+		Counts:    counts,
+	})
+}
+
+func classifyNucleiErrorLogLine(line string) string {
+	var entry nucleiErrorLogEntry
+	if err := json.Unmarshal([]byte(line), &entry); err == nil {
+		return classifyNucleiError(entry.Error, entry.Kind, entry.Attrs)
+	}
+	return classifyNucleiError(line, "", nil)
+}
+
+func classifyNucleiError(errText, kind string, attrs map[string]any) string {
+	combined := strings.ToLower(strings.TrimSpace(errText + " " + kind))
+	if attrs != nil {
+		if status, ok := attrs["status_code"]; ok {
+			combined += " status_code=" + fmt.Sprint(status)
+		}
+	}
+	switch {
+	case strings.Contains(combined, "429") || strings.Contains(combined, "too many requests"):
+		return "rate_429"
+	case strings.Contains(combined, "403") || strings.Contains(combined, "forbidden"):
+		return "blocked_403"
+	case strings.Contains(combined, "timeout") || strings.Contains(combined, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(combined, "tls") || strings.Contains(combined, "x509") || strings.Contains(combined, "certificate") || strings.Contains(combined, "handshake"):
+		return "tls"
+	case strings.Contains(combined, "no such host") || strings.Contains(combined, "temporary failure in name resolution") || strings.Contains(combined, "server misbehaving") || strings.Contains(combined, "lookup "):
+		return "dns"
+	case strings.Contains(combined, "connection refused") || strings.Contains(combined, "port closed or filtered"):
+		return "refused"
+	case strings.Contains(combined, "connection reset") || strings.Contains(combined, "reset by peer") || strings.Contains(combined, "broken pipe"):
+		return "reset"
+	case strings.Contains(combined, " eof") || strings.HasSuffix(combined, " eof") || strings.Contains(combined, "unexpected eof"):
+		return "eof"
+	case strings.Contains(combined, "status code 4"):
+		return "http_4xx"
+	case strings.Contains(combined, "status code 5"):
+		return "http_5xx"
+	case strings.Contains(combined, "network"):
+		return "network"
+	default:
+		return "other"
+	}
+}
+
+func formatNucleiErrorSummary(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "total=0"
+	}
+	total := counts["total"]
+	type pair struct {
+		key   string
+		value int
+	}
+	items := make([]pair, 0, len(counts))
+	for _, key := range []string{"timeout", "tls", "dns", "blocked_403", "rate_429", "refused", "reset", "eof", "http_4xx", "http_5xx", "network", "other"} {
+		if counts[key] > 0 {
+			items = append(items, pair{key: key, value: counts[key]})
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].value == items[j].value {
+			return items[i].key < items[j].key
+		}
+		return items[i].value > items[j].value
+	})
+	parts := []string{fmt.Sprintf("total=%d", total)}
+	for i, item := range items {
+		if i >= 5 {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", item.key, item.value))
+	}
+	return strings.Join(parts, " ")
 }
 
 func writeJobReport(job *models.Job, artifactsRoot string) error {

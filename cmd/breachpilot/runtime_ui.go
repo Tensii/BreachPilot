@@ -16,16 +16,17 @@ type moduleRuntimeState struct {
 }
 
 type cliRuntimeTracker struct {
-	out             io.Writer
-	startedAt       time.Time
-	currentStage    string
-	totalModules    int
-	moduleStates    map[string]moduleRuntimeState
-	totalFindings   int
-	severityCounts  map[string]int
-	recentFindings  []models.FindingPreview
-	lastProgress    *models.RuntimeProgress
-	lastStageDetail string
+	out              io.Writer
+	startedAt        time.Time
+	currentStage     string
+	totalModules     int
+	moduleStates     map[string]moduleRuntimeState
+	totalFindings    int
+	severityCounts   map[string]int
+	recentFindings   []models.FindingPreview
+	lastProgress     *models.RuntimeProgress
+	lastStageDetail  string
+	lastErrorSummary string
 }
 
 func newCLIRuntimeTracker(out io.Writer) *cliRuntimeTracker {
@@ -75,6 +76,9 @@ func (t *cliRuntimeTracker) handleStage(ev models.RuntimeEvent) {
 	}
 	if strings.TrimSpace(ev.Message) != "" {
 		t.lastStageDetail = ev.Message
+	}
+	if ev.Stage == "exploit.errors" {
+		t.lastErrorSummary = strings.TrimSpace(strings.TrimPrefix(ev.Message, "exploit.errors"))
 	}
 	fmt.Fprintln(t.out, renderRuntimeStage(ev, t.snapshot()))
 }
@@ -162,6 +166,9 @@ func (t *cliRuntimeTracker) snapshot() string {
 	}
 	if t.lastProgress != nil {
 		parts = append(parts, "progress="+formatRuntimeProgress(*t.lastProgress))
+	}
+	if t.lastErrorSummary != "" {
+		parts = append(parts, "nerr="+t.lastErrorSummary)
 	}
 	if len(activeModules) > 0 {
 		sort.Strings(activeModules)
