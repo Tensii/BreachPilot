@@ -492,6 +492,7 @@ func TestBuildRankedNucleiInputSkipsNonURLTokens(t *testing.T) {
 		{"url":"login"},
 		{"url":"https://example.com/login"},
 		{"url":"http://api.example.com/v1"},
+		{"url":"https://example.com/admin"},
 		{"url":"/guest_auth/guestIsUp.php"},
 		{"url":"https://example.com/login"}
 	]}`
@@ -501,14 +502,14 @@ func TestBuildRankedNucleiInputSkipsNonURLTokens(t *testing.T) {
 
 	out, count := buildRankedNucleiInput(path, dir)
 	if count != 2 {
-		t.Fatalf("expected only 2 absolute URLs, got %d", count)
+		t.Fatalf("expected only 2 unique URL origins, got %d", count)
 	}
 	b, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.TrimSpace(string(b))
-	want := "https://example.com/login\nhttp://api.example.com/v1"
+	want := "https://example.com\nhttp://api.example.com"
 	if got != want {
 		t.Fatalf("unexpected ranked nuclei input:\nwant:\n%s\n\ngot:\n%s", want, got)
 	}

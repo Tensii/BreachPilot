@@ -1342,6 +1342,8 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 		if strings.TrimSpace(parsed.Host) == "" {
 			return
 		}
+		normalized := parsed.Scheme + "://" + parsed.Host
+		u = normalized
 		if _, ok := seen[u]; ok {
 			return
 		}
