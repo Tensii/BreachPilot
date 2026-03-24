@@ -661,14 +661,15 @@ func verifyManifestEntry(manifestPath, targetPath string) error {
 	if err != nil {
 		return err
 	}
-	targetPath = filepath.Clean(strings.TrimSpace(targetPath))
+	targetPath, _ = filepath.Abs(filepath.Clean(strings.TrimSpace(targetPath)))
 	for _, f := range m.Files {
-		if filepath.Clean(strings.TrimSpace(f.Path)) != targetPath {
+		fPath, _ := filepath.Abs(filepath.Clean(strings.TrimSpace(f.Path)))
+		if fPath != targetPath {
 			continue
 		}
-		raw, err := os.ReadFile(f.Path)
+		raw, err := os.ReadFile(fPath)
 		if err != nil {
-			return fmt.Errorf("missing file in manifest: %s", f.Path)
+			return fmt.Errorf("missing file in manifest: %s", fPath)
 		}
 		h := sha256.Sum256(raw)
 		if hex.EncodeToString(h[:]) != f.SHA256 {
@@ -844,7 +845,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%s nuclei_timeout=%s\n", green, reset, cfg.NucleiBin, reconTimeoutLabel, nucleiTimeoutLabel)
 	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
 	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s validation_only=%t aggressive=%t boundless=%t proof_mode=%t skip_nuclei=%t only_modules=%s skip_modules=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.BoundlessMode, cfg.ProofMode, cfg.SkipNuclei, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s[FLAGS   ]%s val=%t agg=%t bound=%t proof=%t skip_n=%t bc=%t only=%s skip=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.BoundlessMode, cfg.ProofMode, cfg.SkipNuclei, cfg.BrowserCaptureEnabled, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
 	fmt.Printf("%s[ENGINE  ]%s default exploit lane=exploit-core context_modules=explicit-only|validation_only|deep\n", gray, reset)
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
