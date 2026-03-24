@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1329,6 +1330,16 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 	appendURL := func(v string) {
 		u := strings.TrimSpace(v)
 		if u == "" {
+			return
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || parsed == nil {
+			return
+		}
+		if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+			return
+		}
+		if strings.TrimSpace(parsed.Host) == "" {
 			return
 		}
 		if _, ok := seen[u]; ok {

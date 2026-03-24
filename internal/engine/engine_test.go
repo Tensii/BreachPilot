@@ -484,6 +484,36 @@ func TestFormatNucleiErrorSummary(t *testing.T) {
 	}
 }
 
+func TestBuildRankedNucleiInputSkipsNonURLTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "endpoints_ranked.json")
+	raw := `{"items":[
+		{"url":"redirect"},
+		{"url":"login"},
+		{"url":"https://example.com/login"},
+		{"url":"http://api.example.com/v1"},
+		{"url":"/guest_auth/guestIsUp.php"},
+		{"url":"https://example.com/login"}
+	]}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, count := buildRankedNucleiInput(path, dir)
+	if count != 2 {
+		t.Fatalf("expected only 2 absolute URLs, got %d", count)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(b))
+	want := "https://example.com/login\nhttp://api.example.com/v1"
+	if got != want {
+		t.Fatalf("unexpected ranked nuclei input:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestProcessDoesNotEmitReconStartedWhenReconPreflightFails(t *testing.T) {
 	dir := t.TempDir()
 	job := &models.Job{ID: "preflight-fail", Target: "example.com", Mode: "full", SafeMode: true}
