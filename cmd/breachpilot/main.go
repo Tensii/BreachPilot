@@ -102,6 +102,28 @@ func main() {
 			skipNucleiFlag = true
 			continue
 		}
+		if n == "--browser-capture" {
+			cfg.BrowserCaptureEnabled = true
+			continue
+		}
+		if n == "--only-modules" {
+			if i+1 < len(args) {
+				cfg.OnlyModules = args[i+1]
+				i++
+				continue
+			} else {
+				log.Fatal("missing module list for --only-modules flag")
+			}
+		}
+		if n == "--skip-modules" {
+			if i+1 < len(args) {
+				cfg.SkipModules = args[i+1]
+				i++
+				continue
+			} else {
+				log.Fatal("missing module list for --skip-modules flag")
+			}
+		}
 		if n == "-l" || n == "--list" {
 			if i+1 < len(args) {
 				listFile = args[i+1]

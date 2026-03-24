@@ -2173,6 +2173,7 @@ func registeredModuleInfos() []ModuleInfo {
 		{"saml-probe", "Detects SAML/SSO vulnerabilities and misconfigurations", true, "exploit-core"},
 		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true, "exploit-core"},
 		{"idor-size", "Response size-based IDOR detection", true, "exploit-core"},
+		{"idor_engine", "Dual-user automated IDOR detection engine", true, "exploit-core"},
 	}
 }
 

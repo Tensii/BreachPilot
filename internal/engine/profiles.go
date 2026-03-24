@@ -25,7 +25,7 @@ var profiles = map[string]ScanProfile{
 	"exploit": {
 		Name:        "exploit",
 		Description: "Exploit-focused scan with proof-oriented modules",
-		OnlyModules: "auth-bypass,session-abuse,idor-playbook,idor-size,ssrf-prober,advanced-injection,mutation-engine,jwt-access,graphql-abuse,state-change,upload-abuse,open-redirect,lfi,cmdinject,rxss,hostheader,hpp,xxeinjection,businesslogic",
+		OnlyModules: "autoregister,idor_engine,auth-bypass,session-abuse,idor-playbook,idor-size,ssrf-prober,advanced-injection,mutation-engine,jwt-access,graphql-abuse,state-change,upload-abuse,open-redirect,lfi,cmdinject,rxss,hostheader,hpp,xxeinjection,businesslogic",
 		MaxParallel: 3,
 	},
 	"deep": {
