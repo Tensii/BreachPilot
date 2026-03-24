@@ -29,6 +29,7 @@ import (
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
+	autoregister "breachpilot/internal/exploit/modules/autoregister"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
 	businesslogic "breachpilot/internal/exploit/modules/businesslogic"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
@@ -2131,6 +2132,7 @@ type browserWorkflowSignals struct {
 
 func registeredModuleInfos() []ModuleInfo {
 	return []ModuleInfo{
+		{"autoregister", "Automatically registers a new user via headless browser", true, "exploit-core"},
 		{"security-headers", "Detects missing/weak security headers", true, "context"},
 		{"open-redirect", "Detects potential open redirect vectors", true, "exploit-core"},
 		{"info-disclosure", "Probes common exposed files/endpoints", true, "exploit-core"},
@@ -2183,6 +2185,7 @@ func RegisteredModuleInfos() []ModuleInfo {
 
 func registeredExploitCoreModuleInstances() []exploit.Module {
 	return []exploit.Module{
+		autoregister.New(),
 		openredirect.New(),
 		infodisclosure.New(),
 		cors.New(),
