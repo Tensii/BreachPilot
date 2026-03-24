@@ -65,6 +65,10 @@ func resolveReconSummaryPath(summaryDir, workdir, candidate string, requireExist
 	if filepath.Base(summaryDir) == clean {
 		return summaryDir
 	}
+	parentDir := filepath.Dir(summaryDir)
+	if parentDir != "" && parentDir != "." && filepath.Base(parentDir) == clean {
+		return parentDir
+	}
 
 	tryPaths := make([]string, 0, 5)
 	if workdir != "" {
@@ -77,7 +81,6 @@ func resolveReconSummaryPath(summaryDir, workdir, candidate string, requireExist
 	if prefix := filepath.Base(summaryDir) + string(filepath.Separator); strings.HasPrefix(clean, prefix) {
 		tryPaths = append(tryPaths, filepath.Join(summaryDir, strings.TrimPrefix(clean, prefix)))
 	}
-	parentDir := filepath.Dir(summaryDir)
 	if parentDir != "" && parentDir != "." {
 		tryPaths = append(tryPaths, filepath.Join(parentDir, clean))
 	}

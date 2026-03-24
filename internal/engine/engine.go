@@ -1227,23 +1227,38 @@ func existingReconSummaryPath(reconDir string) string {
 	if st, err := os.Stat(summaryPath); err == nil && st.Size() > 0 {
 		return summaryPath
 	}
+	if workdir := findPartialReconWorkdir(reconDir); workdir != "" {
+		summaryPath = filepath.Join(workdir, "summary.json")
+		if st, err := os.Stat(summaryPath); err == nil && st.Size() > 0 {
+			return summaryPath
+		}
+	}
 	return findSummaryJSON(reconDir)
 }
 
 // findSummaryJSON walks reconDir looking for any summary.json file.
 func findSummaryJSON(reconDir string) string {
-	var found string
+	var preferred string
+	var fallback string
 	_ = filepath.Walk(reconDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
 		if !info.IsDir() && info.Name() == "summary.json" && info.Size() > 0 {
-			found = path
-			return filepath.SkipAll
+			if !strings.Contains(filepath.ToSlash(path), "/reports/") {
+				preferred = path
+				return filepath.SkipAll
+			}
+			if fallback == "" {
+				fallback = path
+			}
 		}
 		return nil
 	})
-	return found
+	if preferred != "" {
+		return preferred
+	}
+	return fallback
 }
 
 func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partial bool, caps configpkg.ReconHarvestCapabilities) []string {
