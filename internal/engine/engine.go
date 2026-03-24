@@ -1349,10 +1349,17 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 		if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
 			return
 		}
-		if strings.TrimSpace(parsed.Host) == "" {
+		host := strings.TrimSpace(parsed.Hostname())
+		if host == "" {
 			return
 		}
-		normalized := parsed.Scheme + "://" + parsed.Host
+		scheme := strings.ToLower(parsed.Scheme)
+		port := parsed.Port()
+		defaultPort := (scheme == "http" && port == "80") || (scheme == "https" && port == "443")
+		normalized := scheme + "://" + host
+		if port != "" && !defaultPort {
+			normalized += ":" + port
+		}
 		u = normalized
 		if _, ok := seen[u]; ok {
 			return
@@ -1394,9 +1401,58 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 	if len(items) == 0 {
 		return "", 0
 	}
+	items = collapseNucleiTargets(items)
 	out := filepath.Join(artDir, "nuclei_targets_ranked.txt")
 	_ = os.WriteFile(out, []byte(strings.Join(items, "\n")+"\n"), 0o644)
 	return out, len(items)
+}
+
+func collapseNucleiTargets(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	originsByBase := make(map[string][]string)
+	order := make([]string, 0, len(items))
+	for _, item := range items {
+		parsed, err := url.Parse(strings.TrimSpace(item))
+		if err != nil || parsed == nil {
+			continue
+		}
+		host := strings.TrimSpace(parsed.Hostname())
+		if host == "" {
+			continue
+		}
+		base := strings.ToLower(parsed.Scheme) + "://" + host
+		if _, ok := originsByBase[base]; !ok {
+			order = append(order, base)
+		}
+		originsByBase[base] = append(originsByBase[base], item)
+	}
+
+	out := make([]string, 0, len(originsByBase))
+	for _, base := range order {
+		candidates := originsByBase[base]
+		keepBase := false
+		fallbacks := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			parsed, err := url.Parse(candidate)
+			if err != nil || parsed == nil {
+				continue
+			}
+			port := parsed.Port()
+			if port == "" || (parsed.Scheme == "http" && port == "80") || (parsed.Scheme == "https" && port == "443") {
+				keepBase = true
+				break
+			}
+			fallbacks = append(fallbacks, candidate)
+		}
+		if keepBase {
+			out = append(out, base)
+			continue
+		}
+		out = append(out, fallbacks...)
+	}
+	return out
 }
 
 func writeExploitFindingsJSONL(findings []models.ExploitFinding, artDir string, job *models.Job) error {

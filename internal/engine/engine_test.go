@@ -498,6 +498,7 @@ func TestBuildRankedNucleiInputSkipsNonURLTokens(t *testing.T) {
 		{"url":"login"},
 		{"url":"https://example.com/login"},
 		{"url":"http://api.example.com/v1"},
+		{"url":"https://example.com:8443/admin"},
 		{"url":"https://example.com/admin"},
 		{"url":"/guest_auth/guestIsUp.php"},
 		{"url":"https://example.com/login"}
