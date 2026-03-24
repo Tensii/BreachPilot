@@ -414,6 +414,9 @@ func TestBuildNucleiExecutionArgsUsesSaneRemoteDefaults(t *testing.T) {
 	job := &models.Job{Target: "example.com", SafeMode: false}
 	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", "/tmp/errors.jsonl", Options{RateLimitRPS: 5})
 	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-timeout 10") {
+		t.Fatalf("expected remote nuclei request timeout 10s, got %v", args)
+	}
 	if !strings.Contains(joined, "-c 35") {
 		t.Fatalf("expected remote nuclei concurrency 35, got %v", args)
 	}
@@ -435,6 +438,9 @@ func TestBuildNucleiExecutionArgsUsesLocalhostDefaults(t *testing.T) {
 	job := &models.Job{Target: "127.0.0.1", SafeMode: true}
 	args := buildNucleiExecutionArgs(job, "/tmp/targets.txt", "/tmp/out.jsonl", "/tmp/errors.jsonl", Options{})
 	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-timeout 5") {
+		t.Fatalf("expected localhost nuclei request timeout 5s, got %v", args)
+	}
 	if !strings.Contains(joined, "-concurrency 10") {
 		t.Fatalf("expected localhost concurrency 10, got %v", args)
 	}

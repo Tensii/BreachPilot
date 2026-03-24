@@ -1289,7 +1289,7 @@ func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partia
 }
 
 func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors string, opt Options) []string {
-	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", "5"}
+	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", strconv.Itoa(defaultNucleiRequestTimeoutSec(job))}
 	if strings.TrimSpace(outErrors) != "" {
 		args = append(args, "-error-log", outErrors)
 	}
@@ -1310,6 +1310,16 @@ func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors 
 		args = append(args, "-rl", strconv.Itoa(opt.RateLimitRPS))
 	}
 	return args
+}
+
+func defaultNucleiRequestTimeoutSec(job *models.Job) int {
+	if job != nil {
+		target := strings.ToLower(strings.TrimSpace(job.Target))
+		if strings.Contains(target, "localhost") || strings.Contains(target, "127.0.0.1") {
+			return 5
+		}
+	}
+	return 10
 }
 
 func buildRankedNucleiInput(path string, artDir string) (string, int) {
