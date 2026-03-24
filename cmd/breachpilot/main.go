@@ -81,8 +81,10 @@ func main() {
 		_ = os.Setenv("BREACHPILOT_BROWSER_PATH", cfg.BrowserCapturePath)
 		_ = os.Setenv("BREACHPILOT_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
 	}
+	listFile := ""
 	filtered := make([]string, 0, len(args))
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		n := strings.ToLower(strings.TrimSpace(a))
 		if n == "--json" || n == "json" {
 			jsonOut = true
@@ -99,6 +101,15 @@ func main() {
 		if n == "--skip-nuclei" {
 			skipNucleiFlag = true
 			continue
+		}
+		if n == "-l" || n == "--list" {
+			if i+1 < len(args) {
+				listFile = args[i+1]
+				i++
+				continue
+			} else {
+				log.Fatal("missing file path for -l/--list flag")
+			}
 		}
 		filtered = append(filtered, a)
 	}
@@ -142,7 +153,7 @@ func main() {
 		return
 	}
 
-	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut); err != nil {
+	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut, listFile); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -203,120 +214,198 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 	}
 }
 
-func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
-	if len(args) == 0 {
+func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool, listFile string) error {
+	if len(args) == 0 && listFile == "" {
 		return fmt.Errorf("missing mode. Use: full <target> OR file <summary.json>")
 	}
-	mode := strings.ToLower(strings.TrimSpace(args[0]))
-	if mode != "full" && mode != "file" {
-		return fmt.Errorf("unknown mode %q. Use: full <target> OR file <summary.json>", mode)
-	}
-	if len(args) < 2 {
-		if mode == "file" {
-			return fmt.Errorf("missing summary path. Use: breachpilot file <summary.json>")
-		}
-		return fmt.Errorf("missing target. Use: breachpilot full <target>")
+
+	mode := ""
+	if len(args) > 0 {
+		mode = strings.ToLower(strings.TrimSpace(args[0]))
 	}
 
-	target := ""
-	if mode == "full" {
-		target = strings.TrimSpace(args[1])
+	targets := []string{}
+	if listFile != "" {
+		// When -l is used, mode must be 'full'
+		if mode != "full" {
+			// Also handle case where mode is not provided but -l is
+			if mode == "" && len(args) == 0 {
+				mode = "full" // Default to full mode if only -l is present
+			} else {
+				return fmt.Errorf("-l/--list is only supported in 'full' mode")
+			}
+		}
+		var err error
+		targets, err = parseTargetsFile(listFile)
+		if err != nil {
+			return err
+		}
+	} else {
+		if mode != "full" && mode != "file" {
+			return fmt.Errorf("unknown mode %q. Use: full <target> OR file <summary.json>", mode)
+		}
+		if len(args) < 2 {
+			if mode == "file" {
+				return fmt.Errorf("missing summary path. Use: breachpilot file <summary.json>")
+			}
+			return fmt.Errorf("missing target. Use: breachpilot full <target>")
+		}
+		targets = append(targets, strings.TrimSpace(args[1]))
 	}
 
-	var reconPath string
-	if mode == "file" {
-		reconPath = strings.TrimSpace(args[1])
-		if reconPath == "" {
-			return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
+	for _, target := range targets {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
-		if strings.Contains(filepath.ToSlash(reconPath), "/recon/reports/summary.json") {
-			return fmt.Errorf("invalid summary path for file mode: %s (use recon/summary.json, not recon/reports/summary.json)", reconPath)
-		}
-		if _, err := os.Stat(reconPath); err != nil {
-			return fmt.Errorf("summary path not accessible: %w", err)
-		}
-		if filepath.Base(reconPath) == ".breachpilot.state" {
-			return fmt.Errorf("invalid summary path: file is a state checkpoint. Use: breachpilot resume %s", reconPath)
-		}
-		if err := validateArtifactManifestEntryForPath(reconPath); err != nil {
-			return fmt.Errorf("artifact integrity validation failed: %w", err)
-		}
-		// Derive target from summary for directory naming
-		if target == "" {
+
+		var reconPath string
+		currentMode := mode
+		if currentMode == "file" {
+			reconPath = target
+			if reconPath == "" {
+				return fmt.Errorf("file mode requires summary path: breachpilot file <summary.json>")
+			}
+			if strings.Contains(filepath.ToSlash(reconPath), "/recon/reports/summary.json") {
+				return fmt.Errorf("invalid summary path for file mode: %s (use recon/summary.json, not recon/reports/summary.json)", reconPath)
+			}
+			if _, err := os.Stat(reconPath); err != nil {
+				return fmt.Errorf("summary path not accessible: %w", err)
+			}
+			if filepath.Base(reconPath) == ".breachpilot.state" {
+				return fmt.Errorf("invalid summary path: file is a state checkpoint. Use: breachpilot resume %s", reconPath)
+			}
+			if err := validateArtifactManifestEntryForPath(reconPath); err != nil {
+				return fmt.Errorf("artifact integrity validation failed: %w", err)
+			}
+
+			// Derive target from summary for directory naming
+			derivedTarget := ""
 			if rs, err := ingest.LoadReconSummary(reconPath); err == nil {
 				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
-					target = guessed
+					derivedTarget = guessed
 				}
 			}
-			if target == "" {
-				target = "from-summary"
+			if derivedTarget == "" {
+				derivedTarget = "from-summary"
 			}
+			target = derivedTarget
+			currentMode = "ingest"
 		}
-		mode = "ingest"
-	}
 
-	jobID := nextRunID(opt.ArtifactsRoot, target)
-	job := &models.Job{
-		ID:        jobID,
-		Target:    target,
-		Mode:      mode,
-		ReconPath: reconPath,
-		SafeMode:  !opt.AggressiveMode,
-		Status:    models.JobQueued,
-		CreatedAt: time.Now().UTC(),
-	}
+		jobID := nextRunID(opt.ArtifactsRoot, target)
+		job := &models.Job{
+			ID:        jobID,
+			Target:    target,
+			Mode:      currentMode,
+			ReconPath: reconPath,
+			SafeMode:  !opt.AggressiveMode,
+			Status:    models.JobQueued,
+			CreatedAt: time.Now().UTC(),
+		}
 
-	cliOpt := opt
-	cliOpt.Progress = nil
-	cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
+		cliOpt := opt
+		cliOpt.Progress = nil
+		cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
 
-	if mode != "full" {
-		nf.Send("job.started", job)
-	}
-	if err := engine.Process(ctx, job, cliOpt); err != nil {
-		job.Status = models.JobFailed
-		job.Error = err.Error()
-		nf.Send("job.failed", job)
-		return err
-	}
+		if currentMode != "full" {
+			nf.Send("job.started", job)
+		}
 
-	switch job.Status {
-	case models.JobRejected:
-		nf.Send("job.rejected", job)
+		if len(targets) > 1 && !jsonOut {
+			fmt.Printf("\x1b[34m[BATCH] Processing target: %s (%s)\x1b[0m\n", target, jobID)
+		}
+
+		if err := engine.Process(ctx, job, cliOpt); err != nil {
+			job.Status = models.JobFailed
+			job.Error = err.Error()
+			nf.Send("job.failed", job)
+			if len(targets) > 1 {
+				fmt.Printf("\x1b[31m[BATCH] Target %s failed: %v\x1b[0m\n", target, err)
+				continue // move to next target in batch
+			}
+			return err
+		}
+
+		switch job.Status {
+		case models.JobRejected:
+			nf.Send("job.rejected", job)
+			if jsonOut {
+				_ = printJobJSON(job)
+			} else {
+				fmt.Printf("\x1b[31m[✗] JOB REJECTED\x1b[0m %s\n", job.Error)
+			}
+		case models.JobCancelled:
+			nf.Send("job.cancelled", job)
+			if strings.EqualFold(job.Mode, "full") {
+				rf.Send("job.cancelled", job)
+			}
+			if jsonOut {
+				_ = printJobJSON(job)
+			} else {
+				fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
+			}
+			return nil // User cancelled, stop batch
+		case models.JobFailed:
+			nf.Send("job.failed", job)
+			if jsonOut {
+				_ = printJobJSON(job)
+			} else {
+				fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
+			}
+		default:
+			nf.Send("job.completed", job)
+		}
+
 		if jsonOut {
-			return printJobJSON(job)
+			_ = printJobJSON(job)
+		} else {
+			for _, ln := range formatCLISummary(job, currentMode) {
+				fmt.Println(ln)
+			}
+			fmt.Println(strings.Repeat("-", 80))
 		}
-		fmt.Printf("\x1b[31m[✗] JOB REJECTED\x1b[0m %s\n", job.Error)
-		return nil
-	case models.JobCancelled:
-		nf.Send("job.cancelled", job)
-		if strings.EqualFold(job.Mode, "full") {
-			rf.Send("job.cancelled", job)
-		}
-		if jsonOut {
-			return printJobJSON(job)
-		}
-		fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
-		return nil
-	case models.JobFailed:
-		nf.Send("job.failed", job)
-		if jsonOut {
-			return printJobJSON(job)
-		}
-		fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
-		return nil
-	default:
-		nf.Send("job.completed", job)
 	}
 
-	if jsonOut {
-		return printJobJSON(job)
-	}
-	for _, ln := range formatCLISummary(job, mode) {
-		fmt.Println(ln)
-	}
 	return nil
 }
+
+func parseTargetsFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read targets file: %w", err)
+	}
+
+	targets := []string{}
+	// Replacer for common separators
+	replacer := strings.NewReplacer(",", " ", ";", " ")
+
+	for _, line := range strings.Split(string(data), "\n") {
+		// Strip comments first
+		lineBeforeComment, _, _ := strings.Cut(line, "#")
+
+		// Ignore empty lines
+		trimmedLine := strings.TrimSpace(lineBeforeComment)
+		if trimmedLine == "" {
+			continue
+		}
+
+		// Replace separators with spaces, then split by any whitespace
+		lineWithSpaces := replacer.Replace(trimmedLine)
+		for _, item := range strings.Fields(lineWithSpaces) {
+			t := strings.TrimSpace(item)
+			if t != "" {
+				targets = append(targets, t)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no targets found in %s", path)
+	}
+	return targets, nil
+}
+
 
 func formatCLISummary(job *models.Job, mode string) []string {
 	if job == nil {
@@ -783,6 +872,7 @@ func printUsage() {
 	fmt.Println(`Usage:
 	  breachpilot setup
 		  breachpilot full <target> [json] [aggressive] [boundless]
+		  breachpilot -l <targets.txt> full [json] [aggressive] [boundless]
 		  breachpilot file <summary.json> [json] [aggressive] [boundless]
 		  breachpilot resume <path/to/.breachpilot.state> [json] [aggressive] [boundless]
 	  breachpilot list-modules
@@ -790,6 +880,7 @@ func printUsage() {
 
 	Examples:
 		  breachpilot full example.com aggressive
+		  breachpilot -l domains.txt full aggressive
 		  breachpilot full example.com aggressive boundless
 		  breachpilot aggressive full example.com
 		  breachpilot file recon/summary.json aggressive boundless

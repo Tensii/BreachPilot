@@ -54,13 +54,15 @@ func resolveReconSummaryPath(summaryDir, workdir, candidate string, requireExist
 	}
 
 	clean := filepath.Clean(p)
-	if st, err := os.Stat(clean); err == nil {
-		if !requireExisting || !st.IsDir() {
-			return clean
-		}
-	}
-	if clean == "." {
+	if clean == "." || clean == summaryDir {
 		return summaryDir
+	}
+
+	// If clean is already a full relative path from repo root that
+	// points to the same underlying file as summaryDir/clean would,
+	// or if it's already "inside" summaryDir, don't double-prefix it.
+	if !filepath.IsAbs(clean) && strings.HasPrefix(filepath.ToSlash(clean), filepath.ToSlash(summaryDir)) {
+		return clean
 	}
 	if filepath.Base(summaryDir) == clean {
 		return summaryDir

@@ -2527,6 +2527,9 @@ class Runner:
             log(f"[*] secrets: downloaded {downloaded}/{len(js_urls[:self.config.secrets_js_cap])} JS files ({len(js_urls[:self.config.secrets_js_cap]) - downloaded} skipped)")
 
             seen_values: set[str] = set()
+            js_endpoints_data: list[dict] = []
+            seen_endpoints: set[str] = set()
+
             for fp in sorted(tmp_dir.glob("*.js")):
                 try:
                     with fp.open("r", encoding="utf-8", errors="ignore") as f:
@@ -2541,7 +2544,14 @@ class Runner:
                                         findings.append(f"{fp.name}:{i}: {display}")
                                     break
                             for m in _RX_JS_PATH.finditer(line_s):
-                                js_endpoints.add(m.group(1))
+                                path = m.group(1)
+                                if path not in seen_endpoints:
+                                    seen_endpoints.add(path)
+                                    js_endpoints_data.append({
+                                        "url": path,
+                                        "source": fp.name,
+                                        "params": []
+                                    })
                             for m in _RX_BUCKET_HOST.finditer(line_s):
                                 buckets.add(m.group(1))
                             for m in _RX_BUCKET_URI.finditer(line_s):
@@ -2551,10 +2561,12 @@ class Runner:
 
             quick_hits_file.write_text("\n".join(findings) + ("\n" if findings else ""), encoding="utf-8")
             buckets_file.write_text("\n".join(sorted(buckets)) + ("\n" if buckets else ""), encoding="utf-8")
-            if js_endpoints:
-                ep_file = intel / "secrets_js_endpoints.txt"
-                ep_file.write_text("\n".join(sorted(js_endpoints)) + "\n", encoding="utf-8")
-                log(f"[*] secrets: extracted {len(js_endpoints)} JS endpoint paths → {ep_file}")
+            if js_endpoints_data:
+                ep_json = intel / "js_endpoints.json"
+                self.write_json(ep_json, js_endpoints_data)
+                ep_txt = intel / "secrets_js_endpoints.txt"
+                ep_txt.write_text("\n".join(sorted([it["url"] for it in js_endpoints_data])) + "\n", encoding="utf-8")
+                log(f"[*] secrets: extracted {len(js_endpoints_data)} JS endpoint paths → {ep_json}")
 
             if not js_urls:
                 report_md, report_json = self._build_secrets_report(downloaded=0, attempted=0, quick_hits_count=len(findings), buckets_count=len(buckets))
@@ -2858,6 +2870,10 @@ class Runner:
                 "secrets_findings_json": str(self.intel / "secrets_findings.json"),
                 "portscan_results_json": str(self.workdir / "portscan_results.json"),
                 "portscan_hosts_txt": str(self.workdir / "portscan_hosts.txt"),
+                "js_endpoints_json": str(self.intel / "js_endpoints.json"),
+                "nuclei_phase1_jsonl": str(self.workdir / "nuclei_phase1.jsonl"),
+                "subdomain_takeover_json": str(self.workdir / "takeover_summary.json"),
+                "bypass_403_findings_json": str(self.intel / "bypass_403_findings.json"),
             },
             "status": {
                 "stage_status_jsonl": str(self.workdir / "stage_status.jsonl"),

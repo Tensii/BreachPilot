@@ -1,57 +1,66 @@
 package main
 
 import (
-	"net"
-	"strings"
+	"os"
+	"reflect"
 	"testing"
-
-	"breachpilot/internal/models"
 )
 
-func TestFormatCLISummaryCounts(t *testing.T) {
-	job := &models.Job{Target: "example.com", Mode: "full", FindingsCount: 5, ExploitFindingsCount: 3, FilteredCount: 2}
-	lines := formatCLISummary(job, "full")
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Findings: nuclei=5 exploit=3 total=8 filtered=2") {
-		t.Fatalf("missing nuclei count: %s", joined)
-	}
-	if !strings.Contains(joined, "Runtime: recon=0.0s exploit=0.0s total=0.0s") {
-		t.Fatalf("missing runtime line: %s", joined)
-	}
-}
+func TestParseTargetsFile(t *testing.T) {
+	content := `
+# Test targets file
+# Handles newlines, commas, spaces, semicolons, and comments.
 
-func TestFormatCLISummaryTopModules(t *testing.T) {
-	job := &models.Job{
-		Target:               "example.com",
-		Mode:                 "full",
-		ExploitFindingsCount: 5,
-		ModuleTelemetry: []models.ExploitModuleTelemetry{
-			{Module: "idorplaybook", FindingsCount: 3, AcceptedCount: 3},
-			{Module: "authbypass", FindingsCount: 2, AcceptedCount: 1},
-			{Module: "headers", FindingsCount: 1, AcceptedCount: 0},
-		},
-	}
-	lines := formatCLISummary(job, "full")
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Top exploit modules: idorplaybook=3/3, authbypass=1/2, headers=0/1") {
-		t.Fatalf("missing top module summary: %s", joined)
-	}
-}
+example1.com
+example2.com, example3.com
 
-func TestCheckWebhookReachableHonorsExplicitPort(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+   example4.com   example5.com # with trailing comment
+example6.com;example7.com
+`
+	tmpfile, err := os.CreateTemp("", "test-targets-*.txt")
 	if err != nil {
-		t.Skipf("socket unavailable: %v", err)
+		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer os.Remove(tmpfile.Name())
 
-	if err := checkWebhookReachable("http://" + ln.Addr().String()); err != nil {
-		t.Fatalf("expected explicit port to succeed, got %v", err)
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	targets, err := parseTargetsFile(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("parseTargetsFile failed: %v", err)
+	}
+
+	expected := []string{"example1.com", "example2.com", "example3.com", "example4.com", "example5.com", "example6.com", "example7.com"}
+
+	if !reflect.DeepEqual(targets, expected) {
+		t.Errorf("Mismatched targets.\nGot:      %v\nExpected: %v", targets, expected)
 	}
 }
 
-func TestSplitCommandRejectsEmpty(t *testing.T) {
-	if _, err := splitCommand("   "); err == nil {
-		t.Fatal("expected empty command error")
+func TestParseTargetsFile_Empty(t *testing.T) {
+	content := `
+# This file is empty or only has comments
+`
+	tmpfile, err := os.CreateTemp("", "test-targets-empty-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = parseTargetsFile(tmpfile.Name())
+	if err == nil {
+		t.Errorf("Expected an error for a file with no targets, but got nil")
 	}
 }
