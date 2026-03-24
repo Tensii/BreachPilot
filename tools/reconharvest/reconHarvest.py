@@ -643,7 +643,7 @@ class ReconConfig:
     httpx_threads: int = 200
     httpx_timeout: int = 5
     httpx_retries: int = 1
-    subfinder_timeout: int = 180
+    subfinder_timeout: int = 600
     assetfinder_timeout: int = 180
     dnsx_timeout: int = 180
     httpx_stage_timeout: int = 300
@@ -1300,8 +1300,32 @@ class Runner:
         all_subdomains = self.workdir / "all_subdomains.txt"
         self.touch_files(subfinder_txt, assetfinder_txt, all_subdomains)
         self.dashboard.set_context(source_running="subfinder", subtask_done=0, subtask_total=2)
+        subfinder_rc = None
+        subfinder_mode = "all"
         if self.subfinder_bin:
-            self.run_tool("subfinder", [self.subfinder_bin, "-d", self.target, "-all", "-silent", "-o", str(subfinder_txt)], timeout=self.config.subfinder_timeout, allow_failure=True)
+            subfinder_log = self.logs / "subfinder.stderr.log"
+            result = self.run_tool(
+                "subfinder",
+                [self.subfinder_bin, "-d", self.target, "-all", "-silent"],
+                timeout=self.config.subfinder_timeout,
+                stdout_path=subfinder_txt,
+                stderr_path=subfinder_log,
+                allow_failure=True,
+            )
+            subfinder_rc = result.returncode
+            # If the expansive provider sweep timed out before yielding anything useful,
+            # retry once in default mode to salvage a broad but faster baseline.
+            if result.returncode == 124 and self._count_lines(subfinder_txt) == 0:
+                subfinder_mode = "default"
+                result = self.run_tool(
+                    "subfinder fallback",
+                    [self.subfinder_bin, "-d", self.target, "-silent"],
+                    timeout=max(120, min(self.config.subfinder_timeout, 300)),
+                    stdout_path=subfinder_txt,
+                    stderr_path=subfinder_log,
+                    allow_failure=True,
+                )
+                subfinder_rc = result.returncode
         self.dashboard.set_context(source_running="assetfinder", subtask_done=1, subtask_total=2)
         if self.assetfinder_bin:
             self.run_tool("assetfinder", [self.assetfinder_bin, "--subs-only", self.target], timeout=self.config.assetfinder_timeout, stdout_path=assetfinder_txt, stderr_path=self.logs / "assetfinder.stderr.log", allow_failure=True)
@@ -1312,6 +1336,8 @@ class Runner:
             "subfinder_count": self._count_lines(subfinder_txt),
             "assetfinder_count": self._count_lines(assetfinder_txt),
             "total_subdomains": len(lines),
+            "subfinder_mode": subfinder_mode,
+            "subfinder_returncode": subfinder_rc if subfinder_rc is not None else 0,
         })
         self.mark_done("subdomains")
 
@@ -3277,21 +3303,41 @@ class Runner:
         bypass_headers=[{"X-Original-URL":"/"},{"X-Rewrite-URL":"/"},{"X-Forwarded-For":"127.0.0.1"},{"X-Forwarded-For":"localhost"},{"X-Client-IP":"127.0.0.1"},{"X-Real-IP":"127.0.0.1"},{"X-Custom-IP-Authorization":"127.0.0.1"},{"X-Host":"localhost"},{"Referer":"/admin"}]
         bypass_paths=["/","/%2F","//","/./","/..","/%20","/?anything"]
         findings=[]
-        errors = 0
+        attempts = 0
+        negative_http = 0
+        transport_errors = 0
+        timeouts = 0
         lock=threading.Lock()
         def _probe(host: str):
-            nonlocal errors
+            nonlocal attempts, negative_http, transport_errors, timeouts
             url=host.rstrip("/")
             for hdrs in bypass_headers:
+                with lock:
+                    attempts += 1
                 try:
                     req=urllib.request.Request(url, headers={"User-Agent": _JS_USER_AGENTS[0], **hdrs})
                     with urllib.request.urlopen(req, timeout=max(5, int(self.config.bypass_403_timeout))) as resp:
                         if resp.status < 400:
                             with lock: findings.append({"host":host,"bypass":"header","header":str(hdrs),"status":resp.status})
                             return
+                except urllib.error.HTTPError:
+                    with lock:
+                        negative_http += 1
+                except urllib.error.URLError as e:
+                    with lock:
+                        transport_errors += 1
+                        if isinstance(getattr(e, "reason", None), socket.timeout):
+                            timeouts += 1
+                except socket.timeout:
+                    with lock:
+                        transport_errors += 1
+                        timeouts += 1
                 except Exception:
-                    errors += 1
+                    with lock:
+                        transport_errors += 1
             for path in bypass_paths:
+                with lock:
+                    attempts += 1
                 try:
                     parsed=urllib.parse.urlsplit(url)
                     probe_url=urllib.parse.urlunsplit(parsed._replace(path=path))
@@ -3300,8 +3346,21 @@ class Runner:
                         if resp.status < 400:
                             with lock: findings.append({"host":host,"bypass":"path","path":path,"status":resp.status})
                             return
+                except urllib.error.HTTPError:
+                    with lock:
+                        negative_http += 1
+                except urllib.error.URLError as e:
+                    with lock:
+                        transport_errors += 1
+                        if isinstance(getattr(e, "reason", None), socket.timeout):
+                            timeouts += 1
+                except socket.timeout:
+                    with lock:
+                        transport_errors += 1
+                        timeouts += 1
                 except Exception:
-                    errors += 1
+                    with lock:
+                        transport_errors += 1
         with ThreadPoolExecutor(max_workers=min(self.config.bypass_403_workers, len(hosts_403))) as ex:
             futs=[ex.submit(_probe,h) for h in hosts_403]
             stage_deadline_s = max(15, int(self.config.bypass_403_timeout))
@@ -3311,23 +3370,32 @@ class Runner:
                     try: fut.result()
                     except Exception: pass
             except TimeoutError:
-                errors += 1
+                transport_errors += 1
+                timeouts += 1
                 self.record_stage_status("bypass_403", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
                 for f in futs:
                     f.cancel()
         out_json=self.intel / "bypass_403_findings.json"
         self.write_json(out_json, findings)
         if hosts_403 and len(findings) == 0:
-            self.record_stage_status("bypass_403", "warning", f"probed={len(hosts_403)} bypassed=0 errors={errors}", metrics={
+            self.record_stage_status("bypass_403", "warning", f"probed={len(hosts_403)} bypassed=0 attempts={attempts} negative_http={negative_http} transport_errors={transport_errors}", metrics={
                 "probed": len(hosts_403),
                 "bypassed": 0,
-                "errors": errors,
+                "attempts": attempts,
+                "negative_http": negative_http,
+                "transport_errors": transport_errors,
+                "timeouts": timeouts,
+                "errors": transport_errors,
             })
         else:
-            self.record_stage_status("bypass_403", "completed", f"probed={len(hosts_403)} bypassed={len(findings)} errors={errors}", metrics={
+            self.record_stage_status("bypass_403", "completed", f"probed={len(hosts_403)} bypassed={len(findings)} attempts={attempts} negative_http={negative_http} transport_errors={transport_errors}", metrics={
                 "probed": len(hosts_403),
                 "bypassed": len(findings),
-                "errors": errors,
+                "attempts": attempts,
+                "negative_http": negative_http,
+                "transport_errors": transport_errors,
+                "timeouts": timeouts,
+                "errors": transport_errors,
             })
         for f in findings:
             self.add_finding("bypass_403", "HIGH", f.get("host", ""), "403 bypass successful", evidence=str(f), confidence=85, tags=["authz","bypass403"])
@@ -3349,12 +3417,16 @@ class Runner:
         schema_dir.mkdir(parents=True, exist_ok=True)
         findings=[]
         attempts = 0
-        errors = 0
+        negative_http = 0
+        transport_errors = 0
+        timeouts = 0
         q = json.dumps({"query": "{__schema{types{name}}}", "operationName": None, "variables": {}})
 
-        def _scan_host(host: str) -> tuple[dict | None, int, int]:
+        def _scan_host(host: str) -> tuple[dict | None, int, int, int, int]:
             local_attempts = 0
-            local_errors = 0
+            local_negative_http = 0
+            local_transport_errors = 0
+            local_timeouts = 0
             for path in _GRAPHQL_PATHS:
                 if SHUTTING_DOWN:
                     break
@@ -3368,12 +3440,27 @@ class Runner:
                             if "__schema" in body or "types" in body:
                                 sf = schema_dir / (safe_name_for_host(url)+".json")
                                 sf.write_text(body, encoding="utf-8")
-                                return ({"url":url,"introspection":True,"schema_file":str(sf)}, local_attempts, local_errors)
-                    except Exception:
-                        local_errors += 1
+                                return ({"url":url,"introspection":True,"schema_file":str(sf)}, local_attempts, local_negative_http, local_transport_errors, local_timeouts)
+                    except urllib.error.HTTPError:
+                        local_negative_http += 1
                         if attempt == 1:
                             _backoff_sleep(0.35, attempt)
-            return (None, local_attempts, local_errors)
+                    except urllib.error.URLError as e:
+                        local_transport_errors += 1
+                        if isinstance(getattr(e, "reason", None), socket.timeout):
+                            local_timeouts += 1
+                        if attempt == 1:
+                            _backoff_sleep(0.35, attempt)
+                    except socket.timeout:
+                        local_transport_errors += 1
+                        local_timeouts += 1
+                        if attempt == 1:
+                            _backoff_sleep(0.35, attempt)
+                    except Exception:
+                        local_transport_errors += 1
+                        if attempt == 1:
+                            _backoff_sleep(0.35, attempt)
+            return (None, local_attempts, local_negative_http, local_transport_errors, local_timeouts)
 
         if hosts:
             workers = min(20, len(hosts))
@@ -3385,32 +3472,41 @@ class Runner:
                         if SHUTTING_DOWN:
                             break
                         try:
-                            item, a, e = fut.result()
+                            item, a, nh, te, to = fut.result()
                             attempts += a
-                            errors += e
+                            negative_http += nh
+                            transport_errors += te
+                            timeouts += to
                             if item:
                                 findings.append(item)
                         except Exception:
-                            errors += 1
+                            transport_errors += 1
                 except TimeoutError:
-                    errors += 1
+                    transport_errors += 1
+                    timeouts += 1
                     self.record_stage_status("graphql", "warning", f"stage deadline exceeded after {stage_deadline_s}s")
                     for f in futs:
                         f.cancel()
         self.write_json(self.intel / "graphql_findings.json", findings)
         if hosts and attempts > 0 and len(findings) == 0:
-            self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} errors={errors}", metrics={
+            self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} negative_http={negative_http} transport_errors={transport_errors}", metrics={
                 "hosts_checked": len(hosts),
                 "introspection_open": 0,
                 "attempts": attempts,
-                "errors": errors,
+                "negative_http": negative_http,
+                "transport_errors": transport_errors,
+                "timeouts": timeouts,
+                "errors": transport_errors,
             })
         else:
-            self.record_stage_status("graphql", "completed", f"hosts_checked={len(hosts)} introspection_open={len(findings)} attempts={attempts} errors={errors}", metrics={
+            self.record_stage_status("graphql", "completed", f"hosts_checked={len(hosts)} introspection_open={len(findings)} attempts={attempts} negative_http={negative_http} transport_errors={transport_errors}", metrics={
                 "hosts_checked": len(hosts),
                 "introspection_open": len(findings),
                 "attempts": attempts,
-                "errors": errors,
+                "negative_http": negative_http,
+                "transport_errors": transport_errors,
+                "timeouts": timeouts,
+                "errors": transport_errors,
             })
         for g in findings:
             self.add_finding("graphql", "HIGH", g.get("url", ""), "GraphQL introspection enabled", evidence=str(g.get("schema_file") or ""), confidence=90, tags=["graphql"])
