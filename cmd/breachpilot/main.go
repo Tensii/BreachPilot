@@ -226,14 +226,11 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 
 	targets := []string{}
 	if listFile != "" {
-		// When -l is used, mode must be 'full'
-		if mode != "full" {
-			// Also handle case where mode is not provided but -l is
-			if mode == "" && len(args) == 0 {
-				mode = "full" // Default to full mode if only -l is present
-			} else {
-				return fmt.Errorf("-l/--list is only supported in 'full' mode")
-			}
+		if mode != "full" && mode != "" {
+			return fmt.Errorf("-l/--list is only supported in 'full' mode")
+		}
+		if mode == "" {
+			mode = "full" // Default to full mode if only -l is present
 		}
 		var err error
 		targets, err = parseTargetsFile(listFile)
@@ -253,6 +250,10 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		targets = append(targets, strings.TrimSpace(args[1]))
 	}
 
+	return runJobsInBatch(ctx, mode, targets, opt, nf, rf, jsonOut)
+}
+
+func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
 	for _, target := range targets {
 		select {
 		case <-ctx.Done():
@@ -280,7 +281,6 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 				return fmt.Errorf("artifact integrity validation failed: %w", err)
 			}
 
-			// Derive target from summary for directory naming
 			derivedTarget := ""
 			if rs, err := ingest.LoadReconSummary(reconPath); err == nil {
 				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
@@ -323,7 +323,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 			nf.Send("job.failed", job)
 			if len(targets) > 1 {
 				fmt.Printf("\x1b[31m[BATCH] Target %s failed: %v\x1b[0m\n", target, err)
-				continue // move to next target in batch
+				continue
 			}
 			return err
 		}
@@ -346,7 +346,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 			} else {
 				fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
 			}
-			return nil // User cancelled, stop batch
+			return nil
 		case models.JobFailed:
 			nf.Send("job.failed", job)
 			if jsonOut {
@@ -370,6 +370,7 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 
 	return nil
 }
+
 
 func parseTargetsFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)

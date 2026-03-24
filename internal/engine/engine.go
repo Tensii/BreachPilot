@@ -47,6 +47,7 @@ import (
 	hpp "breachpilot/internal/exploit/modules/hpp"
 	httpmethods "breachpilot/internal/exploit/modules/httpmethods"
 	httpresponse "breachpilot/internal/exploit/modules/httpresponse"
+	idor "breachpilot/internal/exploit/modules/idor"
 	idorplaybook "breachpilot/internal/exploit/modules/idorplaybook"
 	idorsize "breachpilot/internal/exploit/modules/idorsize"
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
@@ -2205,6 +2206,7 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		businesslogic.New(),
 		cmdinject.New(),
 		mutationengine.New(),
+		idor.New(),
 		idorplaybook.New(),
 		jwtaccess.New(),
 		rxss.New(),
