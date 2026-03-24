@@ -37,7 +37,7 @@ func ResolveReconHarvestCmd(configured string) string {
 }
 
 func ProbeReconHarvestCapabilities(raw string) (ReconHarvestCapabilities, error) {
-	argv, err := splitReconHarvestCommand(raw)
+	argv, err := SplitReconHarvestCommand(raw)
 	if err != nil {
 		return ReconHarvestCapabilities{}, err
 	}
@@ -98,7 +98,7 @@ func parseReconHarvestHelp(help string) ReconHarvestCapabilities {
 	}
 }
 
-func splitReconHarvestCommand(raw string) ([]string, error) {
+func SplitReconHarvestCommand(raw string) ([]string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("empty recon command")
@@ -107,8 +107,62 @@ func splitReconHarvestCommand(raw string) ([]string, error) {
 	if err != nil || len(argv) == 0 {
 		return nil, fmt.Errorf("invalid recon command: %q", raw)
 	}
+	argv = normalizeReconHarvestArgv(argv)
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return nil, fmt.Errorf("recon command executable not found: %w", err)
 	}
 	return argv, nil
+}
+
+func splitReconHarvestCommand(raw string) ([]string, error) {
+	return SplitReconHarvestCommand(raw)
+}
+
+func normalizeReconHarvestArgv(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+
+	normalized := append([]string{}, argv...)
+	if abs, ok := absolutizeIfLocalPath(normalized[0]); ok {
+		normalized[0] = abs
+	}
+	if len(normalized) > 1 && isInterpreterCommand(normalized[0]) && !strings.HasPrefix(normalized[1], "-") {
+		if abs, ok := absolutizeIfLocalPath(normalized[1]); ok {
+			normalized[1] = abs
+		}
+	}
+	return normalized
+}
+
+func absolutizeIfLocalPath(raw string) (string, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	if filepath.IsAbs(raw) {
+		if _, err := os.Stat(raw); err == nil {
+			return raw, true
+		}
+		return "", false
+	}
+	if !(strings.ContainsRune(raw, os.PathSeparator) || strings.HasPrefix(raw, ".")) {
+		return "", false
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", false
+	}
+	if _, err := os.Stat(abs); err == nil {
+		return abs, true
+	}
+	return "", false
+}
+
+func isInterpreterCommand(cmd string) bool {
+	switch filepath.Base(cmd) {
+	case "python", "python3", "python2", "bash", "sh", "zsh":
+		return true
+	default:
+		return false
+	}
 }

@@ -79,7 +79,6 @@ import (
 	"breachpilot/internal/policy"
 	"breachpilot/internal/scope"
 	riskscoring "breachpilot/internal/scoring"
-	"github.com/google/shlex"
 )
 
 const (
@@ -1050,12 +1049,9 @@ func prepareReconHarvestRun(job *models.Job, opt Options) (reconExecutionPlan, e
 		return reconExecutionPlan{}, err
 	}
 
-	baseArgv, err := shlex.Split(strings.TrimSpace(opt.ReconHarvestCmd))
-	if err != nil || len(baseArgv) == 0 {
-		return reconExecutionPlan{}, fmt.Errorf("invalid recon command: %q", opt.ReconHarvestCmd)
-	}
-	if _, err := exec.LookPath(baseArgv[0]); err != nil {
-		return reconExecutionPlan{}, fmt.Errorf("recon command executable not found: %w", err)
+	baseArgv, err := configpkg.SplitReconHarvestCommand(opt.ReconHarvestCmd)
+	if err != nil {
+		return reconExecutionPlan{}, err
 	}
 
 	reconCaps, reconCapsErr := configpkg.ProbeReconHarvestCapabilities(opt.ReconHarvestCmd)

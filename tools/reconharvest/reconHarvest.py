@@ -820,6 +820,7 @@ class Runner:
         self._webhook_stop = threading.Event()
         self._webhook_worker: threading.Thread | None = None
         self._last_command_context: dict | None = None
+        self._latest_stage_status: dict[str, dict] = {}
         for d in (self.state, self.logs, self.ffuf, self.dirsearch, self.urls, self.intel, self.reports, self.cache, self.raw):
             d.mkdir(parents=True, exist_ok=True)
         self.commands_md.write_text("", encoding="utf-8")
@@ -892,6 +893,7 @@ class Runner:
             "duration_seconds": round(duration_seconds, 3) if duration_seconds is not None else None,
             "metrics": metrics or {},
         }
+        self._latest_stage_status[stage] = row
         with self._command_lock:
             with self.status_jsonl.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -907,6 +909,7 @@ class Runner:
             "duration_seconds": None,
             "metrics": {},
         }
+        self._latest_stage_status[stage] = row
         with self._command_lock:
             with self.failure_log.open("a", encoding="utf-8") as f:
                 f.write(f"{now_utc_iso()} {detail}\n")
@@ -1305,7 +1308,11 @@ class Runner:
         lines = sorted({self.target} | {x.strip() for x in (subfinder_txt.read_text(encoding='utf-8', errors='ignore') + "\n" + assetfinder_txt.read_text(encoding='utf-8', errors='ignore')).splitlines() if x.strip()})
         all_subdomains.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         self.dashboard.set_context(source_running="merge complete", subtask_done=2, subtask_total=2)
-        self.record_stage_status("subdomains", "completed", "merged passive subdomain sources")
+        self.record_stage_status("subdomains", "completed", "merged passive subdomain sources", metrics={
+            "subfinder_count": self._count_lines(subfinder_txt),
+            "assetfinder_count": self._count_lines(assetfinder_txt),
+            "total_subdomains": len(lines),
+        })
         self.mark_done("subdomains")
 
     def stage_dnsx(self):
@@ -1392,13 +1399,19 @@ class Runner:
             detail = "dnsx resolution attempted (hostnames+ip mapping)"
             if not mp:
                 detail = "dnsx resolution attempted (no IPs observed; map empty)"
-            self.record_stage_status("dnsx", "completed", detail)
+            self.record_stage_status("dnsx", "completed", detail, metrics={
+                "resolved_hosts": len(uniq_hosts),
+                "mapped_hosts": len(mp),
+            })
             self.dashboard.set_context(source_running="dnsx complete", subtask_done=1, subtask_total=1)
         else:
             lines_local = [x.strip() for x in all_subdomains.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()]
             resolved.write_text("\n".join(lines_local) + ("\n" if lines_local else ""), encoding="utf-8")
             host_ip_map.write_text("{}", encoding="utf-8")
-            self.record_stage_status("dnsx", "fallback", "dnsx missing; copied subdomains as resolved hosts")
+            self.record_stage_status("dnsx", "fallback", "dnsx missing; copied subdomains as resolved hosts", metrics={
+                "resolved_hosts": len(lines_local),
+                "mapped_hosts": 0,
+            })
         self.mark_done("dnsx")
 
     def stage_takeover(self):
@@ -1641,12 +1654,21 @@ class Runner:
                     "status": int(obj.get("status_code") or 0),
                 }
             self.dashboard.set_context(httpx_buckets=f"2xx={buckets['2xx']} 3xx={buckets['3xx']} 401={buckets['401']} 403={buckets['403']} other={buckets['other']}", source_running="httpx complete", subtask_done=sum(buckets.values()), subtask_total=max(1, sum(buckets.values())))
-            self.record_stage_status("httpx", "completed", "single-pass httpx json; derived text + strict live hosts")
+            self.record_stage_status("httpx", "completed", "single-pass httpx json; derived text + strict live hosts", metrics={
+                "live_hosts": len(s_hosts),
+                "httpx_2xx": buckets["2xx"],
+                "httpx_3xx": buckets["3xx"],
+                "httpx_401": buckets["401"],
+                "httpx_403": buckets["403"],
+                "httpx_other": buckets["other"],
+            })
         else:
             lines = [x.strip() for x in resolved.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()]
             live_hosts.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
             self._httpx_cache = {}
-            self.record_stage_status("httpx", "fallback", "httpx missing; reused resolved hosts")
+            self.record_stage_status("httpx", "fallback", "httpx missing; reused resolved hosts", metrics={
+                "live_hosts": len(lines),
+            })
         self.mark_done("httpx")
 
     def classify_host(self, host: str) -> dict:
@@ -1988,7 +2010,10 @@ class Runner:
         params = sorted({u for u in merged if re.search(r"\?.+=", u)})
         urls_params.write_text("\n".join(params) + ("\n" if params else ""), encoding="utf-8")
         self.build_params_ranked(params)
-        self.record_stage_status("urls", "completed", "katana/gau url collection and param ranking generated")
+        self.record_stage_status("urls", "completed", "katana/gau url collection and param ranking generated", metrics={
+            "urls_all": len(merged),
+            "urls_with_params": len(params),
+        })
         self.mark_done("urls")
 
     def build_params_ranked(self, urls_with_params: list[str]):
@@ -2988,7 +3013,11 @@ class Runner:
         merged = sorted(existing | new_subs)
         all_subs.write_text("\n".join(merged) + "\n", encoding="utf-8")
         gained = len(new_subs - existing)
-        self.record_stage_status("dns_bruteforce", "completed", f"found={len(new_subs)} new={gained} total={len(merged)}")
+        self.record_stage_status("dns_bruteforce", "completed", f"found={len(new_subs)} new={gained} total={len(merged)}", metrics={
+            "found": len(new_subs),
+            "new": gained,
+            "total_subdomains": len(merged),
+        })
         self.mark_done("dns_bruteforce")
 
     def stage_portscan(self) -> None:
@@ -3029,7 +3058,10 @@ class Runner:
         merged = sorted(existing | extra_hosts)
         live_hosts.write_text("\n".join(merged) + "\n", encoding="utf-8")
         out_txt.write_text("\n".join(sorted(extra_hosts)) + "\n", encoding="utf-8")
-        self.record_stage_status("portscan", "completed", f"new_hosts={len(extra_hosts)} merged_total={len(merged)}")
+        self.record_stage_status("portscan", "completed", f"new_hosts={len(extra_hosts)} merged_total={len(merged)}", metrics={
+            "new_hosts": len(extra_hosts),
+            "merged_total": len(merged),
+        })
         self.mark_done("portscan")
 
     def stage_screenshots(self) -> None:
@@ -3073,7 +3105,9 @@ class Runner:
             + len(list(out_dir.rglob("*.jpg")))
             + len(list(out_dir.rglob("*.jpeg")))
         )
-        self.record_stage_status("screenshots", "completed", f"screenshots={count} db={db_path}")
+        self.record_stage_status("screenshots", "completed", f"screenshots={count} db={db_path}", metrics={
+            "screenshots": count,
+        })
         self.mark_done("screenshots")
 
     def stage_param_discovery(self) -> None:
@@ -3114,9 +3148,17 @@ class Runner:
         out_json.write_text(json.dumps(all_found, indent=2), encoding="utf-8")
         total_params = sum(len(v) for v in all_found.values())
         if capped and total_params == 0:
-            self.record_stage_status("param_discovery", "warning", f"hosts={len(capped)} params_found=0 errors={scan_errors}")
+            self.record_stage_status("param_discovery", "warning", f"hosts={len(capped)} params_found=0 errors={scan_errors}", metrics={
+                "hosts": len(capped),
+                "params_found": 0,
+                "errors": scan_errors,
+            })
         else:
-            self.record_stage_status("param_discovery", "completed", f"hosts={len(capped)} params_found={total_params} errors={scan_errors}")
+            self.record_stage_status("param_discovery", "completed", f"hosts={len(capped)} params_found={total_params} errors={scan_errors}", metrics={
+                "hosts": len(capped),
+                "params_found": total_params,
+                "errors": scan_errors,
+            })
         self.mark_done("param_discovery")
 
     def stage_xss_scan(self) -> None:
@@ -3156,11 +3198,25 @@ class Runner:
         if result.returncode != 0:
             detail = f"urls_tested={len(urls)} findings={count} discarded={discarded} rc={result.returncode}"
             if count > 0:
-                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; retained stronger findings only ({detail})")
+                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; retained stronger findings only ({detail})", metrics={
+                    "urls_tested": len(urls),
+                    "findings": count,
+                    "discarded": discarded,
+                    "returncode": result.returncode,
+                })
             else:
-                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; discarded partial or reflection-only results ({detail})")
+                self.record_stage_status("xss_scan", "warning", f"dalfox incomplete; discarded partial or reflection-only results ({detail})", metrics={
+                    "urls_tested": len(urls),
+                    "findings": count,
+                    "discarded": discarded,
+                    "returncode": result.returncode,
+                })
         else:
-            self.record_stage_status("xss_scan", "completed", f"urls_tested={len(urls)} findings={count} discarded={discarded}")
+            self.record_stage_status("xss_scan", "completed", f"urls_tested={len(urls)} findings={count} discarded={discarded}", metrics={
+                "urls_tested": len(urls),
+                "findings": count,
+                "discarded": discarded,
+            })
         for x in data[:100]:
             tgt = str(x.get("url") or x.get("target") or "") if isinstance(x, dict) else ""
             self.add_finding("xss_scan", "HIGH", tgt, "Potential XSS finding", evidence=str(x)[:300], confidence=75, tags=["xss"])
@@ -3262,9 +3318,17 @@ class Runner:
         out_json=self.intel / "bypass_403_findings.json"
         self.write_json(out_json, findings)
         if hosts_403 and len(findings) == 0:
-            self.record_stage_status("bypass_403", "warning", f"probed={len(hosts_403)} bypassed=0 errors={errors}")
+            self.record_stage_status("bypass_403", "warning", f"probed={len(hosts_403)} bypassed=0 errors={errors}", metrics={
+                "probed": len(hosts_403),
+                "bypassed": 0,
+                "errors": errors,
+            })
         else:
-            self.record_stage_status("bypass_403", "completed", f"probed={len(hosts_403)} bypassed={len(findings)} errors={errors}")
+            self.record_stage_status("bypass_403", "completed", f"probed={len(hosts_403)} bypassed={len(findings)} errors={errors}", metrics={
+                "probed": len(hosts_403),
+                "bypassed": len(findings),
+                "errors": errors,
+            })
         for f in findings:
             self.add_finding("bypass_403", "HIGH", f.get("host", ""), "403 bypass successful", evidence=str(f), confidence=85, tags=["authz","bypass403"])
         if findings:
@@ -3335,9 +3399,19 @@ class Runner:
                         f.cancel()
         self.write_json(self.intel / "graphql_findings.json", findings)
         if hosts and attempts > 0 and len(findings) == 0:
-            self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} errors={errors}")
+            self.record_stage_status("graphql", "warning", f"hosts_checked={len(hosts)} introspection_open=0 attempts={attempts} errors={errors}", metrics={
+                "hosts_checked": len(hosts),
+                "introspection_open": 0,
+                "attempts": attempts,
+                "errors": errors,
+            })
         else:
-            self.record_stage_status("graphql", "completed", f"hosts_checked={len(hosts)} introspection_open={len(findings)} attempts={attempts} errors={errors}")
+            self.record_stage_status("graphql", "completed", f"hosts_checked={len(hosts)} introspection_open={len(findings)} attempts={attempts} errors={errors}", metrics={
+                "hosts_checked": len(hosts),
+                "introspection_open": len(findings),
+                "attempts": attempts,
+                "errors": errors,
+            })
         for g in findings:
             self.add_finding("graphql", "HIGH", g.get("url", ""), "GraphQL introspection enabled", evidence=str(g.get("schema_file") or ""), confidence=90, tags=["graphql"])
         if findings:
@@ -3391,7 +3465,10 @@ class Runner:
                 count = len(data.get("results", []))
             except Exception:
                 pass
-        self.record_stage_status("vhost_fuzz", "completed", f"vhosts_found={count} target_ip={main_ip}")
+        self.record_stage_status("vhost_fuzz", "completed", f"vhosts_found={count} target_ip={main_ip}", metrics={
+            "vhosts_found": count,
+            "target_ip": main_ip,
+        })
         self.mark_done("vhost_fuzz")
 
     def stage_github_dork(self) -> None:
@@ -3528,11 +3605,52 @@ class Runner:
             + stats.get("takeover_findings", 0)
         )
         return [
-            {"name": "Subdomains", "value": str(stats.get("all_subdomains", 0)), "inline": True},
+            {"name": "Subdomains", "value": str(stats.get("subdomains", 0)), "inline": True},
+            {"name": "Resolved", "value": str(stats.get("resolved", 0)), "inline": True},
             {"name": "Live Hosts", "value": str(stats.get("live_hosts", 0)), "inline": True},
             {"name": "Endpoints", "value": str(stats.get("endpoints", 0)), "inline": True},
             {"name": "Findings", "value": str(findings_total), "inline": True},
         ]
+
+    def _preview_lines(self, path: Path, *, limit: int = 10) -> list[str]:
+        if not path.exists():
+            return []
+        out: list[str] = []
+        try:
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                out.append(line)
+                if len(out) >= max(1, limit):
+                    break
+        except Exception:
+            return []
+        return out
+
+    def _stage_context_fields(self, stage: str) -> list[dict]:
+        if not stage:
+            return []
+        row = self._latest_stage_status.get(stage)
+        if not isinstance(row, dict):
+            return []
+
+        fields: list[dict] = []
+        detail = str(row.get("detail") or "").strip()
+        if detail:
+            fields.append({"name": "Stage Detail", "value": self._truncate(detail, 1024), "inline": False})
+
+        duration = row.get("duration_seconds")
+        if duration is not None:
+            fields.append({"name": "Stage Duration", "value": f"{duration}s", "inline": True})
+
+        metrics = row.get("metrics") or {}
+        if isinstance(metrics, dict):
+            for key in sorted(metrics.keys())[:8]:
+                val = metrics.get(key)
+                label = str(key).replace("_", " ").title()
+                fields.append({"name": self._truncate(label, 256), "value": self._truncate(str(val), 1024), "inline": True})
+        return fields
 
     def _recent_log_excerpt(self, *, stage: str = "", log_file: str = "", lines: int = 3) -> str:
         candidates: list[Path] = []
@@ -3736,8 +3854,16 @@ class Runner:
         if stage:
             fields.append({"name": "Stage", "value": stage, "inline": True})
         fields.extend(self._stage_metrics_fields())
+        fields.extend(self._stage_context_fields(stage))
+        subdomain_preview = self._preview_lines(self.workdir / "all_subdomains.txt", limit=8)
+        if subdomain_preview and stage in {"subdomains", "dnsx", "httpx", "pipeline"}:
+            fields.append({
+                "name": "Subdomain Preview",
+                "value": "```\n" + "\n".join(subdomain_preview) + "\n```",
+                "inline": False,
+            })
         if log_file:
-            fields.append({"name": "Log", "value": log_file, "inline": False})
+            fields.append({"name": "Log", "value": str(Path(log_file).resolve()), "inline": False})
 
         event_type = "stage_completed" if st == "completed" and stage and stage != "pipeline" else "run_completed"
         if st in {"warning", "error", "interrupted"}:
@@ -3789,7 +3915,11 @@ class Runner:
                 "timestamp": now_utc_iso(),
             },
             "target": self.target,
-            "workdir": str(self.workdir),
+            "stats": self.collect_stats(),
+            "subdomains_path": str((self.workdir / "all_subdomains.txt").resolve()),
+            "subdomains_preview": subdomain_preview,
+            "stage_status": self._latest_stage_status.get(stage) if stage else None,
+            "workdir": str(self.workdir.resolve()),
             "timestamp": now_utc_iso(),
         }
         self._queue_webhook_event({"urls": urls, "body": body, "fingerprint": fingerprint})

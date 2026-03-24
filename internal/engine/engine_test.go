@@ -146,6 +146,74 @@ echo "https://${target:-example.com}" > "$out/live_hosts.txt"
 	}
 }
 
+func TestProcessFullModeRunsRelativeInterpreterScriptFromChangedWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	reconScript := filepath.Join(dir, "tools", "reconharvest", "reconHarvest.py")
+	if err := os.MkdirAll(filepath.Dir(reconScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/usr/bin/env python3
+import os
+import sys
+
+if "--help" in sys.argv:
+    print("usage: reconHarvest.py [-h] [--run] [--resume RESUME] [-o OUTPUT] [--skip-nuclei] [--overwrite] [target]")
+    sys.exit(0)
+
+out = ""
+target = ""
+resume = ""
+i = 1
+while i < len(sys.argv):
+    arg = sys.argv[i]
+    if arg in ("--run", "--skip-nuclei", "--overwrite"):
+        i += 1
+        continue
+    if arg == "--resume":
+        resume = sys.argv[i + 1]
+        i += 2
+        continue
+    if arg in ("-o", "--output"):
+        out = sys.argv[i + 1]
+        i += 2
+        continue
+    if not arg.startswith("-") and not target:
+        target = arg
+    i += 1
+
+if resume:
+    out = resume
+os.makedirs(out, exist_ok=True)
+with open(os.path.join(out, "summary.json"), "w", encoding="utf-8") as f:
+    f.write("{\"workdir\":\"" + out + "\",\"live_hosts\":\"" + out + "/live_hosts.txt\",\"urls\":{\"all\":\"\"},\"intel\":{\"endpoints_ranked_json\":\"\",\"params_ranked_json\":\"\"}}")
+with open(os.path.join(out, "live_hosts.txt"), "w", encoding="utf-8") as f:
+    f.write("https://" + (target or "example.com") + "\n")
+`
+	if err := os.WriteFile(reconScript, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	job := &models.Job{ID: "relative-recon", Target: "example.com", Mode: "full", SafeMode: true}
+	opt := Options{
+		ReconHarvestCmd: "python3 ./tools/reconharvest/reconHarvest.py",
+		ReconTimeoutSec: 10,
+		ReconRetries:    0,
+		NucleiBin:       "true",
+		ArtifactsRoot:   dir,
+		SkipNuclei:      true,
+	}
+	if err := Process(context.Background(), job, opt); err != nil {
+		t.Fatalf("expected relative recon command to succeed, got %v", err)
+	}
+	if job.Status != models.JobDone {
+		t.Fatalf("expected successful job, got %s error=%s", job.Status, job.Error)
+	}
+	if strings.TrimSpace(job.ReconPath) == "" {
+		t.Fatalf("expected recon path to be populated")
+	}
+}
+
 func TestProcessFailsWhenExploitFindingsWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	reconDir := filepath.Join(dir, "recon")
