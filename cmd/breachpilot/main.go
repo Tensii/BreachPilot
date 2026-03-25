@@ -20,6 +20,7 @@ import (
 
 	"breachpilot/internal/config"
 	"breachpilot/internal/engine"
+	browsercapture "breachpilot/internal/exploit/browsercapture"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	"breachpilot/internal/notify"
@@ -56,6 +57,19 @@ func main() {
 		printStartupBanner(cfg)
 		engOpt := buildEngineOptions(cfg)
 		listModules(engOpt)
+		return
+	}
+	if len(args) == 1 && args[0] == "browser-check" {
+		path := browsercapture.FindBrowserPath()
+		if p := strings.TrimSpace(os.Getenv("BREACHPILOT_BROWSER_PATH")); p != "" {
+			path = p
+		}
+		fmt.Printf("Browser path: %s\n", path)
+		if err := browsercapture.BrowserHealthCheck(path); err != nil {
+			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("OK: browser launched and navigated successfully")
 		return
 	}
 	if len(args) == 1 && args[0] == "doctor" {
