@@ -3,8 +3,10 @@ package ingest
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"breachpilot/internal/models"
@@ -35,6 +37,14 @@ func NormalizeReconSummaryPaths(summaryPath string, rs *models.ReconSummary) {
 	rs.Nuclei.Phase1JSONL = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Nuclei.Phase1JSONL, true)
 	rs.Intel.EndpointsRankedJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.EndpointsRankedJSON, true)
 	rs.Intel.ParamsRankedJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.ParamsRankedJSON, true)
+	rs.Intel.URLsDiscoveredJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.URLsDiscoveredJSON, true)
+	rs.Intel.URLsRevalidatedJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.URLsRevalidatedJSON, true)
+	rs.Intel.FormsDiscoveredJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.FormsDiscoveredJSON, true)
+	rs.Intel.BrowserWorkflowJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.BrowserWorkflowJSON, true)
+	rs.Intel.EndpointClustersJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.EndpointClustersJSON, true)
+	rs.Intel.ResponseClustersJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.ResponseClustersJSON, true)
+	rs.Intel.ResponseFingerprints = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.ResponseFingerprints, true)
+	rs.Intel.ReconInventoryJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.ReconInventoryJSON, true)
 	rs.Intel.SecretsJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.SecretsJSON, true)
 	rs.Intel.CORSJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.CORSJSON, true)
 	rs.Intel.BypassJSON = resolveReconSummaryPath(summaryDir, rs.Workdir, rs.Intel.BypassJSON, true)
@@ -122,19 +132,32 @@ func TargetFromWorkdir(workdir string) string {
 		if i+1 < len(parts) {
 			target := strings.TrimSpace(parts[i+1])
 			if target != "" && target != "." {
-				return target
+				// Folder names are sanitized via scope.NormalizeTargetForDir and are
+				// not generally reversible. Only recover the common host_port form.
+				return recoverLikelyHostPort(target)
 			}
 		}
 	}
+	return ""
+}
 
-	// Fallback to legacy behavior
-	parent := filepath.Dir(wd)
-	if parent == "." || parent == "" {
-		return ""
+func recoverLikelyHostPort(value string) string {
+	target := strings.TrimSpace(value)
+	if target == "" || strings.Contains(target, ":") {
+		return target
 	}
-	target := filepath.Base(parent)
-	if target == "." || target == "" || target == "outputs" || target == "artifacts" {
-		return ""
+	lastUnderscore := strings.LastIndex(target, "_")
+	if lastUnderscore <= 0 || lastUnderscore+1 >= len(target) {
+		return target
+	}
+	hostPart := target[:lastUnderscore]
+	portPart := target[lastUnderscore+1:]
+	port, err := strconv.Atoi(portPart)
+	if err != nil || port < 1 || port > 65535 {
+		return target
+	}
+	if strings.EqualFold(hostPart, "localhost") || net.ParseIP(hostPart) != nil || strings.Contains(hostPart, ".") {
+		return hostPart + ":" + portPart
 	}
 	return target
 }

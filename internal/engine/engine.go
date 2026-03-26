@@ -29,8 +29,8 @@ import (
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
-	autoregister "breachpilot/internal/exploit/modules/autoregister"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
+	autoregister "breachpilot/internal/exploit/modules/autoregister"
 	businesslogic "breachpilot/internal/exploit/modules/businesslogic"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
 	cmdinject "breachpilot/internal/exploit/modules/cmdinject"
@@ -267,7 +267,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return err
 	}
 	if strings.TrimSpace(job.Target) == "" || strings.TrimSpace(job.Target) == "from-summary" {
-		if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
+		if fromSummary := strings.TrimSpace(rs.Target); fromSummary != "" {
+			job.Target = fromSummary
+		} else if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
 			job.Target = guessed
 		}
 	}
@@ -350,7 +352,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	nucleiInput := hostsPath
 	nucleiTargetsTotal := liveHostsTotal
-	if rankedInput, rankedCount := buildRankedNucleiInput(rs.Intel.EndpointsRankedJSON, artDir); rankedCount > 0 {
+	rankedSeed := rs.Intel.EndpointsRankedJSON
+	if strings.TrimSpace(rankedSeed) == "" {
+		rankedSeed = firstNonEmptyString(rs.Intel.URLsRevalidatedJSON, rs.Intel.URLsDiscoveredJSON)
+	}
+	if rankedInput, rankedCount := buildRankedNucleiInput(rankedSeed, artDir); rankedCount > 0 {
 		nucleiInput = rankedInput
 		nucleiTargetsTotal = rankedCount
 		emit(models.RuntimeEvent{
@@ -464,16 +470,31 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	scoutModules, proofModules := splitModulesByPlannerStage(exploitModules)
 	persistedSignals := loadCorrelationSignalsArtifact(artDir)
 	scoutModules = prioritizeModules(scoutModules, rs)
-	scoutNames := moduleNames(scoutModules)
-	emit(models.RuntimeEvent{
-		Kind:     "module",
-		Stage:    "exploit.module",
-		Status:   "planned",
-		Message:  "exploit.module.wave1 " + strings.Join(scoutNames, ","),
-		Target:   job.Target,
-		Counts:   map[string]int{"planned": len(scoutModules)},
-		Progress: runtimeStageProgress("modules", "modules", 0, len(scoutModules)),
-	})
+	authBootstrapModules, scoutModules := splitAuthBootstrapModules(scoutModules)
+	if len(authBootstrapModules) > 0 {
+		bootstrapNames := moduleNames(authBootstrapModules)
+		emit(models.RuntimeEvent{
+			Kind:     "module",
+			Stage:    "exploit.module",
+			Status:   "planned",
+			Message:  "exploit.module.wave0 " + strings.Join(bootstrapNames, ","),
+			Target:   job.Target,
+			Counts:   map[string]int{"planned": len(authBootstrapModules)},
+			Progress: runtimeStageProgress("modules", "modules", 0, len(authBootstrapModules)),
+		})
+	}
+	if len(scoutModules) > 0 {
+		scoutNames := moduleNames(scoutModules)
+		emit(models.RuntimeEvent{
+			Kind:     "module",
+			Stage:    "exploit.module",
+			Status:   "planned",
+			Message:  "exploit.module.wave1 " + strings.Join(scoutNames, ","),
+			Target:   job.Target,
+			Counts:   map[string]int{"planned": len(scoutModules)},
+			Progress: runtimeStageProgress("modules", "modules", 0, len(scoutModules)),
+		})
+	}
 
 	// Initialize OOB Provider
 	var oobProvider oob.Provider
@@ -563,7 +584,38 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		SharedState:                    sharedState,
 		OOBProvider:                    oobProvider,
 	}
-	scoutFindings, scoutTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
+
+	scoutFindings := make([]models.ExploitFinding, 0, 64)
+	scoutTelemetry := make([]models.ExploitModuleTelemetry, 0, len(authBootstrapModules)+len(scoutModules))
+
+	// Bootstrap auth-producing modules first so auth-sensitive modules can consume
+	// observed context generated during this run instead of relying on static config.
+	if len(authBootstrapModules) > 0 {
+		bootstrapOpt := exploitOpt
+		bootstrapOpt.MaxParallel = 1
+		bootstrapFindings, bootstrapTelemetry := exploit.RunModules(ctx, job, &rs, bootstrapOpt, authBootstrapModules)
+		scoutFindings = append(scoutFindings, bootstrapFindings...)
+		scoutTelemetry = append(scoutTelemetry, bootstrapTelemetry...)
+	}
+
+	authObserved := applyObservedAuthFromSharedState(&exploitOpt, sharedState)
+	emit(models.RuntimeEvent{
+		Kind:    "module",
+		Stage:   "exploit.auth-context",
+		Status:  "ready",
+		Message: fmt.Sprintf("exploit.auth-context user=%t admin=%t source=%s", authObserved.HasUser, authObserved.HasAdmin, authObserved.Source),
+		Target:  job.Target,
+		Counts: map[string]int{
+			"auth_user_context":  boolToInt(authObserved.HasUser),
+			"auth_admin_context": boolToInt(authObserved.HasAdmin),
+		},
+	})
+
+	if len(scoutModules) > 0 {
+		waveFindings, waveTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
+		scoutFindings = append(scoutFindings, waveFindings...)
+		scoutTelemetry = append(scoutTelemetry, waveTelemetry...)
+	}
 	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
 	mergedSignals := mergeCorrelationSignals(persistedSignals, scoutSignals)
@@ -583,6 +635,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Progress: runtimeStageProgress("modules", "modules", 0, len(correlatedProofModules)),
 		})
 	}
+	_ = applyObservedAuthFromSharedState(&exploitOpt, sharedState)
 	proofFindings, proofTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, correlatedProofModules)
 	exploitFindings := append(scoutFindings, proofFindings...)
 	telemetry := append(scoutTelemetry, proofTelemetry...)
@@ -1377,8 +1430,19 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 			if !ok {
 				continue
 			}
-			if u, ok := m["url"].(string); ok {
-				appendURL(u)
+			for _, key := range []string{"url", "normalized_url", "final_url", "route", "page_url"} {
+				if u, ok := m[key].(string); ok {
+					appendURL(u)
+				}
+			}
+			for _, key := range []string{"sample_urls", "concrete_urls", "raw_urls"} {
+				if arr, ok := m[key].([]any); ok {
+					for _, item := range arr {
+						if u, ok := item.(string); ok {
+							appendURL(u)
+						}
+					}
+				}
 			}
 			if len(items) >= 50 {
 				break
@@ -1391,8 +1455,19 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 				if !ok {
 					continue
 				}
-				if u, ok := m["url"].(string); ok {
-					appendURL(u)
+				for _, key := range []string{"url", "normalized_url", "final_url", "route", "page_url"} {
+					if u, ok := m[key].(string); ok {
+						appendURL(u)
+					}
+				}
+				for _, key := range []string{"sample_urls", "concrete_urls", "raw_urls"} {
+					if arr2, ok := m[key].([]any); ok {
+						for _, item := range arr2 {
+							if u, ok := item.(string); ok {
+								appendURL(u)
+							}
+						}
+					}
 				}
 				if len(items) >= 500 {
 					break
@@ -2054,9 +2129,19 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 		return rs, fmt.Errorf("resume live hosts invalid: %s", live)
 	}
 	if rt := strings.TrimSpace(requestedTarget); rt != "" && rt != "from-summary" {
-		normalizedRT := scope.NormalizeTargetForDir(rt)
-		if tgt := ingest.TargetFromWorkdir(rs.Workdir); tgt != "" && strings.Contains(tgt, ".") && !strings.EqualFold(tgt, normalizedRT) {
-			return rs, fmt.Errorf("resume target mismatch: summary=%s requested=%s (normalized=%s)", tgt, rt, normalizedRT)
+		summaryTarget := strings.TrimSpace(rs.Target)
+		if summaryTarget == "" {
+			summaryTarget = ingest.TargetFromWorkdir(rs.Workdir)
+		}
+		if summaryTarget != "" {
+			normalizedRT := scope.NormalizeTargetForDir(rt)
+			normalizedSummary := scope.NormalizeTargetForDir(summaryTarget)
+			if !strings.EqualFold(normalizedSummary, normalizedRT) {
+				return rs, fmt.Errorf(
+					"resume target mismatch: summary=%s requested=%s (normalized summary=%s requested=%s)",
+					summaryTarget, rt, normalizedSummary, normalizedRT,
+				)
+			}
 		}
 	}
 	return rs, nil
@@ -2296,7 +2381,8 @@ func planExploitModules(mods []exploit.Module, rs models.ReconSummary, opt Optio
 }
 
 func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (bool, string) {
-	hasURLs := strings.TrimSpace(rs.URLs.All) != ""
+	urlCorpus := reconURLCorpusPath(rs)
+	hasURLs := strings.TrimSpace(urlCorpus) != ""
 	hasRankedEndpoints := strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != ""
 	hasLiveHosts := strings.TrimSpace(rs.Live) != ""
 	hasCORS := strings.TrimSpace(rs.Intel.CORSJSON) != ""
@@ -2305,9 +2391,6 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 	hasNuclei := strings.TrimSpace(rs.Intel.NucleiPhase1JSONL) != ""
 	hasSubT := strings.TrimSpace(rs.Intel.SubdomainTakeoverJSON) != ""
 	hasJS := strings.TrimSpace(rs.Intel.JSEndpointsJSON) != ""
-	hasUserAuth := strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != ""
-	hasAdminAuth := strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != ""
-	hasRealAuth := hasUserAuth && hasAdminAuth
 	wf := loadBrowserWorkflowSignals(rs)
 
 	switch name {
@@ -2375,8 +2458,8 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 		if !hasURLs {
 			return false, "requires URL corpus"
 		}
-		if !hasCORS && !hasRealAuth {
-			return false, "requires CORS intel or real auth contexts"
+		if !hasCORS {
+			return true, "URL corpus available; auth context will be inferred at runtime"
 		}
 		return true, "auth chain prerequisites available"
 	case "advanced-injection":
@@ -2431,13 +2514,10 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 		if !opt.ProofMode {
 			return false, "requires proof mode"
 		}
-		if !hasRealAuth {
-			return false, "requires real auth contexts"
-		}
 		if !hasURLs && !hasRankedEndpoints {
 			return false, "requires URL or ranked endpoint corpus"
 		}
-		return true, "race condition prerequisites available"
+		return true, "race condition candidates available; auth context inferred at runtime"
 	case "idor-playbook":
 		if !opt.AggressiveMode {
 			return false, "requires aggressive mode"
@@ -2448,10 +2528,7 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 		if !hasURLs {
 			return false, "requires URL corpus"
 		}
-		if !hasRealAuth {
-			return false, "requires real user/admin auth contexts"
-		}
-		return true, "proof and auth prerequisites available"
+		return true, "proof prerequisites available; auth context inferred at runtime"
 	case "saml-probe":
 		if hasURLs {
 			return true, "URL corpus available"
@@ -2661,6 +2738,7 @@ func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
 func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
 	_ = opt
 	wf := loadBrowserWorkflowSignals(rs)
+	urlCorpus := reconURLCorpusPath(rs)
 	switch name {
 	case "auth-bypass":
 		if signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2) {
@@ -2679,7 +2757,7 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
 			return true, fmt.Sprintf("state-change lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "cors-poc", "graphql-abuse", "js-endpoints"))
 		}
-		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}); matches >= 2 {
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple state-changing URL patterns detected in recon corpus (%d)", matches)
 		}
 		if wf.WriteSteps > 0 {
@@ -2687,7 +2765,7 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		return false, "needs state-change lead from scouts or URL corpus"
 	case "upload-abuse":
-		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"upload", "file", "attachment", "import", "avatar", "image"}); matches >= 2 {
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"upload", "file", "attachment", "import", "avatar", "image"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple upload-oriented URL patterns detected (%d)", matches)
 		}
 		if wf.UploadSteps > 0 {
@@ -2703,14 +2781,14 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("secrets-validator", 2) {
 			return true, fmt.Sprintf("auth token lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "secrets-validator"))
 		}
-		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}); matches >= 2 {
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple token-oriented URL patterns detected (%d)", matches)
 		}
 		if wf.AuthLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d auth/token step(s)", wf.AuthLikeSteps)
 		}
-		hasURLs := strings.TrimSpace(rs.URLs.All) != ""
-		if hasURLs && reconCorpusMatchCount(rs.URLs.All, []string{"api/", "auth/", "token", "session", "login", "authorize", "oauth"}) >= 1 {
+		hasURLs := strings.TrimSpace(urlCorpus) != ""
+		if hasURLs && reconCorpusMatchCount(urlCorpus, []string{"api/", "auth/", "token", "session", "login", "authorize", "oauth"}) >= 1 {
 			return true, "URL corpus has auth/API endpoint(s) — direct JWT probe"
 		}
 		return false, "needs token/auth lead from scouts or URL corpus"
@@ -2718,10 +2796,10 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if signals.hasModuleAtLeast("open-redirect", 2) {
 			return true, fmt.Sprintf("URL-forwarding lead available from open-redirect scout (strength=%d)", signals.strength("open-redirect"))
 		}
-		if paramCount := reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "src=", "source=", "fetch=", "load=", "path=", "file=", "dest=", "destination=", "target=", "endpoint=", "proxy=", "callback=", "webhook=", "host=", "redirect=", "return=", "link=", "img=", "image="}); paramCount >= 1 {
+		if paramCount := reconCorpusMatchCount(urlCorpus, []string{"url=", "uri=", "src=", "source=", "fetch=", "load=", "path=", "file=", "dest=", "destination=", "target=", "endpoint=", "proxy=", "callback=", "webhook=", "host=", "redirect=", "return=", "link=", "img=", "image="}); paramCount >= 1 {
 			return true, fmt.Sprintf("URL corpus has %d SSRF-like parameter(s) — direct probe without scout confirmation", paramCount)
 		}
-		urlMatches := reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"})
+		urlMatches := reconCorpusMatchCount(urlCorpus, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"})
 		endpointMatches := reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"})
 		if urlMatches+endpointMatches >= 2 {
 			return true, fmt.Sprintf("stacked SSRF-oriented URL/endpoint patterns detected (%d)", urlMatches+endpointMatches)
@@ -2747,7 +2825,7 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if wf.QueryLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d parameterized/query-like step(s)", wf.QueryLikeSteps)
 		}
-		if paramCount := reconCorpusMatchCount(rs.URLs.All, []string{"id=", "q=", "search=", "filter=", "query=", "page=", "user=", "name=", "type=", "category=", "sort=", "order=", "key=", "token=", "data=", "input=", "value=", "param="}); paramCount >= 1 {
+		if paramCount := reconCorpusMatchCount(urlCorpus, []string{"id=", "q=", "search=", "filter=", "query=", "page=", "user=", "name=", "type=", "category=", "sort=", "order=", "key=", "token=", "data=", "input=", "value=", "param="}); paramCount >= 1 {
 			return true, fmt.Sprintf("URL corpus has %d parameterised endpoint(s) — direct injection probe", paramCount)
 		}
 		return false, "needs query/injection lead from scouts or ranked params"
@@ -2763,17 +2841,17 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
 			return true, fmt.Sprintf("injection scout lead available (strength=%d)", maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage"))
 		}
-		if strings.TrimSpace(rs.URLs.All) != "" {
+		if strings.TrimSpace(urlCorpus) != "" {
 			return true, "URL corpus available for command injection probe"
 		}
 		return false, "needs URL corpus or injection scout lead"
 	case "rxss":
-		return strings.TrimSpace(rs.URLs.All) != "", "URL corpus available for XSS probe"
+		return strings.TrimSpace(urlCorpus) != "", "URL corpus available for XSS probe"
 	case "businesslogic":
 		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("rxss", 1) {
 			return true, "injection signal confirms input processing"
 		}
-		if strings.TrimSpace(rs.URLs.All) != "" {
+		if strings.TrimSpace(urlCorpus) != "" {
 			return true, "URL corpus available"
 		}
 		return false, "needs URL corpus"
@@ -2786,7 +2864,7 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if signals.hasModuleAtLeast("session-abuse", 2) {
 			return true, fmt.Sprintf("session/auth scout lead available (strength=%d)", signals.strength("session-abuse"))
 		}
-		if matches := reconCorpusMatchCount(rs.URLs.All, []string{"saml", "sso", "assertion", "acs", "metadata"}); matches >= 2 {
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"saml", "sso", "assertion", "acs", "metadata"}); matches >= 2 {
 			return true, fmt.Sprintf("multiple SAML/SSO URL patterns detected (%d)", matches)
 		}
 		return false, "needs SAML/SSO lead from scouts or URL corpus"
@@ -2831,6 +2909,7 @@ func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, r
 
 func correlationPriorityScore(name string, signals correlationSignals, rs models.ReconSummary) int {
 	score := maxCorrelationStrength(signals, name) * 100
+	urlCorpus := reconURLCorpusPath(rs)
 	switch name {
 	case "auth-bypass":
 		score += maxCorrelationStrength(signals, "cors-poc", "open-redirect", "session-abuse", "privilege-path") * 30
@@ -2841,38 +2920,38 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 		score += maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints") * 30
 	case "state-change":
 		score += maxCorrelationStrength(signals, "session-abuse", "cors-poc", "graphql-abuse", "js-endpoints") * 30
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}) * 5
+		score += reconCorpusMatchCount(urlCorpus, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}) * 5
 	case "upload-abuse":
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"upload", "file", "attachment", "import", "avatar", "image"}) * 10
+		score += reconCorpusMatchCount(urlCorpus, []string{"upload", "file", "attachment", "import", "avatar", "image"}) * 10
 	case "mutation-engine":
 		score += maxCorrelationStrength(signals, "bypass-poc", "nuclei-triage", "http-method-tampering") * 30
 	case "jwt-access":
 		score += maxCorrelationStrength(signals, "session-abuse", "secrets-validator") * 30
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}) * 5
+		score += reconCorpusMatchCount(urlCorpus, []string{"jwt", "token", "oauth", "authorize", "login", "auth"}) * 5
 	case "lfi":
 		score += maxCorrelationStrength(signals, "info-disclosure", "exposed-files") * 40
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"file=", "page=", "path=", "template=", "include="}) * 10
+		score += reconCorpusMatchCount(urlCorpus, []string{"file=", "page=", "path=", "template=", "include="}) * 10
 	case "rxss":
 		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 25
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"q=", "search=", "query=", "message=", "name=", "comment="}) * 8
+		score += reconCorpusMatchCount(urlCorpus, []string{"q=", "search=", "query=", "message=", "name=", "comment="}) * 8
 	case "cmdinject":
 		score += maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage") * 50
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"cmd=", "exec=", "command=", "ping=", "host=", "ip="}) * 15
+		score += reconCorpusMatchCount(urlCorpus, []string{"cmd=", "exec=", "command=", "ping=", "host=", "ip="}) * 15
 	case "hostheader":
 		score += maxCorrelationStrength(signals, "open-redirect", "cors-poc") * 20
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"reset", "forgot", "password", "account"}) * 10
+		score += reconCorpusMatchCount(urlCorpus, []string{"reset", "forgot", "password", "account"}) * 10
 	case "hpp":
 		score += maxCorrelationStrength(signals, "mutation-engine", "http-method-tampering") * 20
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"?"}) * 2
+		score += reconCorpusMatchCount(urlCorpus, []string{"?"}) * 2
 	case "xxeinjection":
 		score += maxCorrelationStrength(signals, "advanced-injection", "info-disclosure") * 30
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"xml", "soap", "wsdl", "upload", "import"}) * 12
+		score += reconCorpusMatchCount(urlCorpus, []string{"xml", "soap", "wsdl", "upload", "import"}) * 12
 	case "businesslogic":
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"price=", "amount=", "qty=", "quantity=", "count=", "balance=", "credit=", "discount="}) * 15
+		score += reconCorpusMatchCount(urlCorpus, []string{"price=", "amount=", "qty=", "quantity=", "count=", "balance=", "credit=", "discount="}) * 15
 		score += maxCorrelationStrength(signals, "session-abuse", "idor-playbook") * 15
 	case "ssrf-prober":
 		score += maxCorrelationStrength(signals, "open-redirect") * 35
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"}) * 5
+		score += reconCorpusMatchCount(urlCorpus, []string{"url=", "uri=", "dest=", "redirect=", "next=", "/render", "/proxy", "/fetch", "/preview", "/image"}) * 5
 		score += reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"}) * 5
 	case "crlf-injection":
 		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 30
@@ -2884,7 +2963,7 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 		score += maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints") * 30
 	case "saml-probe":
 		score += maxCorrelationStrength(signals, "session-abuse") * 30
-		score += reconCorpusMatchCount(rs.URLs.All, []string{"saml", "sso", "assertion", "acs", "metadata"}) * 5
+		score += reconCorpusMatchCount(urlCorpus, []string{"saml", "sso", "assertion", "acs", "metadata"}) * 5
 	}
 	return score
 }
@@ -2943,6 +3022,131 @@ func moduleNames(mods []exploit.Module) []string {
 		out = append(out, m.Name())
 	}
 	return out
+}
+
+func reconURLCorpusPath(rs models.ReconSummary) string {
+	candidates := []string{
+		rs.URLs.All,
+		rs.Intel.URLsRevalidatedJSON,
+		rs.Intel.URLsDiscoveredJSON,
+		rs.Intel.EndpointsRankedJSON,
+		rs.Intel.ResponseFingerprints,
+		rs.Intel.EndpointClustersJSON,
+		rs.Intel.ResponseClustersJSON,
+		rs.Intel.BrowserWorkflowJSON,
+		rs.Intel.FormsDiscoveredJSON,
+		rs.Intel.ReconInventoryJSON,
+	}
+	for _, p := range candidates {
+		if strings.TrimSpace(p) != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+type observedAuthContext struct {
+	UserCookie  string
+	UserHeader  string
+	AdminCookie string
+	AdminHeader string
+	HasUser     bool
+	HasAdmin    bool
+	Source      string
+}
+
+func splitAuthBootstrapModules(mods []exploit.Module) ([]exploit.Module, []exploit.Module) {
+	if len(mods) == 0 {
+		return nil, nil
+	}
+	bootstrap := make([]exploit.Module, 0, 1)
+	rest := make([]exploit.Module, 0, len(mods))
+	for _, m := range mods {
+		if moduleProducesAuthContext(m.Name()) {
+			bootstrap = append(bootstrap, m)
+			continue
+		}
+		rest = append(rest, m)
+	}
+	return bootstrap, rest
+}
+
+func moduleProducesAuthContext(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "autoregister")
+}
+
+func applyObservedAuthFromSharedState(opt *exploit.Options, state *exploit.SharedState) observedAuthContext {
+	if opt == nil {
+		return observedAuthContext{Source: "none"}
+	}
+	observed := observedAuthFromSharedState(state)
+	if observed.UserCookie != "" {
+		opt.AuthUserCookie = observed.UserCookie
+	}
+	if observed.UserHeader != "" {
+		opt.AuthUserHeaders = observed.UserHeader
+	}
+	if observed.AdminCookie != "" {
+		opt.AuthAdminCookie = observed.AdminCookie
+	}
+	if observed.AdminHeader != "" {
+		opt.AuthAdminHeaders = observed.AdminHeader
+	}
+	observed.HasUser = strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != ""
+	observed.HasAdmin = strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != ""
+	if observed.Source == "" {
+		switch {
+		case observed.HasUser || observed.HasAdmin:
+			observed.Source = "existing"
+		default:
+			observed.Source = "none"
+		}
+	}
+	return observed
+}
+
+func observedAuthFromSharedState(state *exploit.SharedState) observedAuthContext {
+	if state == nil {
+		return observedAuthContext{Source: "none"}
+	}
+	out := observedAuthContext{}
+	if v, ok := state.Get("autoregister.session_a"); ok {
+		out.UserCookie = strings.TrimSpace(v)
+	}
+	if out.UserCookie == "" {
+		if v, ok := state.Get("autoregister.session"); ok {
+			out.UserCookie = strings.TrimSpace(v)
+		}
+	}
+	if v, ok := state.Get("autoregister.header_a"); ok {
+		out.UserHeader = strings.TrimSpace(v)
+	}
+	if out.UserHeader == "" {
+		if v, ok := state.Get("autoregister.header"); ok {
+			out.UserHeader = strings.TrimSpace(v)
+		}
+	}
+	if v, ok := state.Get("autoregister.session_b"); ok {
+		out.AdminCookie = strings.TrimSpace(v)
+	}
+	if v, ok := state.Get("autoregister.header_b"); ok {
+		out.AdminHeader = strings.TrimSpace(v)
+	}
+	out.HasUser = out.UserCookie != "" || out.UserHeader != ""
+	out.HasAdmin = out.AdminCookie != "" || out.AdminHeader != ""
+	if out.HasUser || out.HasAdmin {
+		out.Source = "autoregister"
+	} else {
+		out.Source = "none"
+	}
+	return out
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func enrichReconSummaryFromSharedState(artDir string, rs *models.ReconSummary, state *exploit.SharedState) bool {
@@ -3030,6 +3234,7 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 	if len(mods) <= 1 {
 		return mods
 	}
+	hasURLCorpus := strings.TrimSpace(reconURLCorpusPath(rs)) != ""
 	// Lower score executes earlier.
 	score := map[string]int{}
 	for _, m := range mods {
@@ -3041,7 +3246,7 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 		score["session-abuse"] = 25
 		score["open-redirect"] = 23
 	}
-	if strings.TrimSpace(rs.URLs.All) != "" {
+	if hasURLCorpus {
 		score["graphql-abuse"] = 22
 		score["auth-bypass"] = 26
 		score["rxss"] = 28
@@ -3055,7 +3260,7 @@ func prioritizeModules(mods []exploit.Module, rs models.ReconSummary) []exploit.
 		score["hpp"] = 42
 		score["businesslogic"] = 43
 	}
-	if strings.TrimSpace(rs.URLs.All) != "" || strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
+	if hasURLCorpus || strings.TrimSpace(rs.Intel.EndpointsRankedJSON) != "" {
 		score["lfi"] = 35
 		score["rxss"] = 28
 		score["cmdinject"] = 30
@@ -3212,14 +3417,21 @@ func setJobError(job *models.Job, code string, msg string) {
 }
 
 func loadBrowserWorkflowSignals(rs models.ReconSummary) browserWorkflowSignals {
+	signals := browserWorkflowSignals{}
 	workdir := strings.TrimSpace(rs.Workdir)
-	if workdir == "" {
-		return browserWorkflowSignals{}
+	if workdir != "" {
+		artifact, err := browsercapture.LoadArtifact(filepath.Join(workdir, "browser_capture_artifact.json"))
+		if err == nil {
+			signals = mergeBrowserWorkflowSignals(signals, summarizeBrowserCaptureArtifact(artifact))
+		}
 	}
-	artifact, err := browsercapture.LoadArtifact(filepath.Join(workdir, "browser_capture_artifact.json"))
-	if err != nil {
-		return browserWorkflowSignals{}
+	if path := strings.TrimSpace(rs.Intel.BrowserWorkflowJSON); path != "" {
+		signals = mergeBrowserWorkflowSignals(signals, summarizeWorkflowItemsJSON(path))
 	}
+	return signals
+}
+
+func summarizeBrowserCaptureArtifact(artifact browsercapture.Artifact) browserWorkflowSignals {
 	signals := browserWorkflowSignals{
 		Available:        len(artifact.Requests) > 0 || len(artifact.Routes) > 0 || len(artifact.Forms) > 0 || len(artifact.Workflows) > 0,
 		RouteCount:       len(artifact.Routes),
@@ -3253,6 +3465,148 @@ func loadBrowserWorkflowSignals(rs models.ReconSummary) browserWorkflowSignals {
 		}
 	}
 	return signals
+}
+
+func summarizeWorkflowItemsJSON(path string) browserWorkflowSignals {
+	b, err := os.ReadFile(strings.TrimSpace(path))
+	if err != nil || len(b) == 0 {
+		return browserWorkflowSignals{}
+	}
+	var payload any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return browserWorkflowSignals{}
+	}
+	rows := extractWorkflowRows(payload)
+	if len(rows) == 0 {
+		return browserWorkflowSignals{}
+	}
+	signals := browserWorkflowSignals{
+		Available:        true,
+		RecordedWorkflow: len(rows),
+	}
+	routeSeen := map[string]struct{}{}
+	for _, row := range rows {
+		method := strings.ToUpper(strings.TrimSpace(asString(row["method"])))
+		target := strings.ToLower(strings.TrimSpace(firstNonEmptyString(
+			asString(row["route"]),
+			asString(row["url"]),
+			asString(row["page_url"]),
+			asString(row["action_guess"]),
+		)))
+		fields := strings.Join(asStringSlice(row["fields"]), ",")
+		kind := strings.ToLower(strings.TrimSpace(asString(row["kind"])))
+
+		signals.RequestSteps++
+		if target != "" {
+			routeSeen[target] = struct{}{}
+		}
+		if kind == "form" {
+			signals.FormCount++
+		}
+		writeAction := asBool(row["write_action"]) || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete || kind == "form"
+		if writeAction {
+			signals.WriteSteps++
+		}
+		if strings.Contains(target, "upload") || strings.Contains(target, "import") || strings.Contains(target, "avatar") || strings.Contains(fields, "file") || strings.Contains(fields, "image") {
+			signals.UploadSteps++
+		}
+		if strings.Contains(target, "query") || strings.Contains(target, "search") || strings.Contains(target, "filter") || strings.Contains(fields, "query") || strings.Contains(fields, "search") || strings.Contains(fields, "filter") || strings.Contains(fields, "id") || strings.Contains(fields, "sort") {
+			signals.QueryLikeSteps++
+		}
+		if asBool(row["auth_action"]) || strings.Contains(target, "token") || strings.Contains(target, "oauth") || strings.Contains(target, "login") || strings.Contains(target, "auth") || strings.Contains(fields, "token") || strings.Contains(fields, "authorization") {
+			signals.AuthLikeSteps++
+		}
+		if strings.Contains(target, "url=") || strings.Contains(target, "uri=") || strings.Contains(target, "redirect=") || strings.Contains(target, "next=") || strings.Contains(target, "/proxy") || strings.Contains(target, "/fetch") || strings.Contains(target, "/render") || strings.Contains(fields, "url") || strings.Contains(fields, "uri") || strings.Contains(fields, "callback") || strings.Contains(fields, "dest") {
+			signals.SSRFLikeSteps++
+		}
+	}
+	signals.RouteCount = len(routeSeen)
+	return signals
+}
+
+func mergeBrowserWorkflowSignals(base, add browserWorkflowSignals) browserWorkflowSignals {
+	base.Available = base.Available || add.Available
+	base.RequestSteps += add.RequestSteps
+	base.WriteSteps += add.WriteSteps
+	base.UploadSteps += add.UploadSteps
+	base.QueryLikeSteps += add.QueryLikeSteps
+	base.AuthLikeSteps += add.AuthLikeSteps
+	base.SSRFLikeSteps += add.SSRFLikeSteps
+	base.RouteCount += add.RouteCount
+	base.FormCount += add.FormCount
+	base.RecordedWorkflow += add.RecordedWorkflow
+	return base
+}
+
+func extractWorkflowRows(payload any) []map[string]any {
+	appendRow := func(rows []map[string]any, v any) []map[string]any {
+		if m, ok := v.(map[string]any); ok {
+			rows = append(rows, m)
+		}
+		return rows
+	}
+	rows := make([]map[string]any, 0, 64)
+	switch t := payload.(type) {
+	case []any:
+		for _, item := range t {
+			rows = appendRow(rows, item)
+		}
+	case map[string]any:
+		if arr, ok := t["items"].([]any); ok {
+			for _, item := range arr {
+				rows = appendRow(rows, item)
+			}
+		} else {
+			rows = appendRow(rows, t)
+		}
+	}
+	return rows
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func asStringSlice(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			s = strings.TrimSpace(strings.ToLower(s))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func asBool(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		lt := strings.TrimSpace(strings.ToLower(t))
+		return lt == "1" || lt == "true" || lt == "yes" || lt == "on"
+	default:
+		return false
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func writeArtifactManifest(job *models.Job, artifactsRoot string) error {

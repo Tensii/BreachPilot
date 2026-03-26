@@ -1,0 +1,9 @@
+{
+  "source_directories": [
+    "tools/reconharvest"
+  ],
+  "search_path": [
+    "tools/reconharvest"
+  ],
+  "python_version": "3.12"
+}

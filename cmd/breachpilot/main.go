@@ -319,7 +319,9 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 
 			derivedTarget := ""
 			if rs, err := ingest.LoadReconSummary(reconPath); err == nil {
-				if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
+				if rs.Target != "" {
+					derivedTarget = rs.Target
+				} else if guessed := ingest.TargetFromWorkdir(rs.Workdir); guessed != "" {
 					derivedTarget = guessed
 				}
 			}

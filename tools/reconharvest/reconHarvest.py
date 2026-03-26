@@ -3,6 +3,7 @@ import atexit
 import argparse
 import csv
 import datetime
+import html
 import hashlib
 import ipaddress
 import json
@@ -26,16 +27,29 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Tuple, Set, Optional, Deque
+import math
 
-from installers import (
-    command_exists,
-    ensure_dns_wordlist,
-    ensure_resolvers_list,
-    install_required_tools,
-    resolve_tool,
-    set_logger,
-    verify_tool,
-)
+try:
+    from installers import (
+        command_exists,
+        ensure_dns_wordlist,
+        ensure_resolvers_list,
+        install_required_tools,
+        resolve_tool,
+        set_logger,
+        verify_tool,
+    )
+except ModuleNotFoundError:
+    from tools.reconharvest.installers import (  # type: ignore[import-not-found]
+        command_exists,
+        ensure_dns_wordlist,
+        ensure_resolvers_list,
+        install_required_tools,
+        resolve_tool,
+        set_logger,
+        verify_tool,
+    )
 
 try:
     from rich.console import Console
@@ -51,7 +65,7 @@ except (ImportError, ModuleNotFoundError):
     RICH_AVAILABLE = False
 
 RUN_LOG_FILE: Path | None = None
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 SHARED_CONSOLE: Console | None = None
 ACTIVE_DASHBOARD: "HackerDashboard | None" = None
 DASHBOARD_ACTIVE = False
@@ -119,6 +133,27 @@ _RX_BUCKET_URI = re.compile(r's3://([a-z0-9.-]+)')
 _RX_JS_PATH = re.compile(
     r'["\'](/(?:api|v\d|graphql|rest|service|internal|admin|auth|oauth)[/A-Za-z0-9_\-./]{2,60})["\']'
 )
+_RX_HTML_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_RX_FORM_BLOCK = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.I | re.S)
+_RX_TAG_INPUT = re.compile(r"<(?:input|textarea|select)\b(?P<attrs>[^>]*)>", re.I | re.S)
+_RX_TAG_BUTTON = re.compile(r"<button\b(?P<attrs>[^>]*)>(?P<label>.*?)</button>", re.I | re.S)
+_RX_ATTR = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(".*?"|\'.*?\'|[^\s>]+)')
+_RX_ROBOTS_ALLOW = re.compile(r"^\s*(?:allow|disallow)\s*:\s*(\S+)\s*$", re.I)
+_RX_SITEMAP_LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.I)
+_RX_PARAM_IN_TEXT = re.compile(r"[?&]([A-Za-z0-9_.-]{1,64})=", re.I)
+
+_ARCHIVE_URL_SOURCES = frozenset({"gau", "wayback"})
+_LIVE_URL_SOURCES = frozenset({"crawl_live", "js_extracted", "robots", "sitemap", "form_action", "redirect_chain"})
+_HIGH_RISK_PARAM_NAMES = frozenset({
+    "id", "ids", "uid", "user", "user_id", "account", "account_id", "role",
+    "redirect", "next", "url", "dest", "destination", "return", "returnurl", "callback",
+    "file", "path", "template", "doc", "download",
+    "token", "jwt", "auth", "session", "sid", "api_key", "key",
+})
+_AUTH_KEYWORDS = ("login", "signin", "sign-in", "signup", "register", "auth", "session", "password", "2fa", "otp")
+_NOTFOUND_KEYWORDS = ("not found", "404", "page not found", "cannot be found", "doesn't exist")
+_SPA_SHELL_KEYWORDS = ("app-root", "id=\"root\"", "id='root'", "id=\"app\"", "ng-version", "__next_data__", "data-reactroot")
+_FORM_ACTION_KEYWORDS = ("register", "login", "signup", "submit", "save", "update", "create", "delete")
 
 
 @dataclass(frozen=True)
@@ -183,12 +218,219 @@ def _backoff_sleep(base: float, attempt: int) -> None:
     time.sleep(min(2.5, base * (2 ** max(0, attempt - 1)) + jitter))
 
 
+def _templated_path(path: str) -> str:
+    parts = []
+    for seg in (path or "/").split("/"):
+        if not seg:
+            continue
+        low = seg.lower()
+        if seg.isdigit():
+            parts.append("{id}")
+        elif re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", low):
+            parts.append("{uuid}")
+        elif re.fullmatch(r"[0-9a-f]{16,}", low):
+            parts.append("{hex}")
+        elif re.fullmatch(r"[a-z0-9_-]{20,}", low):
+            parts.append("{slug}")
+        else:
+            parts.append(seg)
+    return "/" + "/".join(parts) if parts else "/"
+
+
+def _attr_dict(raw_attrs: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in _RX_ATTR.findall(raw_attrs or ""):
+        val = (v or "").strip().strip("\"'").strip()
+        if k:
+            out[k.lower()] = html.unescape(val)
+    return out
+
+
+def _short_text(value: str, limit: int = 180) -> str:
+    txt = re.sub(r"\s+", " ", str(value or "")).strip()
+    return txt[:limit] + ("…" if len(txt) > limit else "")
+
+
+def _extract_html_title(body_text: str) -> str:
+    m = _RX_HTML_TITLE.search(body_text or "")
+    if not m:
+        return ""
+    return _short_text(html.unescape(m.group(1)), 140)
+
+
+def _framework_hints_from_html(body_text: str) -> list[str]:
+    low = (body_text or "").lower()
+    hints: list[str] = []
+    if any(x in low for x in ("react", "data-reactroot", "__next_data__", "next/router")):
+        hints.append("react")
+    if any(x in low for x in ("angular", "ng-version", "ng-app", "mat-input", "mat-select")):
+        hints.append("angular")
+    if any(x in low for x in ("vue", "nuxt", "data-v-")):
+        hints.append("vue")
+    if "svelte" in low:
+        hints.append("svelte")
+    if "mat-input" in low or "mat-select" in low:
+        hints.append("angular-material")
+    return sorted(set(hints))
+
+
+def _extract_form_artifacts(page_url: str, body_text: str, framework_hints: list[str]) -> tuple[list[dict], list[dict]]:
+    forms: list[dict] = []
+    action_rows: list[dict] = []
+    lower_body = (body_text or "").lower()
+    discovered_action_guesses: set[str] = set()
+
+    for m in _RX_FORM_BLOCK.finditer(body_text or ""):
+        attrs = _attr_dict(m.group("attrs") or "")
+        method = (attrs.get("method") or "GET").upper()
+        action_attr = attrs.get("action") or ""
+        action_guess = urllib.parse.urljoin(page_url, action_attr) if action_attr else page_url
+        fields: list[str] = []
+        for im in _RX_TAG_INPUT.finditer(m.group("body") or ""):
+            iattrs = _attr_dict(im.group("attrs") or "")
+            name = (iattrs.get("name") or iattrs.get("id") or iattrs.get("placeholder") or "").strip()
+            if name:
+                fields.append(name[:64])
+        submit_selector = ""
+        for bm in _RX_TAG_BUTTON.finditer(m.group("body") or ""):
+            battrs = _attr_dict(bm.group("attrs") or "")
+            label = _short_text(html.unescape(re.sub(r"<[^>]+>", " ", bm.group("label") or "")), 48).lower()
+            btype = (battrs.get("type") or "").lower()
+            if btype == "submit" or any(k in label for k in _FORM_ACTION_KEYWORDS):
+                submit_selector = battrs.get("id") or battrs.get("name") or label or "button"
+                break
+        form_row = {
+            "page_url": page_url,
+            "action_guess": action_guess,
+            "method": method,
+            "fields": sorted(set(fields))[:40],
+            "submit_selector": submit_selector,
+            "framework_hints": framework_hints,
+            "kind": "html_form",
+        }
+        forms.append(form_row)
+        if action_guess and action_guess not in discovered_action_guesses:
+            discovered_action_guesses.add(action_guess)
+            action_rows.append({"url": action_guess, "source": "form_action", "method": method})
+
+    input_tags = list(_RX_TAG_INPUT.finditer(body_text or ""))
+    button_tags = list(_RX_TAG_BUTTON.finditer(body_text or ""))
+    if len(forms) == 0 and len(input_tags) >= 2 and len(button_tags) > 0:
+        fields = []
+        for im in input_tags[:30]:
+            attrs = _attr_dict(im.group("attrs") or "")
+            name = (attrs.get("name") or attrs.get("id") or attrs.get("placeholder") or "").strip()
+            if name:
+                fields.append(name[:64])
+        submit_selector = ""
+        action_label = ""
+        for bm in button_tags:
+            battrs = _attr_dict(bm.group("attrs") or "")
+            label = _short_text(html.unescape(re.sub(r"<[^>]+>", " ", bm.group("label") or "")), 48).lower()
+            if any(k in label for k in _FORM_ACTION_KEYWORDS):
+                submit_selector = battrs.get("id") or battrs.get("name") or label or "button"
+                action_label = label
+                break
+        if fields and submit_selector:
+            method = "POST" if any(k in action_label for k in ("save", "create", "update", "delete", "register", "signup")) else "GET"
+            forms.append({
+                "page_url": page_url,
+                "action_guess": page_url,
+                "method": method,
+                "fields": sorted(set(fields))[:40],
+                "submit_selector": submit_selector,
+                "framework_hints": framework_hints,
+                "kind": "virtual_form",
+            })
+            action_rows.append({"url": page_url, "source": "form_action", "method": method})
+
+    if len(forms) == 0 and any(k in lower_body for k in _SPA_SHELL_KEYWORDS):
+        forms.append({
+            "page_url": page_url,
+            "action_guess": page_url,
+            "method": "GET",
+            "fields": [],
+            "submit_selector": "",
+            "framework_hints": framework_hints,
+            "kind": "spa_shell",
+        })
+
+    return forms, action_rows
+
+
+def canonicalize_url(url: str, default_scheme: str = "https") -> dict:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return {"raw_url": "", "normalized_url": "", "templated_url": "", "host": "", "path": "/", "query_pairs": []}
+    cleaned = re.sub(r"#.*$", "", raw_url)
+    if not cleaned:
+        return {"raw_url": raw_url, "normalized_url": "", "templated_url": "", "host": "", "path": "/", "query_pairs": []}
+    if cleaned.startswith("/"):
+        norm_path = re.sub(r"/{2,}", "/", cleaned) or "/"
+        return {
+            "raw_url": raw_url,
+            "normalized_url": norm_path,
+            "templated_url": _templated_path(norm_path),
+            "host": "",
+            "path": norm_path,
+            "query_pairs": sorted(urllib.parse.parse_qsl(urllib.parse.urlsplit(norm_path).query, keep_blank_values=True)),
+        }
+    prepared = raw_url
+    if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", prepared):
+        prepared = f"{default_scheme}://{prepared.lstrip('/')}"
+    try:
+        parsed = urllib.parse.urlsplit(prepared)
+    except Exception:
+        return {"raw_url": raw_url, "normalized_url": cleaned, "templated_url": cleaned, "host": "", "path": "/", "query_pairs": []}
+    scheme = (parsed.scheme or default_scheme).lower()
+    host = (parsed.hostname or parsed.netloc or "").lower()
+    port = parsed.port
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        port = None
+    netloc = host if not port else f"{host}:{port}"
+    path = re.sub(r"/{2,}", "/", parsed.path or "/") or "/"
+    query_pairs = sorted(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query = urllib.parse.urlencode(query_pairs, doseq=True)
+    normalized = urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
+    return {
+        "raw_url": raw_url,
+        "normalized_url": normalized,
+        "templated_url": urllib.parse.urlunsplit((scheme, netloc, _templated_path(path), "", "")),
+        "host": host,
+        "path": path,
+        "query_pairs": query_pairs,
+    }
+
+
 def normalize_url_for_output(url: str) -> str:
-    u = (url or "").strip()
+    return canonicalize_url(url).get("normalized_url", "")
+
+
+def template_url_path(url: str) -> str:
+    u = normalize_url_for_output(url)
     if not u:
         return ""
-    u = re.sub(r"#.*$", "", u)
-    return u
+    parsed = urllib.parse.urlsplit(u)
+    templated_path = _templated_path(parsed.path or "/")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, templated_path, "", ""))
+
+
+def classify_param_name(name: str) -> list[str]:
+    n = (name or "").strip().lower()
+    hints = []
+    if not n:
+        return hints
+    if any(k in n for k in ["id", "uid", "account", "user", "order", "doc"]):
+        hints.append("id_like")
+    if any(k in n for k in ["redirect", "return", "next", "callback", "url", "dest"]):
+        hints.append("redirect_like")
+    if any(k in n for k in ["file", "path", "template", "download", "folder"]):
+        hints.append("file_like")
+    if any(k in n for k in ["token", "jwt", "auth", "session", "key", "secret"]):
+        hints.append("auth_like")
+    if any(k in n for k in ["q", "query", "search", "filter", "sort", "page", "limit", "offset", "cursor"]):
+        hints.append("search_like")
+    return hints
 
 
 def score_endpoint_url(url: str) -> int:
@@ -206,13 +448,26 @@ def score_endpoint_url(url: str) -> int:
     return min(score, 100)
 
 
-def _download_js(url: str, timeout: int = 12) -> str:
+def calculate_entropy(data: str) -> float:
+    if not data:
+        return 0.0
+    occ = {c: data.count(c) for c in set(data)}
+    entropy = 0.0
+    for count in occ.values():
+        p = count / len(data)
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def _download_js(url: str, output_path: Path, timeout: int = 12) -> bool:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": _JS_USER_AGENTS[0]})
+        req = urllib.request.Request(url, headers={"User-Agent": random.choice(_JS_USER_AGENTS)})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", errors="ignore")
+            content = r.read().decode("utf-8", errors="ignore")
+            output_path.write_text(content, encoding="utf-8")
+            return True
     except Exception:
-        return ""
+        return False
 
 
 _JS_USER_AGENTS = [
@@ -229,6 +484,8 @@ HACKER_LOGO = """[bold green]╔═[ RECON HARVEST ]═════════�
 
 
 class NullDashboard:
+    def __init__(self):
+        self.stats: dict[str, int] = {}
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def stage_start(self, stage: str) -> None: ...
@@ -264,6 +521,7 @@ class HackerDashboard:
         )
         self.task = self.progress.add_task("pipeline", total=max(1, total_stages), completed=0, phase="init")
         self.subtask = self.progress.add_task("current step", total=100, completed=0, phase="pending")
+        self.parallel_tasks: dict[str, Any] = {}
 
         self.stats = {
             "subdomains": 0, "live_hosts": 0, "endpoints": 0, "params": 0,
@@ -413,85 +671,76 @@ class HackerDashboard:
 
     def _render(self):
         self._flush_pending_events()
-        layout = Layout()
-
-        status_line = Text.assemble(
-            (self.target, "cyan"),
-            (" • ", "white"),
-            (self.current_stage, "magenta"),
-            (" • ", "white"),
-            (str(self.context.get("profile", "balanced/waf-safe")), "cyan"),
-            (" • ", "white"),
-            (str(self.context.get("run_mode", "--run")), "yellow"),
-            (" • ", "white"),
-            (self._truncate(str(self.context.get("output_dir", "-")), 40), "cyan"),
-            (" • ", "white"),
-            (f"{int(time.monotonic() - self.run_started_at)}s", "green"),
+        
+        main_layout = Layout()
+        main_layout.split_column(
+            Layout(name="header", size=7),
+            Layout(name="status", size=3),
+            Layout(name="body", ratio=1),
+            Layout(name="footer", size=10)
         )
 
-        layout.split_column(
-            Layout(Panel(HACKER_LOGO, border_style="green", box=box.SIMPLE), size=7),
-            Layout(Panel(status_line, box=box.MINIMAL), size=3),
-            Layout(name="middle", ratio=1),
-            Layout(name="footer", size=3),
+        # Header: Logo & System Stats
+        header_table = Table.grid(expand=True)
+        header_table.add_column(ratio=1)
+        header_table.add_column(justify="right")
+        sys_table = Table.grid(expand=True)
+        sys_table.add_column()
+        sys_table.add_column(justify="right")
+        sys_table.add_row("THREADS", Text(str(self.parallel), style="bold cyan"))
+        sys_table.add_row("WAF_STATUS", Text("ADAPTIVE" if self.context.get("waf_detected") else "CLEAN", style="bold yellow"))
+        sys_table.add_row("UPTIME", Text(f"{int(time.monotonic() - self.run_started_at)}s", style="bold green"))
+        header_table.add_row(
+            Text(HACKER_LOGO, style="bold green", justify="left"),
+            Panel(sys_table, title="[SYS]", border_style="dim")
+        )
+        main_layout["header"].update(header_table)
+
+        # Status: Core Pipeline Info
+        status_line = Table.grid(expand=True)
+        status_line.add_column(ratio=1)
+        status_line.add_row(
+            Text.assemble(
+                (" TARGET ", "bold black on cyan"), (f" {self.target} ", "bold cyan"), ("  "),
+                (" STAGE ", "bold black on magenta"), (f" {self.current_stage} ", "bold magenta"), ("  "),
+                (" MODE ", "bold black on yellow"), (f" {self.context.get('run_mode', '--run')} ", "bold yellow"), ("  "),
+                (" DIR ", "bold black on blue"), (f" {self._truncate(str(self.context.get('output_dir', '-')), 30)} ", "bold blue")
+            )
+        )
+        main_layout["status"].update(Panel(status_line, border_style="dim", box=box.HORIZONTALS))
+
+        # Body: Split into Progress (Left) and Telemetry (Right)
+        main_layout["body"].split_row(
+            Layout(name="progress", ratio=2),
+            Layout(name="telemetry", ratio=3)
         )
 
-        progress_tbl = Table.grid(expand=True)
-        progress_tbl.add_row(self.progress)
-        sub_done = int(self.context.get("subtask_done", 0) or 0)
-        sub_total = int(self.context.get("subtask_total", 0) or 0)
-        self.progress.update(
-            self.subtask,
-            total=max(1, sub_total or 1),
-            completed=min(sub_done, max(1, sub_total or 1)),
-            phase=self._truncate(str(self.context.get("source_running", self.current_stage)), 36),
-            description="current step",
+        # Progress Section
+        progress_panel = Panel(
+            self.progress,
+            title="[PIPELINE_ENGINE]", 
+            border_style="cyan",
+            padding=(1, 2)
         )
-        step_line = Text.assemble(
-            ("Current step: ", "cyan"),
-            (f"{sub_done}/{sub_total if sub_total else '—'}", "white"),
-            ("  ", "white"),
-            (self._truncate(str(self.context.get("source_running", "-")), 44), "magenta"),
-        )
-        progress_tbl.add_row(step_line)
+        main_layout["body"]["progress"].update(progress_panel)
 
-        events = Table.grid(expand=True)
-        recent = list(self.events)[-8:]
-        if not recent:
-            recent = [Text("-- waiting --", style="cyan")]
-        for e in recent:
-            events.add_row(e)
-
-        middle = Layout()
-        middle.split_column(Layout(name="upper", ratio=2, minimum_size=10), Layout(name="lower", ratio=2, minimum_size=10))
-        middle["upper"].split_row(
-            Layout(Panel(self._render_mission(), title="Mission", border_style="magenta", box=box.SIMPLE), ratio=1, minimum_size=45),
-            Layout(Panel(self._render_triage(), title="Triage / Findings", border_style="green", box=box.SIMPLE), ratio=1, minimum_size=45),
+        # Telemetry: Triage & Real-time Info
+        triage = self._render_triage()
+        mission = self._render_mission()
+        telemetry_table = Table.grid(expand=True)
+        telemetry_table.add_column(ratio=1)
+        telemetry_table.add_column(ratio=1)
+        telemetry_table.add_row(
+            Panel(triage, title="[FINDINGS/METRICS]", border_style="green", padding=(0, 1)),
+            Panel(mission, title="[ACTIVE_TASK_CONTEXT]", border_style="magenta", padding=(0, 1))
         )
-        middle["lower"].split_row(
-            Layout(Panel(progress_tbl, title="Progress", border_style="yellow", box=box.SIMPLE), ratio=1, minimum_size=45),
-            Layout(Panel(events, title="Recent Events", border_style="cyan", box=box.SIMPLE, height=12), ratio=1, minimum_size=45),
-        )
-        layout["middle"].update(middle)
+        main_layout["body"]["telemetry"].update(telemetry_table)
 
-        footer = Text.assemble(
-            ("Updated: ", "cyan"),
-            (self.last_update, "white"),
-            (" • ", "white"),
-            ("Workers: ", "green"),
-            (str(self.context.get("active_jobs", 0)), "white"),
-            (" • ", "white"),
-            ("Failures: ", "red"),
-            (str(self.context.get("failed_jobs", 0)), "white"),
-            (" • ", "white"),
-            ("Log: ", "cyan"),
-            (self._truncate(str(self.context.get("log_file", "run.log")), 36), "white"),
-            (" • ", "white"),
-            ("Ctrl+C safe stop", "yellow"),
-        )
-        layout["footer"].update(Panel(footer, border_style="cyan", box=box.MINIMAL))
-        return layout
-
+        # Footer: Live Event Log
+        event_list = list(self.events)
+        event_content = Text("\n").join(event_list) if event_list else Text("Waiting for incoming telemetry...", style="dim italic")
+        main_layout["footer"].update(Panel(event_content, title="[REALTIME_LOG]", border_style="yellow", subtitle=f"v{SCHEMA_VERSION} • {self.last_update}"))
+        return main_layout
     def _maybe_refresh(self, force: bool = False) -> None:
         if not self.live:
             return
@@ -705,10 +954,15 @@ class ReconConfig:
     skip_osint: bool = False
     skip_screenshots: bool = False
     screenshots_threads: int = 8
-    screenshots_timeout: int = 10
+    screenshots_timeout: int = 60
     output_format: str = "md"
     debug_artifacts: bool = False
     max_report_files: int = 12
+    url_revalidate_timeout: int = 8
+    url_revalidate_workers: int = 20
+    url_revalidate_cap: int = 2000
+    url_revalidate_get_cap: int = 600
+    url_revalidate_body_max: int = 200000
 
 
 @dataclass(frozen=True)
@@ -798,9 +1052,11 @@ class Runner:
         self.intel = workdir / "intel"
         self.reports = workdir / "reports"
         self.cache = workdir / "cache"
+        self.waf_detected: bool = False
         self.raw = workdir / "raw"
         self.commands_md = workdir / "COMMANDS_USED.md"
         self.command_log_jsonl = self.logs / "command_log.jsonl"
+        self.stats = getattr(self.dashboard, "stats", {})
         self.status_jsonl = self.logs / "stage_status.jsonl"
         self.errors_jsonl = self.logs / "errors.jsonl"
         self.failure_log = self.logs / "discovery_failures.log"
@@ -1331,6 +1587,9 @@ class Runner:
             self.run_tool("assetfinder", [self.assetfinder_bin, "--subs-only", self.target], timeout=self.config.assetfinder_timeout, stdout_path=assetfinder_txt, stderr_path=self.logs / "assetfinder.stderr.log", allow_failure=True)
         lines = sorted({self.target} | {x.strip() for x in (subfinder_txt.read_text(encoding='utf-8', errors='ignore') + "\n" + assetfinder_txt.read_text(encoding='utf-8', errors='ignore')).splitlines() if x.strip()})
         all_subdomains.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        if lines:
+            for s in list(lines)[:8]:
+                self.dashboard.add_event(f"Discovery: host {s}")
         self.dashboard.set_context(source_running="merge complete", subtask_done=2, subtask_total=2)
         self.record_stage_status("subdomains", "completed", "merged passive subdomain sources", metrics={
             "subfinder_count": self._count_lines(subfinder_txt),
@@ -1665,28 +1924,35 @@ class Runner:
             httpx_txt.write_text("\n".join(txt_lines) + ("\n" if txt_lines else ""), encoding="utf-8")
             s_hosts = sorted(hosts)
             live_hosts.write_text("\n".join(s_hosts) + ("\n" if s_hosts else ""), encoding="utf-8")
-            # Keep any pre-hydrated entries and update with fresh scan data.
+            waf_keywords = {"cloudflare", "akamai", "sucuri", "imperva", "incapsula", "f5", "barracuda", "fortiweb", "aws waf", "azure waf"}
+            waf_count = 0
             for line in httpx_json.read_text(encoding="utf-8", errors="ignore").splitlines():
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
+                try: obj = json.loads(line)
+                except Exception: continue
+                tech = " ".join(obj.get("tech") or []).lower()
+                if any(kw in tech for kw in waf_keywords):
+                    waf_count += 1
                 key = (obj.get("url") or obj.get("input") or "").strip()
-                if not key:
-                    continue
+                if not key: continue
                 self._httpx_cache[key] = {
                     "title": (obj.get("title") or "").lower(),
-                    "tech": " ".join(obj.get("tech") or []).lower(),
+                    "tech": tech,
                     "status": int(obj.get("status_code") or 0),
+                    "waf": any(kw in tech for kw in waf_keywords),
                 }
-            self.dashboard.set_context(httpx_buckets=f"2xx={buckets['2xx']} 3xx={buckets['3xx']} 401={buckets['401']} 403={buckets['403']} other={buckets['other']}", source_running="httpx complete", subtask_done=sum(buckets.values()), subtask_total=max(1, sum(buckets.values())))
-            self.record_stage_status("httpx", "completed", "single-pass httpx json; derived text + strict live hosts", metrics={
+
+            self.waf_detected = waf_count > (len(s_hosts) * 0.1)
+            if self.waf_detected:
+                self.dashboard.add_event(f"⚠️  WAF DETECTED on {waf_count} hosts. Auto-throttling active.")
+
+            self.dashboard.set_context(httpx_buckets=f"2xx={buckets['2xx']} 3xx={buckets['3xx']} 401={buckets['401']} 403={buckets['403']} WAF={waf_count}", source_running="httpx complete")
+            self.record_stage_status("httpx", "completed", f"single-pass httpx json; waf_detected={self.waf_detected}", metrics={
                 "live_hosts": len(s_hosts),
+                "waf_count": waf_count,
                 "httpx_2xx": buckets["2xx"],
                 "httpx_3xx": buckets["3xx"],
                 "httpx_401": buckets["401"],
                 "httpx_403": buckets["403"],
-                "httpx_other": buckets["other"],
             })
         else:
             lines = [x.strip() for x in resolved.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()]
@@ -1907,7 +2173,7 @@ class Runner:
 
         failed_dir = self._run_parallel_queue(
             live_hosts,
-            self.config.dirsearch_workers,
+            max(1, self.config.dirsearch_workers // 2) if self.waf_detected else self.config.dirsearch_workers,
             self._run_dirsearch_host,
             on_dirsearch_result,
             progress_label="discovery_dirsearch",
@@ -1936,7 +2202,7 @@ class Runner:
 
         failed_dirs = self._run_parallel_queue(
             dir_hosts,
-            self.config.ffuf_workers,
+            max(1, self.config.ffuf_workers // 2) if self.waf_detected else self.config.ffuf_workers,
             run_ffuf_dirs,
             on_ffuf_dirs_result,
             progress_label="discovery_ffuf_dirs",
@@ -1960,7 +2226,7 @@ class Runner:
 
         failed_files = self._run_parallel_queue(
             ffuf_dirs_useful,
-            self.config.ffuf_workers,
+            max(1, self.config.ffuf_workers // 2) if self.waf_detected else self.config.ffuf_workers,
             run_ffuf_files,
             on_ffuf_files_result,
             progress_label="discovery_ffuf_files",
@@ -1993,6 +2259,225 @@ class Runner:
             out.append(u)
         return sorted(set(out))
 
+    def _load_json_items(self, path: Path) -> list[dict]:
+        if not path.exists() or path.stat().st_size == 0:
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            return []
+        if isinstance(data, dict):
+            items = data.get("items", [])
+            return items if isinstance(items, list) else []
+        return data if isinstance(data, list) else []
+
+    def _source_confidence_base(self, sources: set[str]) -> int:
+        score = 20
+        if any(s in _LIVE_URL_SOURCES for s in sources):
+            score += 35
+        if "form_action" in sources:
+            score += 10
+        if "js_extracted" in sources:
+            score += 8
+        if "redirect_chain" in sources:
+            score += 6
+        if any(s in _ARCHIVE_URL_SOURCES for s in sources):
+            score += 8
+        if all(s in _ARCHIVE_URL_SOURCES for s in sources):
+            score -= 12
+        return max(1, min(100, score))
+
+    def _discover_robots_and_sitemap(self, origins: list[str]) -> dict[str, list[str]]:
+        out = {"robots": [], "sitemap": []}
+        timeout = max(4, min(12, int(self.config.url_revalidate_timeout)))
+        headers = {"User-Agent": random.choice(_JS_USER_AGENTS)}
+        for origin in origins:
+            if SHUTTING_DOWN:
+                break
+            base = origin.rstrip("/")
+            robots_url = f"{base}/robots.txt"
+            try:
+                req = urllib.request.Request(robots_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    body = r.read(256000).decode("utf-8", errors="ignore")
+                for ln in body.splitlines():
+                    m = _RX_ROBOTS_ALLOW.match(ln)
+                    if not m:
+                        continue
+                    path = (m.group(1) or "").strip()
+                    if not path or path == "/" or path == "*":
+                        continue
+                    if not path.startswith("/"):
+                        continue
+                    out["robots"].append(urllib.parse.urljoin(base + "/", path))
+                    if len(out["robots"]) >= 4000:
+                        break
+            except Exception:
+                pass
+            sitemap_candidates = [f"{base}/sitemap.xml"]
+            for sitemap_url in sitemap_candidates:
+                try:
+                    req = urllib.request.Request(sitemap_url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=timeout) as r:
+                        body = r.read(1024000).decode("utf-8", errors="ignore")
+                    for loc in _RX_SITEMAP_LOC.findall(body):
+                        u = str(loc).strip()
+                        if u:
+                            out["sitemap"].append(u)
+                            if len(out["sitemap"]) >= 5000:
+                                break
+                except Exception:
+                    continue
+        out["robots"] = sorted(set(out["robots"]))
+        out["sitemap"] = sorted(set(out["sitemap"]))
+        return out
+
+    def _revalidate_discovered_urls(self, entries: list[dict]) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+        if not entries:
+            return [], [], [], []
+        timeout = max(4, int(self.config.url_revalidate_timeout))
+        workers = max(1, int(self.config.url_revalidate_workers))
+        get_cap = max(1, int(self.config.url_revalidate_get_cap))
+        body_max = max(1024, int(self.config.url_revalidate_body_max))
+        headers = {"User-Agent": random.choice(_JS_USER_AGENTS)}
+
+        def _probe(idx: int, row: dict) -> tuple[dict, list[dict], list[dict], str]:
+            url = str(row.get("normalized_url") or "")
+            if not url:
+                return {}, [], [], ""
+            archive_only = bool(row.get("archive_only"))
+            method = "GET" if idx < get_cap else "HEAD"
+            status = 0
+            content_type = ""
+            final_url = url
+            title = ""
+            body_hash = ""
+            body_len = 0
+            login_required = False
+            soft404 = False
+            waf_hints: list[str] = []
+            framework_hints: list[str] = []
+            forms: list[dict] = []
+            form_actions: list[dict] = []
+            error = ""
+            try:
+                req = urllib.request.Request(url, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status = int(resp.getcode() or 0)
+                    final_url = str(resp.geturl() or url)
+                    hdr = resp.headers or {}
+                    content_type = str(hdr.get("Content-Type") or "").split(";")[0].strip().lower()
+                    header_blob = " ".join([f"{k}:{v}" for k, v in hdr.items()]).lower()
+                    for kw in ("cloudflare", "akamai", "imperva", "sucuri", "incapsula", "aws waf", "azure front door", "f5"):
+                        if kw in header_blob:
+                            waf_hints.append(kw)
+                    body_text = ""
+                    if method == "GET":
+                        raw = resp.read(body_max + 1)
+                        if len(raw) > body_max:
+                            raw = raw[:body_max]
+                        body_len = len(raw)
+                        body_hash = hashlib.sha256(raw).hexdigest()[:24] if raw else ""
+                        body_text = raw.decode("utf-8", errors="ignore")
+                        title = _extract_html_title(body_text)
+                        framework_hints = _framework_hints_from_html(body_text)
+                        is_html = "html" in content_type or "<html" in body_text.lower()
+                        if is_html:
+                            forms, form_actions = _extract_form_artifacts(final_url, body_text, framework_hints)
+                        low = (title + " " + body_text[:3000]).lower()
+                        login_required = status in (401, 403) or any(k in low for k in _AUTH_KEYWORDS)
+                        soft404 = (
+                            status in (200, 301, 302)
+                            and any(k in low for k in _NOTFOUND_KEYWORDS)
+                            and (urllib.parse.urlsplit(final_url).path or "/") not in ("/", "")
+                        )
+                    else:
+                        login_required = status in (401, 403)
+            except urllib.error.HTTPError as e:
+                status = int(e.code or 0)
+                final_url = str(getattr(e, "url", "") or url)
+                content_type = str((e.headers or {}).get("Content-Type") or "").split(";")[0].strip().lower()
+                login_required = status in (401, 403)
+            except Exception as e:
+                error = str(e)
+
+            state = "dead"
+            if soft404:
+                state = "soft404"
+            elif 200 <= status < 300:
+                state = "live"
+            elif 300 <= status < 400:
+                state = "redirected"
+            elif status in (401, 403) or login_required:
+                state = "auth_walled"
+            elif status <= 0:
+                state = "dead"
+            if archive_only and state in {"dead", "soft404"}:
+                state = "stale"
+
+            confidence = int(row.get("initial_confidence") or 30)
+            if state == "live":
+                confidence += 28
+            elif state in {"redirected", "auth_walled"}:
+                confidence += 18
+            elif state == "stale":
+                confidence -= 18
+            elif state in {"dead", "soft404"}:
+                confidence -= 24
+            if form_actions:
+                confidence += 8
+            confidence = max(1, min(100, confidence))
+
+            ctype_main = content_type or "unknown"
+            fingerprint = f"{status}|{ctype_main}|{(title or '').strip().lower()[:80]}|{body_hash or body_len}"
+            out_row = {
+                "url": url,
+                "final_url": final_url,
+                "state": state,
+                "status_code": status,
+                "content_type": content_type,
+                "title": title,
+                "body_hash": body_hash,
+                "body_length": body_len,
+                "login_required_hint": login_required,
+                "soft_404": soft404,
+                "waf_cdn_hints": sorted(set(waf_hints)),
+                "framework_fingerprints": sorted(set(framework_hints)),
+                "sources": sorted(set(row.get("sources") or [])),
+                "source_classes": sorted(set(row.get("source_classes") or [])),
+                "archive_only": archive_only,
+                "confidence": confidence,
+                "param_names": sorted(set(row.get("param_names") or [])),
+                "templated_url": row.get("templated_url") or template_url_path(url),
+                "response_fingerprint": fingerprint,
+                "error": _short_text(error, 200) if error else "",
+            }
+            redirect_url = final_url if final_url and final_url != url else ""
+            return out_row, forms, form_actions, redirect_url
+
+        revalidated: list[dict] = []
+        forms_all: list[dict] = []
+        form_actions_all: list[dict] = []
+        redirect_urls: list[str] = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_probe, i, row): row for i, row in enumerate(entries)}
+            for fut in as_completed(futs):
+                if SHUTTING_DOWN:
+                    break
+                try:
+                    row, forms, actions, redirect_url = fut.result()
+                except Exception:
+                    continue
+                if row:
+                    revalidated.append(row)
+                if forms:
+                    forms_all.extend(forms)
+                if actions:
+                    form_actions_all.extend(actions)
+                if redirect_url:
+                    redirect_urls.append(redirect_url)
+        return revalidated, forms_all, form_actions_all, sorted(set(redirect_urls))
+
     def stage_urls(self):
         if self.is_done("urls"):
             return
@@ -2002,7 +2487,17 @@ class Runner:
         hakrawler_urls = self.urls / "hakrawler_urls.txt"
         urls_all = self.urls / "urls_all.txt"
         urls_params = self.urls / "urls_params.txt"
-        self.touch_files(katana_urls, gau_urls, gospider_urls, hakrawler_urls, urls_all, urls_params)
+        urls_live = self.urls / "urls_live.txt"
+        urls_archive = self.urls / "urls_archive.txt"
+        discovered_json = self.intel / "urls_discovered.json"
+        revalidated_json = self.intel / "urls_revalidated.json"
+        forms_json = self.intel / "forms_discovered.json"
+        workflow_json = self.intel / "browser_workflow_artifacts.json"
+        endpoint_clusters_json = self.intel / "endpoint_clusters.json"
+        fingerprints_json = self.intel / "response_fingerprints.json"
+        response_clusters_json = self.intel / "response_clusters.json"
+        inventory_json = self.intel / "recon_inventory.json"
+        self.touch_files(katana_urls, gau_urls, gospider_urls, hakrawler_urls, urls_all, urls_params, urls_live, urls_archive)
         live_hosts = self.workdir / "live_hosts.txt"
         if self.katana_bin and live_hosts.exists() and live_hosts.stat().st_size > 0:
             self.run_tool("katana", [self.katana_bin, "-list", str(live_hosts), "-silent", "-nc", "-kf", "all", "-c", str(max(1, self.config.url_workers)), "-d", str(self.config.katana_depth)] + (["-jc"] if self.config.katana_js_crawl else []) + ["-o", str(katana_urls)], timeout=self.config.katana_timeout, allow_failure=True)
@@ -2030,59 +2525,492 @@ class Runner:
                 allow_failure=True,
             )
             hk_input_file.unlink(missing_ok=True)
-        merged_raw = sorted({x.strip() for x in (katana_urls.read_text(encoding="utf-8", errors="ignore") + "\n" + gau_urls.read_text(encoding="utf-8", errors="ignore") + "\n" + gospider_urls.read_text(encoding="utf-8", errors="ignore") + "\n" + hakrawler_urls.read_text(encoding="utf-8", errors="ignore")).splitlines() if x.strip()})
-        merged = self.filter_false_positives(merged_raw)
-        urls_all.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
-        params = sorted({u for u in merged if re.search(r"\?.+=", u)})
+
+        discovered: dict[str, dict] = {}
+
+        def add_url(raw_url: str, source: str, source_class: str, method: str = "GET") -> None:
+            canon = canonicalize_url(raw_url)
+            normalized = str(canon.get("normalized_url") or "").strip()
+            if not normalized or any(p.search(normalized) for p in _FP_PATTERNS):
+                return
+            entry = discovered.setdefault(normalized, {
+                "raw_urls": set(),
+                "normalized_url": normalized,
+                "templated_url": canon.get("templated_url") or template_url_path(normalized),
+                "host": canon.get("host") or "",
+                "path": canon.get("path") or "/",
+                "query_pairs": list(canon.get("query_pairs") or []),
+                "param_names": set(),
+                "sources": set(),
+                "source_classes": set(),
+                "methods": set(),
+            })
+            entry["raw_urls"].add(str(raw_url).strip())
+            entry["sources"].add(source)
+            entry["source_classes"].add(source_class)
+            entry["methods"].add((method or "GET").upper())
+            for k, _ in (canon.get("query_pairs") or []):
+                if k:
+                    entry["param_names"].add(str(k).strip())
+
+        for p, source, sclass in [
+            (katana_urls, "crawl_live", "live"),
+            (gospider_urls, "crawl_live", "live"),
+            (hakrawler_urls, "crawl_live", "live"),
+            (gau_urls, "gau", "archive"),
+        ]:
+            if not p.exists():
+                continue
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                u = line.strip()
+                if not u:
+                    continue
+                add_url(u, source, sclass, "GET")
+
+        js_paths_file = self.intel / "secrets_js_endpoints.txt"
+        if js_paths_file.exists():
+            host_bases = [x.strip() for x in live_hosts.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if live_hosts.exists() else []
+            base = host_bases[0] if host_bases else f"https://{self.target}"
+            for line in js_paths_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                path = line.strip()
+                if not path:
+                    continue
+                if path.startswith("http://") or path.startswith("https://"):
+                    add_url(path, "js_extracted", "live", "GET")
+                else:
+                    add_url(urllib.parse.urljoin(base.rstrip("/") + "/", path.lstrip("/")), "js_extracted", "live", "GET")
+
+        live_origins = sorted({
+            urllib.parse.urlunsplit((urllib.parse.urlsplit(h).scheme, urllib.parse.urlsplit(h).netloc, "", "", ""))
+            for h in ([x.strip() for x in live_hosts.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if live_hosts.exists() else [])
+            if urllib.parse.urlsplit(h).scheme and urllib.parse.urlsplit(h).netloc
+        })
+        aux = self._discover_robots_and_sitemap(live_origins[:250])
+        for u in aux.get("robots") or []:
+            add_url(u, "robots", "live", "GET")
+        for u in aux.get("sitemap") or []:
+            add_url(u, "sitemap", "live", "GET")
+
+        discovered_entries = list(discovered.values())
+        for row in discovered_entries:
+            sources = set(row.get("sources") or [])
+            archive_only = bool(sources) and all(s in _ARCHIVE_URL_SOURCES for s in sources)
+            row["archive_only"] = archive_only
+            row["initial_confidence"] = self._source_confidence_base(sources)
+            row["raw_url"] = sorted(row.get("raw_urls") or [""])[0] if row.get("raw_urls") else row.get("normalized_url")
+
+        discovered_entries.sort(
+            key=lambda r: (
+                bool(r.get("archive_only")),
+                -int(r.get("initial_confidence") or 0),
+                str(r.get("normalized_url") or ""),
+            )
+        )
+        cap = max(1, int(self.config.url_revalidate_cap))
+        selected = discovered_entries[:cap]
+        revalidated_rows, forms_rows, form_action_rows, redirect_urls = self._revalidate_discovered_urls(selected)
+        for row in form_action_rows:
+            add_url(str(row.get("url") or ""), "form_action", "workflow", str(row.get("method") or "POST"))
+        for u in redirect_urls:
+            add_url(u, "redirect_chain", "live", "GET")
+
+        if len(revalidated_rows) < cap:
+            already = {str(r.get("url") or "") for r in revalidated_rows}
+            pending = []
+            for row in discovered.values():
+                u = str(row.get("normalized_url") or "")
+                if u and u not in already:
+                    sources = set(row.get("sources") or [])
+                    row["archive_only"] = bool(sources) and all(s in _ARCHIVE_URL_SOURCES for s in sources)
+                    row["initial_confidence"] = self._source_confidence_base(sources)
+                    pending.append(row)
+            pending.sort(key=lambda r: (bool(r.get("archive_only")), -int(r.get("initial_confidence") or 0), str(r.get("normalized_url") or "")))
+            more_rows, more_forms, more_actions, _ = self._revalidate_discovered_urls(pending[: max(0, cap - len(revalidated_rows))])
+            revalidated_rows.extend(more_rows)
+            forms_rows.extend(more_forms)
+            for row in more_actions:
+                add_url(str(row.get("url") or ""), "form_action", "workflow", str(row.get("method") or "POST"))
+
+        revalidated_map: dict[str, dict] = {}
+        for row in revalidated_rows:
+            url = str(row.get("url") or "")
+            if not url:
+                continue
+            cur = revalidated_map.get(url)
+            if cur is None or int(row.get("confidence") or 0) >= int(cur.get("confidence") or 0):
+                revalidated_map[url] = row
+        revalidated_rows = sorted(revalidated_map.values(), key=lambda r: (-int(r.get("confidence") or 0), str(r.get("url") or "")))
+
+        discovered_items = []
+        for u, row in sorted(discovered.items(), key=lambda x: x[0]):
+            rv = revalidated_map.get(u, {})
+            sources = sorted(set(row.get("sources") or []))
+            source_classes = sorted(set(row.get("source_classes") or []))
+            archive_only = bool(sources) and all(s in _ARCHIVE_URL_SOURCES for s in sources)
+            discovered_items.append({
+                "raw_url": sorted(row.get("raw_urls") or [u])[0],
+                "raw_urls": sorted(row.get("raw_urls") or [])[:12],
+                "normalized_url": u,
+                "templated_url": row.get("templated_url") or template_url_path(u),
+                "host": row.get("host") or "",
+                "path": row.get("path") or "/",
+                "param_names": sorted(set(row.get("param_names") or [])),
+                "sources": sources,
+                "source_classes": source_classes,
+                "methods_seen": sorted(set(row.get("methods") or [])),
+                "archive_only": archive_only,
+                "initial_confidence": self._source_confidence_base(set(sources)),
+                "validation_state": rv.get("state") or "unknown",
+                "validation_confidence": int(rv.get("confidence") or 0),
+            })
+
+        urls_all_list = sorted(discovered.keys())
+        params = sorted({u for u in urls_all_list if re.search(r"\?.+=", u)})
+        live_urls = sorted({
+            str(r.get("final_url") or r.get("url") or "")
+            for r in revalidated_rows
+            if str(r.get("state") or "") in {"live", "redirected", "auth_walled"}
+        })
+        archive_urls = sorted({it["normalized_url"] for it in discovered_items if it.get("archive_only")})
+
+        endpoint_clusters: dict[str, dict] = {}
+        for it in discovered_items:
+            templ = str(it.get("templated_url") or "")
+            if not templ:
+                continue
+            c = endpoint_clusters.setdefault(templ, {
+                "templated_route": templ,
+                "concrete_urls": [],
+                "sources": set(),
+                "states": {},
+            })
+            if len(c["concrete_urls"]) < 20:
+                c["concrete_urls"].append(str(it.get("normalized_url") or ""))
+            for src in it.get("sources") or []:
+                c["sources"].add(src)
+            st = str(it.get("validation_state") or "unknown")
+            c["states"][st] = int(c["states"].get(st, 0)) + 1
+        endpoint_cluster_rows = sorted(
+            [{
+                "templated_route": k,
+                "concrete_count": len(v.get("concrete_urls") or []),
+                "concrete_urls": sorted(set(v.get("concrete_urls") or []))[:20],
+                "sources": sorted(v.get("sources") or []),
+                "states": v.get("states") or {},
+            } for k, v in endpoint_clusters.items()],
+            key=lambda r: (-int(r.get("concrete_count") or 0), str(r.get("templated_route") or "")),
+        )
+
+        fingerprint_rows = [{
+            "url": str(r.get("url") or ""),
+            "final_url": str(r.get("final_url") or ""),
+            "status_code": int(r.get("status_code") or 0),
+            "content_type": str(r.get("content_type") or ""),
+            "title": str(r.get("title") or ""),
+            "body_hash": str(r.get("body_hash") or ""),
+            "body_length": int(r.get("body_length") or 0),
+            "response_fingerprint": str(r.get("response_fingerprint") or ""),
+            "state": str(r.get("state") or ""),
+        } for r in revalidated_rows]
+        response_clusters: dict[str, dict] = {}
+        for row in fingerprint_rows:
+            key = str(row.get("response_fingerprint") or "")
+            if not key:
+                continue
+            c = response_clusters.setdefault(key, {
+                "response_fingerprint": key,
+                "status_code": int(row.get("status_code") or 0),
+                "content_type": str(row.get("content_type") or ""),
+                "title": str(row.get("title") or ""),
+                "count": 0,
+                "sample_urls": [],
+            })
+            c["count"] += 1
+            if len(c["sample_urls"]) < 15:
+                c["sample_urls"].append(str(row.get("final_url") or row.get("url") or ""))
+        response_cluster_rows = sorted(response_clusters.values(), key=lambda r: (-int(r.get("count") or 0), str(r.get("response_fingerprint") or "")))
+
+        workflow_rows = []
+        for form in forms_rows:
+            method = str(form.get("method") or "GET").upper()
+            submit_selector = str(form.get("submit_selector") or "")
+            label_blob = (submit_selector + " " + str(form.get("action_guess") or "")).lower()
+            workflow_rows.append({
+                "page_url": str(form.get("page_url") or ""),
+                "route": normalize_url_for_output(str(form.get("action_guess") or "")),
+                "method": method,
+                "fields": sorted(set(form.get("fields") or []))[:40],
+                "kind": str(form.get("kind") or ""),
+                "framework_hints": sorted(set(form.get("framework_hints") or [])),
+                "auth_action": any(k in label_blob for k in ("login", "signin", "register", "signup", "auth")),
+                "write_action": method != "GET" or any(k in label_blob for k in ("save", "create", "update", "delete")),
+            })
+
+        urls_all.write_text("\n".join(urls_all_list) + ("\n" if urls_all_list else ""), encoding="utf-8")
         urls_params.write_text("\n".join(params) + ("\n" if params else ""), encoding="utf-8")
+        urls_live.write_text("\n".join(live_urls) + ("\n" if live_urls else ""), encoding="utf-8")
+        urls_archive.write_text("\n".join(archive_urls) + ("\n" if archive_urls else ""), encoding="utf-8")
+
+        self.write_json(discovered_json, {"total": len(discovered_items), "items": discovered_items})
+        self.write_json(revalidated_json, {"total": len(revalidated_rows), "items": revalidated_rows})
+        self.write_json(forms_json, {"total": len(forms_rows), "items": forms_rows})
+        self.write_json(workflow_json, {"total": len(workflow_rows), "items": workflow_rows})
+        self.write_json(endpoint_clusters_json, {"total": len(endpoint_cluster_rows), "items": endpoint_cluster_rows})
+        self.write_json(fingerprints_json, {"total": len(fingerprint_rows), "items": fingerprint_rows})
+        self.write_json(response_clusters_json, {"total": len(response_cluster_rows), "items": response_cluster_rows})
+        self.write_json(inventory_json, {
+            "hosts_discovered": self._count_lines(self.workdir / "all_subdomains.txt"),
+            "origins_live": len(live_origins),
+            "urls_live": len(live_urls),
+            "urls_archive": len(archive_urls),
+            "params_ranked": self._count_lines(urls_params),
+            "paths": {
+                "hosts_discovered": str(self.workdir / "all_subdomains.txt"),
+                "origins_live": str(live_hosts),
+                "urls_live": str(urls_live),
+                "urls_archive": str(urls_archive),
+                "urls_discovered_json": str(discovered_json),
+                "urls_revalidated_json": str(revalidated_json),
+            },
+        })
+
         self.build_params_ranked(params)
-        self.record_stage_status("urls", "completed", "katana/gau url collection and param ranking generated", metrics={
-            "urls_all": len(merged),
+        self.record_stage_status("urls", "completed", "url discovery + revalidation + clustering generated", metrics={
+            "urls_discovered": len(discovered_items),
+            "urls_revalidated": len(revalidated_rows),
+            "urls_live": len(live_urls),
+            "urls_archive": len(archive_urls),
             "urls_with_params": len(params),
+            "forms": len(forms_rows),
+            "workflow_artifacts": len(workflow_rows),
+            "endpoint_clusters": len(endpoint_cluster_rows),
+            "response_clusters": len(response_cluster_rows),
         })
         self.mark_done("urls")
 
     def build_params_ranked(self, urls_with_params: list[str]):
-        juicy = {"id","ids","uid","user","user_id","account","acct","email","phone","token","access_token","refresh_token","auth","jwt","session","sid","key","api_key","redirect","return","returnurl","next","callback","url","dest","destination","continue","file","path","download","doc","document","template","view","q","s","search","query","filter","sort","order","page","limit","offset","cursor","from","to","start","end","lang","locale","debug","test"}
-        cnt: dict[str, int] = {}
-        examples: dict[str, list[str]] = {}
-        for u in urls_with_params:
-            try:
-                qs = urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query, keep_blank_values=True)
-            except Exception:
+        juicy = {
+            "id","ids","uid","user","user_id","account","acct","email","phone","token","access_token","refresh_token",
+            "auth","jwt","session","sid","key","api_key","redirect","return","returnurl","next","callback","url","dest",
+            "destination","continue","file","path","download","doc","document","template","view","q","s","search","query",
+            "filter","sort","order","page","limit","offset","cursor","from","to","start","end","lang","locale","debug","test","role",
+        }
+        stats: dict[str, dict] = {}
+
+        discovered_items = self._load_json_items(self.intel / "urls_discovered.json")
+        forms_items = self._load_json_items(self.intel / "forms_discovered.json")
+        revalidated_items = self._load_json_items(self.intel / "urls_revalidated.json")
+        state_by_url = {str(x.get("url") or ""): str(x.get("state") or "unknown") for x in revalidated_items if str(x.get("url") or "")}
+
+        def _entry(name: str) -> dict:
+            return stats.setdefault(name, {
+                "count": 0,
+                "examples": [],
+                "sources": set(),
+                "source_classes": set(),
+                "endpoint_templates": set(),
+                "values": set(),
+                "methods": set(),
+                "hints": set(),
+                "states": set(),
+                "reasons": [],
+            })
+
+        def _add_param(param_name: str, *, normalized_url: str, templated_url: str, source_tags: list[str], source_classes: list[str], method: str, value: str = "", reason: str = "") -> None:
+            k = (param_name or "").strip()
+            if not k:
+                return
+            entry = _entry(k)
+            entry["count"] += 1
+            for s in source_tags:
+                if s:
+                    entry["sources"].add(str(s))
+            for s in source_classes:
+                if s:
+                    entry["source_classes"].add(str(s))
+            if method:
+                entry["methods"].add(str(method).upper())
+            if templated_url:
+                entry["endpoint_templates"].add(templated_url)
+            if normalized_url and normalized_url not in entry["examples"] and len(entry["examples"]) < 5:
+                entry["examples"].append(normalized_url)
+            if value and len(entry["values"]) < 7:
+                entry["values"].add(str(value)[:80])
+            for hint in classify_param_name(k):
+                entry["hints"].add(hint)
+            st = state_by_url.get(normalized_url)
+            if st:
+                entry["states"].add(st)
+            if k.lower() in juicy:
+                entry["reasons"].append("keyword matched juicy parameter shortlist")
+            if classify_param_name(k):
+                entry["reasons"].append("exploit hints derived from parameter name")
+            if reason:
+                entry["reasons"].append(reason)
+
+        for item in discovered_items:
+            normalized = str(item.get("normalized_url") or "").strip()
+            if not normalized:
                 continue
-            for k, _ in qs:
-                k = k.strip()
-                if not k:
+            canon = canonicalize_url(normalized)
+            normalized = canon.get("normalized_url") or ""
+            if not normalized:
+                continue
+            for k, v in canon.get("query_pairs") or []:
+                _add_param(
+                    k,
+                    normalized_url=normalized,
+                    templated_url=str(item.get("templated_url") or template_url_path(normalized)),
+                    source_tags=[str(x) for x in (item.get("sources") or [])],
+                    source_classes=[str(x) for x in (item.get("source_classes") or [])],
+                    method="GET",
+                    value=str(v),
+                    reason="observed in discovered URL query string",
+                )
+
+        for raw in urls_with_params:
+            canon = canonicalize_url(raw)
+            normalized = canon.get("normalized_url") or ""
+            if not normalized:
+                continue
+            for k, v in canon.get("query_pairs") or []:
+                _add_param(
+                    k,
+                    normalized_url=normalized,
+                    templated_url=canon.get("templated_url") or template_url_path(normalized),
+                    source_tags=["urls"],
+                    source_classes=["live"],
+                    method="GET",
+                    value=str(v),
+                    reason="captured in urls_params corpus",
+                )
+
+        for form in forms_items:
+            page_url = normalize_url_for_output(str(form.get("page_url") or ""))
+            action_guess = normalize_url_for_output(str(form.get("action_guess") or "")) or page_url
+            method = str(form.get("method") or "POST").upper()
+            templated = template_url_path(action_guess or page_url)
+            kind = str(form.get("kind") or "form")
+            for fld in (form.get("fields") or []):
+                name = str(fld).strip()
+                if not name:
                     continue
-                cnt[k] = cnt.get(k, 0) + 1
-                examples.setdefault(k, [])
-                if len(examples[k]) < 3:
-                    examples[k].append(u)
+                _add_param(
+                    name,
+                    normalized_url=action_guess or page_url,
+                    templated_url=templated,
+                    source_tags=["form_action"],
+                    source_classes=["workflow"],
+                    method=method,
+                    reason=f"captured from {kind}",
+                )
+
+        arjun_json = self.cache / "arjun_params.json"
+        if arjun_json.exists():
+            try:
+                arjun_data = json.loads(arjun_json.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                arjun_data = {}
+            if isinstance(arjun_data, dict):
+                for endpoint, params in arjun_data.items():
+                    templated = template_url_path(endpoint)
+                    for param in params or []:
+                        k = str(param).strip()
+                        if not k:
+                            continue
+                        _add_param(
+                            k,
+                            normalized_url=normalize_url_for_output(endpoint),
+                            templated_url=templated,
+                            source_tags=["arjun"],
+                            source_classes=["live"],
+                            method="GET",
+                            reason="confirmed by active parameter discovery",
+                        )
+
         out_md = self.intel / "params_ranked.md"
         out_json = self.intel / "params_ranked.json"
-        if not cnt:
+        if not stats:
             out_md.write_text("# Parameter Ranking (Readable)\n\n_No param URLs found._\n", encoding="utf-8")
             self.write_json(out_json, {"total_unique_params": 0, "top": []})
             return
-        ranked = sorted(((n + (50 if k.lower() in juicy else 0), k, n, k.lower() in juicy) for k, n in cnt.items()), reverse=True)
-        md = []
-        md.append("# Parameter Ranking (Readable)\n\n")
-        md.append(f"- Total unique params: **{len(cnt)}**\n")
-        md.append(f"- Juicy/security-relevant params: **{sum(1 for k in cnt if k.lower() in juicy)}**\n\n")
-        md.append("Legend: ✅ = security-relevant keyword match\n\n")
-        for idx, (_, k, n, isj) in enumerate(ranked, 1):
-            md.append(f"## {idx}. `{esc_md_pipe(k)}` {'✅' if isj else ''}\n")
-            md.append(f"- Count: **{n}**\n")
-            exs = examples.get(k, [])
-            if exs:
+
+        exploit_map = {"id_like": "idor", "redirect_like": "redirect", "file_like": "file-access", "auth_like": "auth", "search_like": "input-reflection"}
+        ranked_rows = []
+        for k, entry in stats.items():
+            hints = sorted(entry["hints"])
+            score = entry["count"] * 4
+            if k.lower() in juicy:
+                score += 18
+            if k.lower() in _HIGH_RISK_PARAM_NAMES:
+                score += 16
+            score += min(20, len(entry["sources"]) * 6)
+            score += min(14, len(entry["endpoint_templates"]) * 3)
+            score += min(10, len(entry["methods"]) * 4)
+            score += min(24, len(hints) * 8)
+            if "workflow" in entry["source_classes"]:
+                score += 10
+            if "live" in entry["source_classes"]:
+                score += 8
+            if entry["source_classes"] and all(x == "archive" for x in entry["source_classes"]):
+                score -= 8
+            if "live" in entry["states"]:
+                score += 8
+            if "auth_walled" in entry["states"]:
+                score += 4
+            reasons = list(entry["reasons"])
+            reasons.append(f"seen {entry['count']} time(s)")
+            reasons.append(f"source coverage: {', '.join(sorted(entry['sources']))}")
+            reasons.append(f"endpoint spread: {len(entry['endpoint_templates'])} template(s)")
+            if entry["states"]:
+                reasons.append(f"state coverage: {', '.join(sorted(entry['states']))}")
+            ranked_rows.append({
+                "param": k,
+                "count": entry["count"],
+                "sources": sorted(entry["sources"]),
+                "source_classes": sorted(entry["source_classes"]),
+                "endpoint_count": len(entry["endpoint_templates"]),
+                "endpoint_templates": sorted(entry["endpoint_templates"])[:20],
+                "examples": entry["examples"],
+                "sample_values": sorted(entry["values"])[:5],
+                "method_count": len(entry["methods"]),
+                "methods": sorted(entry["methods"]),
+                "hints": hints,
+                "state_coverage": sorted(entry["states"]),
+                "exploit_hints": sorted({exploit_map[h] for h in hints if h in exploit_map}),
+                "juicy": k.lower() in juicy,
+                "score": min(100, score),
+                "reasons": reasons[:8],
+            })
+        ranked_rows.sort(key=lambda r: (-r["score"], -r["count"], r["param"]))
+        md = ["# Parameter Ranking (Readable)\n\n"]
+        md.append(f"- Total unique params: **{len(stats)}**\n")
+        md.append(f"- High-signal params: **{sum(1 for r in ranked_rows if r['score'] >= 60)}**\n\n")
+        for idx, row in enumerate(ranked_rows, 1):
+            md.append(f"## {idx}. `{esc_md_pipe(row['param'])}` {'✅' if row['juicy'] else ''}\n")
+            md.append(f"- Score: **{row['score']}**\n")
+            md.append(f"- Count: **{row['count']}** | Endpoint templates: **{row['endpoint_count']}** | Methods: **{row['method_count']}**\n")
+            if row['sources']:
+                md.append(f"- Sources: `{esc_md_pipe(', '.join(row['sources']))}`\n")
+            if row['source_classes']:
+                md.append(f"- Source classes: `{esc_md_pipe(', '.join(row['source_classes']))}`\n")
+            if row['exploit_hints']:
+                md.append(f"- Exploit hints: `{esc_md_pipe(', '.join(row['exploit_hints']))}`\n")
+            if row['state_coverage']:
+                md.append(f"- Validation states: `{esc_md_pipe(', '.join(row['state_coverage']))}`\n")
+            if row['reasons']:
+                md.append("- Why it ranked:\n")
+                for reason in row['reasons'][:5]:
+                    md.append(f"  - {esc_md_pipe(reason)}\n")
+            if row['sample_values']:
+                md.append(f"- Sample values: `{esc_md_pipe(', '.join(row['sample_values']))}`\n")
+            if row['examples']:
                 md.append("- Examples:\n")
-                for ex in exs:
-                    ex = ex if len(ex) <= 180 else (ex[:177] + "...")
-                    md.append(f"  - `{esc_md_pipe(ex)}`\n")
+                for ex in row['examples'][:3]:
+                    md.append(f"  - `{esc_md_pipe(ex[:200])}`\n")
             md.append("\n")
         out_md.write_text("".join(md), encoding="utf-8")
-        self.write_json(out_json, {"total_unique_params": len(cnt), "top": [{"param": k, "count": n, "juicy": isj} for _, k, n, isj in ranked]})
+        self.write_json(out_json, {"total_unique_params": len(stats), "top": ranked_rows[:2000]})
 
     def stage_tech(self):
         if self.is_done("tech"):
@@ -2219,7 +3147,10 @@ class Runner:
         if self.skip_nuclei:
             self.record_stage_status("nuclei_phase1", "skipped", "skip-nuclei enabled")
         elif self.nuclei_bin and live_hosts.exists() and live_hosts.stat().st_size > 0:
-            self.run_tool("nuclei phase1 jsonl", [self.nuclei_bin, "-l", str(live_hosts), "-severity", sev, "-tags", tags, "-silent", "-rl", str(self.config.nuclei_rate_limit), "-c", str(self.config.nuclei_concurrency), "-max-host-error", str(self.config.nuclei_max_host_error), "-timeout", str(self.config.nuclei_timeout), "-retries", str(self.config.nuclei_retries), "-jsonl", "-o", str(js)], timeout=900, allow_failure=True)
+            cmd = [self.nuclei_bin, "-l", str(live_hosts), "-severity", sev, "-tags", tags, "-silent", "-rl", str(self.config.nuclei_rate_limit), "-c", str(self.config.nuclei_concurrency), "-max-host-error", str(self.config.nuclei_max_host_error), "-timeout", str(self.config.nuclei_timeout), "-retries", str(self.config.nuclei_retries), "-jsonl", "-o", str(js)]
+            if not self.nuclei_tags:
+                cmd.append("-as") # Automatic tech-based scan
+            self.run_tool("nuclei phase1 jsonl", cmd, timeout=960, allow_failure=True)
             self.render_nuclei_jsonl_text(js, txt)
             self.record_stage_status("nuclei_phase1", "completed", "phase1 nuclei scan attempted")
             self.add_finding("nuclei_phase1", "INFO", self.target, "Nuclei phase1 completed", evidence="See nuclei_readable.md for details", confidence=50, tags=["nuclei"])
@@ -2252,7 +3183,8 @@ class Runner:
             self.mark_done("nuclei_phase2")
             return
         tops = []
-        for item in (ranked or []):
+        ranked_items = ranked.get("items", ranked) if isinstance(ranked, dict) else ranked
+        for item in (ranked_items or []):
             if not isinstance(item, dict):
                 continue
             u = str(item.get("url") or "").strip()
@@ -2396,7 +3328,7 @@ class Runner:
             "trufflehog": truffle_rows,
             "gitleaks": gitleaks_rows,
             "secretfinder": sf_rows,
-            "s3_buckets": [b.get("name","") for b in buckets_rows],
+            "s3_buckets": [b.get("name", "") for b in buckets_rows],
         }
         self.write_json(json_out, report)
 
@@ -2524,7 +3456,9 @@ class Runner:
                         except Exception as e:
                             append_text_line(self.logs / "secrets_download_failures.log", f"{now_utc_iso()} {u}: {e}")
 
-            log(f"[*] secrets: downloaded {downloaded}/{len(js_urls[:self.config.secrets_js_cap])} JS files ({len(js_urls[:self.config.secrets_js_cap]) - downloaded} skipped)")
+            js_cap = self.config.secrets_js_cap
+            total_attempted = len(js_urls[:js_cap])
+            log(f"[*] secrets: downloaded {downloaded}/{total_attempted} JS files ({total_attempted - downloaded} skipped)")
 
             seen_values: set[str] = set()
             js_endpoints_data: list[dict] = []
@@ -2538,10 +3472,11 @@ class Runner:
                             for rx in (_RX_AWS_KEY, _RX_AWS_SECRET, _RX_API_KEY, _RX_BEARER, _RX_GENERIC_SECRET, _RX_JWT):
                                 for m in rx.finditer(line_s):
                                     val = m.group(0)[:120]
-                                    if val not in seen_values:
-                                        seen_values.add(val)
-                                        display = line_s[:300] + ("…" if len(line_s) > 300 else "")
-                                        findings.append(f"{fp.name}:{i}: {display}")
+                                    if len(val) >= 12 and calculate_entropy(val) > 3.5:
+                                        if val not in seen_values:
+                                            seen_values.add(val)
+                                            display = line_s[:300] + ("…" if len(line_s) > 300 else "")
+                                            findings.append(f"{fp.name}:{i}: {display}")
                                     break
                             for m in _RX_JS_PATH.finditer(line_s):
                                 path = m.group(1)
@@ -2669,7 +3604,7 @@ class Runner:
             status = "completed" if len(missing_tools) == 0 else "partial"
             self.record_stage_status("secrets", status, f"quick_hits={len(findings)} buckets={len(buckets)} missing_tools={len(set(missing_tools))}")
             for f in findings[:200]:
-                self.add_finding("secrets", "HIGH", str(f.get("url") or f.get("file") or ""), "Potential secret exposure", evidence=str(f)[:300], confidence=70, tags=["secrets"])
+                self.add_finding("secrets", "HIGH", self.target, "Potential secret exposure", evidence=str(f)[:300], confidence=70, tags=["secrets"])
             self.mark_done("secrets")
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2677,67 +3612,233 @@ class Runner:
     def stage_endpoint_ranking(self):
         if self.is_done("endpoint_ranking"):
             return
-        urls_all = self.urls / "urls_all.txt"
-        dirsearch_json = self.intel / "dirsearch_normalized.json"
         out_md = self.intel / "endpoints_ranked.md"
         out_json = self.intel / "endpoints_ranked.json"
-        candidates: dict[str, dict] = {}
-        def bump(u: str, add: int, src: str):
-            c = candidates.setdefault(u, {"score": 0, "sources": set()})
-            c["score"] += add + score_endpoint_url(u)
-            c["sources"].add(src)
-        if urls_all.exists():
-            for u in [x.strip() for x in urls_all.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()]:
-                c = candidates.setdefault(u, {"score": 0, "sources": set()})
-                c["score"] += score_endpoint_url(u)
-                c["sources"].add("urls")
-        for p in self.ffuf.glob("*.csv"):
+        discovered_items = self._load_json_items(self.intel / "urls_discovered.json")
+        revalidated_items = self._load_json_items(self.intel / "urls_revalidated.json")
+        workflow_items = self._load_json_items(self.intel / "browser_workflow_artifacts.json")
+        response_clusters = self._load_json_items(self.intel / "response_clusters.json")
+        endpoint_clusters = self._load_json_items(self.intel / "endpoint_clusters.json")
+        params_payload = {}
+        params_ranked_json = self.intel / "params_ranked.json"
+        if params_ranked_json.exists():
             try:
-                with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-                    r = csv.reader(f)
-                    next(r, None)
-                    for row in r:
-                        if len(row) < 3:
-                            continue
-                        url, sc = row[0], row[2]
-                        if not url:
-                            continue
-                        add = 10 + (20 if sc.startswith("2") else 10 if sc.startswith("3") else 8 if sc in ("401", "403") else 0)
-                        bump(url, add, "ffuf")
+                params_payload = json.loads(params_ranked_json.read_text(encoding="utf-8", errors="ignore"))
             except Exception:
-                pass
-        if dirsearch_json.exists():
-            try:
-                data = json.loads(dirsearch_json.read_text(encoding="utf-8", errors="ignore"))
-                rows = data.get("items", []) if isinstance(data, dict) else data
-                for row in rows:
-                    u = str(row.get("url") or "").strip()
-                    sc = str(row.get("status") or "").strip()
-                    if not u or not sc:
-                        continue
-                    add = 8 + (18 if sc.startswith("2") else 10 if sc.startswith("3") else 0)
-                    bump(u, add, "dirsearch")
-            except Exception as e:
-                self.record_failure("endpoint_ranking", "dirsearch_json", e)
-        js_endpoints_file = self.intel / "secrets_js_endpoints.txt"
-        if js_endpoints_file.exists():
-            base = f"https://{self.target}"
-            for raw in js_endpoints_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                path = raw.strip()
-                if not path:
-                    continue
-                if path.startswith("http://") or path.startswith("https://"):
-                    u = path
-                else:
-                    u = urllib.parse.urljoin(base + "/", path)
-                bump(u, 15, "js_extract")
-        ranked = sorted(((v["score"], u, sorted(v["sources"])) for u, v in candidates.items()), reverse=True)
-        md = ["# Endpoint Ranking (triage)\n\n", "| Score | URL | Sources |\n|---:|---|---|\n"]
-        for score, u, sources in ranked[:200]:
-            md.append(f"| {score} | {esc_md_pipe(u)} | {esc_md_pipe(', '.join(sources))} |\n")
+                params_payload = {}
+        params_top = params_payload.get("top", []) if isinstance(params_payload, dict) else []
+        param_score = {str(p.get("param") or ""): int(p.get("score") or 0) for p in params_top if isinstance(p, dict)}
+
+        cluster_size_by_fingerprint = {
+            str(c.get("response_fingerprint") or ""): int(c.get("count") or 0)
+            for c in response_clusters if isinstance(c, dict)
+        }
+        templated_cluster_count = {
+            str(c.get("templated_route") or ""): int(c.get("concrete_count") or 0)
+            for c in endpoint_clusters if isinstance(c, dict)
+        }
+
+        revalidated_by_url: dict[str, dict] = {}
+        for r in revalidated_items:
+            if not isinstance(r, dict):
+                continue
+            u = normalize_url_for_output(str(r.get("url") or ""))
+            if not u:
+                continue
+            revalidated_by_url[u] = r
+            fu = normalize_url_for_output(str(r.get("final_url") or ""))
+            if fu and fu not in revalidated_by_url:
+                revalidated_by_url[fu] = r
+
+        workflow_by_route: dict[str, list[dict]] = {}
+        for row in workflow_items:
+            if not isinstance(row, dict):
+                continue
+            route = normalize_url_for_output(str(row.get("route") or row.get("page_url") or ""))
+            if route:
+                workflow_by_route.setdefault(route, []).append(row)
+
+        candidates: dict[str, dict] = {}
+
+        def _cand(url: str) -> dict:
+            norm = normalize_url_for_output(url)
+            if not norm:
+                return {}
+            return candidates.setdefault(norm, {
+                "url": norm,
+                "templated_route": template_url_path(norm),
+                "sources": set(),
+                "source_classes": set(),
+                "methods": set(),
+                "param_names": set(),
+            })
+
+        for item in discovered_items:
+            if not isinstance(item, dict):
+                continue
+            u = str(item.get("normalized_url") or "")
+            c = _cand(u)
+            if not c:
+                continue
+            for s in (item.get("sources") or []):
+                c["sources"].add(str(s))
+            for s in (item.get("source_classes") or []):
+                c["source_classes"].add(str(s))
+            for m in (item.get("methods_seen") or []):
+                c["methods"].add(str(m).upper())
+            for p in (item.get("param_names") or []):
+                c["param_names"].add(str(p).strip())
+            c["templated_route"] = str(item.get("templated_url") or c["templated_route"])
+
+        if not candidates:
+            # Fallback: basic ranking from urls_all if stage_urls produced no JSON.
+            urls_all = self.urls / "urls_all.txt"
+            for u in [x.strip() for x in urls_all.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if urls_all.exists() else []:
+                c = _cand(u)
+                if c:
+                    c["sources"].add("urls")
+                    c["source_classes"].add("live")
+                    for k, _ in (canonicalize_url(u).get("query_pairs") or []):
+                        c["param_names"].add(k)
+
+        ranked_rows: list[dict] = []
+        static_ext_rx = re.compile(r"\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|pdf|zip|gz|rar|7z)$", re.I)
+        risky_endpoint_keywords = ("admin", "debug", "internal", "api", "graphql", "swagger", "upload", "export", "import", "login", "auth")
+        for u, c in candidates.items():
+            reasons: list[str] = []
+            score = score_endpoint_url(u)
+            rv = revalidated_by_url.get(u, {})
+            state = str(rv.get("state") or "unknown")
+            status = int(rv.get("status_code") or 0)
+            title = str(rv.get("title") or "").lower()
+            ctype = str(rv.get("content_type") or "").lower()
+            fp = str(rv.get("response_fingerprint") or "")
+
+            if state == "live":
+                score += 30
+                reasons.append("live_validated")
+            elif state == "redirected":
+                score += 20
+                reasons.append("redirected_live")
+            elif state == "auth_walled":
+                score += 16
+                reasons.append("auth_adjacent_route")
+            elif state == "stale":
+                score -= 14
+                reasons.append("archive_only_stale")
+            elif state in {"dead", "soft404"}:
+                score -= 22
+                reasons.append(state)
+
+            sources = set(c["sources"])
+            source_classes = set(c["source_classes"])
+            if "crawl_live" in sources:
+                score += 12
+                reasons.append("seen_in_live_crawl")
+            if "form_action" in sources:
+                score += 14
+                reasons.append("seen_in_form_workflow")
+            if "js_extracted" in sources:
+                score += 10
+                reasons.append("seen_in_js")
+            if "redirect_chain" in sources:
+                score += 6
+                reasons.append("redirect_chain")
+            if sources and all(s in _ARCHIVE_URL_SOURCES for s in sources):
+                score -= 10
+                reasons.append("archive_only")
+            if "js_extracted" in sources and "crawl_live" in sources:
+                score += 8
+                reasons.append("seen_in_js_and_live")
+
+            methods = sorted(set(c["methods"]))
+            if len(methods) > 1:
+                score += min(10, len(methods) * 3)
+                reasons.append("method_richness")
+            elif methods and methods[0] != "GET":
+                score += 6
+                reasons.append("non_get_surface")
+
+            param_names = sorted({p for p in c["param_names"] if p})
+            if param_names:
+                score += min(20, len(param_names) * 3)
+                reasons.append("parameter_rich")
+                risky_params = sorted({p for p in param_names if p.lower() in _HIGH_RISK_PARAM_NAMES or param_score.get(p, 0) >= 70})
+                if risky_params:
+                    score += min(18, 4 * len(risky_params))
+                    reasons.append("high_risk_params")
+            else:
+                risky_params = []
+
+            templated = str(c.get("templated_route") or template_url_path(u))
+            if any(x in templated for x in ("{id}", "{uuid}", "{hex}", "{slug}")):
+                score += 11
+                reasons.append("object_pattern_route")
+
+            lu = u.lower()
+            if any(k in lu for k in risky_endpoint_keywords):
+                score += 10
+                reasons.append("risky_path_keywords")
+            if any(k in title for k in _AUTH_KEYWORDS):
+                score += 5
+                reasons.append("auth_hint_in_title")
+            if static_ext_rx.search(urllib.parse.urlsplit(u).path or ""):
+                score -= 18
+                reasons.append("static_asset_penalty")
+
+            workflow_hits = workflow_by_route.get(u) or workflow_by_route.get(templated) or []
+            if workflow_hits:
+                score += 10
+                reasons.append("workflow_artifact")
+                if any(bool(x.get("write_action")) for x in workflow_hits):
+                    score += 6
+                    reasons.append("write_action_observed")
+
+            cluster_count = int(templated_cluster_count.get(templated) or 0)
+            if cluster_count >= 8:
+                score += 6
+                reasons.append("route_clustered")
+            fp_size = int(cluster_size_by_fingerprint.get(fp) or 0)
+            if fp_size >= 12 and any(x in (title + " " + ctype) for x in ("login", "not found", "text/html")):
+                score -= 12
+                reasons.append("noisy_response_cluster_penalty")
+
+            score = max(0, min(100, score))
+            unique_reasons = []
+            for r in reasons:
+                if r not in unique_reasons:
+                    unique_reasons.append(r)
+            ranked_rows.append({
+                "url": u,
+                "score": score,
+                "reasons": unique_reasons[:10],
+                "sources": sorted(sources),
+                "source_classes": sorted(source_classes),
+                "state": state,
+                "status_code": status,
+                "content_type": ctype,
+                "templated_route": templated,
+                "param_names": param_names[:20],
+                "high_risk_params": risky_params[:12],
+                "methods": methods,
+                "response_fingerprint_cluster_size": fp_size,
+                "workflow_hits": len(workflow_hits),
+            })
+
+        ranked_rows.sort(key=lambda r: (-int(r.get("score") or 0), r.get("url") or ""))
+        md = ["# Endpoint Ranking (Exploitability-Weighted)\n\n", "| Score | URL | State | Sources | Why |\n|---:|---|---|---|---|\n"]
+        for row in ranked_rows[:250]:
+            md.append(
+                f"| {row['score']} | {esc_md_pipe(row['url'])} | {esc_md_pipe(row['state'])} | "
+                f"{esc_md_pipe(', '.join(row['sources']))} | {esc_md_pipe(', '.join(row['reasons'][:4]))} |\n"
+            )
         out_md.write_text("".join(md), encoding="utf-8")
-        self.write_json(out_json, [{"score": s, "url": u, "sources": src} for s, u, src in ranked[:2000]])
-        self.record_stage_status("endpoint_ranking", "completed", "endpoint ranking generated")
+        self.write_json(out_json, ranked_rows[:3000])
+        self.record_stage_status("endpoint_ranking", "completed", "exploitability-weighted endpoint ranking generated", metrics={
+            "candidates": len(candidates),
+            "ranked": len(ranked_rows),
+            "high_score_70": sum(1 for r in ranked_rows if int(r.get("score") or 0) >= 70),
+        })
         self.mark_done("endpoint_ranking")
 
     def _count_lines(self, path: Path) -> int:
@@ -2781,8 +3882,13 @@ class Runner:
             "live_hosts": self.workdir / "live_hosts.txt",
             "urls_all": self.urls / "urls_all.txt",
             "urls_params": self.urls / "urls_params.txt",
+            "urls_live": self.urls / "urls_live.txt",
+            "urls_archive": self.urls / "urls_archive.txt",
             "nuclei_phase1": self.workdir / "nuclei_phase1.txt",
             "takeover_summary": self.workdir / "takeover_summary.json",
+            "urls_discovered_json": self.intel / "urls_discovered.json",
+            "urls_revalidated_json": self.intel / "urls_revalidated.json",
+            "recon_inventory_json": self.intel / "recon_inventory.json",
         }
         cors_count = 0
         cors_json = self.intel / "cors_findings.json"
@@ -2809,6 +3915,8 @@ class Runner:
             f"- Live hosts: **{self._count_lines(paths['live_hosts'])}**\n",
             f"- URLs (all): **{self._count_lines(paths['urls_all'])}**\n",
             f"- URLs (with params): **{self._count_lines(paths['urls_params'])}**\n",
+            f"- URLs (live/revalidated): **{self._count_lines(paths['urls_live'])}**\n",
+            f"- URLs (archive-only): **{self._count_lines(paths['urls_archive'])}**\n",
             f"- Nuclei findings (phase1): **{self._count_lines(paths['nuclei_phase1'])}**\n",
             f"- Takeover findings: **{takeover_count}**\n",
             f"- CORS findings: **{cors_count}**\n",
@@ -2828,6 +3936,13 @@ class Runner:
             f"- Legacy/version shortlist: `{self.intel / 'hosts_with_legacy_versions.md'}`\n",
             f"- DNS host→IP map: `{self.intel / 'dns_host_ip_map.json'}`\n",
             f"- Normalized dirsearch data: `{self.intel / 'dirsearch_normalized.json'}`\n",
+            f"- URLs discovered (evidence): `{self.intel / 'urls_discovered.json'}`\n",
+            f"- URLs revalidated: `{self.intel / 'urls_revalidated.json'}`\n",
+            f"- Endpoint clusters: `{self.intel / 'endpoint_clusters.json'}`\n",
+            f"- Response clusters: `{self.intel / 'response_clusters.json'}`\n",
+            f"- Forms discovered: `{self.intel / 'forms_discovered.json'}`\n",
+            f"- Browser workflow artifacts: `{self.intel / 'browser_workflow_artifacts.json'}`\n",
+            f"- Host/App inventory split: `{self.intel / 'recon_inventory.json'}`\n",
             f"- Endpoint ranking: `{self.intel / 'endpoints_ranked.md'}`\n",
             f"- Secrets summary: `{self.intel / 'secrets_summary.json'}`\n",
             f"- Secrets findings md: `{self.intel / 'secrets_findings.md'}`\n",
@@ -2841,14 +3956,32 @@ class Runner:
             md.append("- ⚠️ Webhook health warning: repeated webhook delivery failures detected during this run.\n")
         summary_md.write_text("".join(md), encoding="utf-8")
         out = {
+            "target": self.target,
             "workdir": str(self.workdir),
             "subdomains": str(self.workdir / "all_subdomains.txt"),
             "resolved": str(self.workdir / "resolved_subdomains.txt"),
             "live_hosts": str(self.workdir / "live_hosts.txt"),
             "httpx": {"text": str(self.workdir / "httpx_results.txt"), "jsonl": str(self.workdir / "httpx_results.json")},
-            "urls": {"katana": str(self.urls / "katana_urls.txt"), "gau": str(self.urls / "gau_urls.txt"), "all": str(self.urls / "urls_all.txt"), "params": str(self.urls / "urls_params.txt")},
+            "urls": {
+                "katana": str(self.urls / "katana_urls.txt"),
+                "gau": str(self.urls / "gau_urls.txt"),
+                "all": str(self.urls / "urls_all.txt"),
+                "params": str(self.urls / "urls_params.txt"),
+                "live": str(self.urls / "urls_live.txt"),
+                "archive": str(self.urls / "urls_archive.txt"),
+                "discovered_json": str(self.intel / "urls_discovered.json"),
+                "revalidated_json": str(self.intel / "urls_revalidated.json"),
+            },
             "nuclei": {"phase1_text": str(self.workdir / "nuclei_phase1.txt"), "phase1_jsonl": str(self.workdir / "nuclei_phase1.jsonl"), "phase2_text": str(self.workdir / "nuclei_phase2.txt"), "phase2_jsonl": str(self.workdir / "nuclei_phase2.jsonl")},
             "takeover": {"summary": str(self.workdir / "takeover_summary.json")},
+            "host_app_split": {
+                "hosts_discovered": str(self.workdir / "all_subdomains.txt"),
+                "origins_live": str(self.workdir / "live_hosts.txt"),
+                "urls_live": str(self.urls / "urls_live.txt"),
+                "urls_archive": str(self.urls / "urls_archive.txt"),
+                "params_ranked": str(self.intel / "params_ranked.json"),
+                "inventory_json": str(self.intel / "recon_inventory.json"),
+            },
             "intel": {
                 "params_ranked_md": str(self.intel / "params_ranked.md"),
                 "params_ranked_json": str(self.intel / "params_ranked.json"),
@@ -2860,6 +3993,14 @@ class Runner:
                 "webserver_to_hosts_json": str(self.intel / "webserver_to_hosts.json"),
                 "hosts_with_legacy_versions_md": str(self.intel / "hosts_with_legacy_versions.md"),
                 "dirsearch_normalized_json": str(self.intel / "dirsearch_normalized.json"),
+                "urls_discovered_json": str(self.intel / "urls_discovered.json"),
+                "urls_revalidated_json": str(self.intel / "urls_revalidated.json"),
+                "forms_discovered_json": str(self.intel / "forms_discovered.json"),
+                "browser_workflow_artifacts_json": str(self.intel / "browser_workflow_artifacts.json"),
+                "endpoint_clusters_json": str(self.intel / "endpoint_clusters.json"),
+                "response_fingerprints_json": str(self.intel / "response_fingerprints.json"),
+                "response_clusters_json": str(self.intel / "response_clusters.json"),
+                "recon_inventory_json": str(self.intel / "recon_inventory.json"),
                 "dns_host_ip_map_json": str(self.intel / "dns_host_ip_map.json"),
                 "endpoints_ranked_md": str(self.intel / "endpoints_ranked.md"),
                 "endpoints_ranked_json": str(self.intel / "endpoints_ranked.json"),
@@ -3008,6 +4149,8 @@ class Runner:
             "probed_hosts": sum(buckets.values()),
             "live_hosts": self._count_lines(self.workdir / "live_hosts.txt"),
             "endpoints": self._count_lines(self.urls / "urls_all.txt"),
+            "urls_live": self._count_lines(self.urls / "urls_live.txt"),
+            "urls_archive": self._count_lines(self.urls / "urls_archive.txt"),
             "params": self._count_lines(self.urls / "urls_params.txt"),
             "nuclei_findings": nuclei_findings,
             "nuclei_findings_phase1": nuclei_findings,
@@ -3133,11 +4276,13 @@ class Runner:
                 "scan", "file",
                 "--file", str(live_hosts),
                 "--screenshot-path", str(out_dir),
-                "--db-uri", f"sqlite://{db_path}",
+                "--write-db", 
+                "--write-db-uri", f"sqlite://{db_path}",
+                "--no-http", "--no-https",
                 "--threads", str(self.config.screenshots_threads),
                 "--timeout", str(self.config.screenshots_timeout),
             ],
-            timeout=self.config.screenshots_timeout + 60,
+            timeout=self.config.screenshots_timeout * 10 + 600,
             stdout_path=gw_log,
             stderr_path=gw_log,
             allow_failure=True,
@@ -3663,14 +4808,39 @@ class Runner:
                 if cp.stdout.strip(): report["dkim_probed"].append({"selector":sel,"record":cp.stdout.strip()})
             except Exception:
                 pass
-        dmarc_val = report.get("dmarc") or ""
-        dmarc_warn = ("⚠️  MISSING — domain is phishable" if not dmarc_val else ("⚠️  p=none — reporting only, not enforced" if "p=none" in dmarc_val.lower() else "✅ enforced"))
-        md=[f"# OSINT Report — {self.target}\n\n", f"## DMARC\n- Record: {dmarc_val or 'NOT FOUND'}\n", f"- Assessment: {dmarc_warn}\n\n", f"## SPF\n- Record: {report.get('spf')}\n\n", f"## DKIM Selectors Found ({len(report['dkim_probed'])})\n"]
+        dmarc_val = (report.get("dmarc") or "").lower()
+        dmarc_warn = "✅ enforced"
+        if not dmarc_val:
+            dmarc_warn = "❌  MISSING — domain is highly phishable"
+            self.add_finding("osint", "MEDIUM", self.target, "Missing DMARC record", evidence="No _dmarc TXT record found", confidence=90, tags=["dns","phishing"])
+        elif "p=none" in dmarc_val:
+            dmarc_warn = "⚠️  p=none — reporting only, not enforced"
+            self.add_finding("osint", "LOW", self.target, "Weak DMARC policy (p=none)", evidence=dmarc_val, confidence=90, tags=["dns","phishing"])
+        elif "p=quarantine" in dmarc_val or "p=reject" in dmarc_val:
+            dmarc_warn = "✅ enforced (" + ("reject" if "reject" in dmarc_val else "quarantine") + ")"
+
+        spf_val = (report.get("spf") or "").lower()
+        spf_warn = "✅ healthy"
+        if "not found" in spf_val:
+            spf_warn = "❌  MISSING — spoofing possible"
+            self.add_finding("osint", "MEDIUM", self.target, "Missing SPF record", evidence="No v=spf1 TXT record found", confidence=90, tags=["dns","phishing"])
+        elif "+all" in spf_val:
+            spf_warn = "❌  CRITICAL — +all allows any sender"
+            self.add_finding("osint", "HIGH", self.target, "Critically weak SPF (+all)", evidence=spf_val, confidence=95, tags=["dns","phishing"])
+        elif "?all" in spf_val or "~all" in spf_val:
+            spf_warn = "⚠️  softfail/neutral — spoofing may still deliver"
+
+        md=[f"# OSINT Report — {self.target}\n\n", 
+            f"## DMARC\n- Record: `{report.get('dmarc') or 'NOT FOUND'}`\n", 
+            f"- Assessment: **{dmarc_warn}**\n\n", 
+            f"## SPF\n- Record: `{report.get('spf')}`\n",
+            f"- Assessment: **{spf_warn}**\n\n",
+            f"## DKIM Selectors Found ({len(report['dkim_probed'])})\n"]
         for d in report["dkim_probed"]:
             md.append(f"- `{d['selector']}`: {d['record'][:120]}\n")
         (self.intel / "osint_report.md").write_text("".join(md), encoding="utf-8")
         self.write_json(self.cache / "osint_report.json", report)
-        self.record_stage_status("osint", "completed", f"dmarc={'found' if dmarc_val else 'MISSING'} dkim_selectors={len(report['dkim_probed'])}")
+        self.record_stage_status("osint", "completed", f"dmarc={'found' if report.get('dmarc') else 'MISSING'} spf={'found' if 'not found' not in spf_val else 'MISSING'}")
         self.mark_done("osint")
 
     def write_live_findings(self) -> None:
@@ -4041,7 +5211,9 @@ class Runner:
         reused = self.reuse_previous_artifacts()
         if reused:
             self.record_stage_status("cache", "completed", "reused previous artifacts", metrics={"reused_files": reused})
-        pipeline = [
+        # UX-first execution: run top-level stages sequentially so dashboard flow and
+        # webhooks remain predictable (one stage update at a time).
+        pipeline: list[tuple[str, Any]] = [
             ("osint", self.stage_osint),
             ("nuclei_templates", self.stage_nuclei_templates),
             ("subdomains", self.stage_subdomains),
@@ -4075,13 +5247,12 @@ class Runner:
             self.dashboard.set_stats(self.collect_stats())
             if not self.resume_mode:
                 self._notify(f"Run started | profile={prof}", status="info", stage="startup", severity="INFO", log_file=str(self.logs / "stage_status.jsonl"))
+
             for stage_name, fn in pipeline:
                 if SHUTTING_DOWN:
                     interrupted = True
                     break
-                # Record whether this stage was already done BEFORE running it.
-                # On resume, stages that were previously completed return immediately
-                # via is_done(); we suppress their "done" webhook to avoid spam.
+
                 already_done = self.resume_mode and self.is_done(stage_name)
                 self.dashboard.stage_start(stage_name)
                 self.dashboard.set_context(current_host="-", queue_depth=0, active_jobs=0, failed_jobs=0)
@@ -4090,17 +5261,11 @@ class Runner:
                 dt = time.perf_counter() - t0
                 self.record_stage_status("pipeline", "completed", f"{stage_name} complete", duration_seconds=dt)
                 if not already_done:
-                    self._notify(
-                        f"Stage done | duration={dt:.1f}s",
-                        status="completed",
-                        stage=stage_name,
-                        severity="INFO",
-                        log_file=str(self.logs / "stage_status.jsonl"),
-                    )
-                stats = self.collect_stats()
-                self.dashboard.set_stats(stats)
-                self.dashboard.set_context(httpx_buckets=f"2xx={stats.get('httpx_2xx',0)} 3xx={stats.get('httpx_3xx',0)} 401={stats.get('httpx_401',0)} 403={stats.get('httpx_403',0)}")
+                    self._notify(f"Stage done | duration={dt:.1f}s", status="completed", stage=stage_name, severity="INFO", log_file=str(self.logs / "stage_status.jsonl"))
+                self.dashboard.set_stats(self.collect_stats())
                 self.dashboard.stage_done(stage_name, dt)
+
+                self.dashboard.set_context(httpx_buckets=f"2xx={self.dashboard.stats.get('httpx_2xx',0)} 4xx={self.dashboard.stats.get('httpx_403',0)}")
         except (GracefulInterrupt, KeyboardInterrupt):
             request_shutdown("Interrupted by user (Ctrl+C). Graceful shutdown started.")
             self.record_stage_status("shutdown", "interrupted", "user pressed Ctrl+C")
@@ -4239,6 +5404,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-katana-js-crawl", dest="katana_js_crawl", action="store_false")
     p.add_argument("--gau-timeout", type=int)
     p.add_argument("--gau-blacklist", type=str)
+    p.add_argument("--url-revalidate-timeout", type=int)
+    p.add_argument("--url-revalidate-workers", type=int)
+    p.add_argument("--url-revalidate-cap", type=int)
+    p.add_argument("--url-revalidate-get-cap", type=int)
+    p.add_argument("--url-revalidate-body-max", type=int)
     p.add_argument("--force-update-templates", action="store_true")
     p.add_argument("--ffuf-version", type=str)
     p.add_argument("--httpx-version", type=str)
@@ -4368,6 +5538,11 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "katana_js_crawl": args.katana_js_crawl,
         "gau_timeout": args.gau_timeout,
         "gau_blacklist": args.gau_blacklist,
+        "url_revalidate_timeout": args.url_revalidate_timeout,
+        "url_revalidate_workers": args.url_revalidate_workers,
+        "url_revalidate_cap": args.url_revalidate_cap,
+        "url_revalidate_get_cap": args.url_revalidate_get_cap,
+        "url_revalidate_body_max": args.url_revalidate_body_max,
         "skip_secrets": args.skip_secrets,
         "skip_takeover": args.skip_takeover,
         "skip_cors": args.skip_cors,

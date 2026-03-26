@@ -86,6 +86,7 @@ type CORSFinding struct {
 }
 
 type ReconSummary struct {
+	Target  string `json:"target"`
 	Workdir string `json:"workdir"`
 	Live    string `json:"live_hosts"`
 	URLs    struct {
@@ -97,6 +98,14 @@ type ReconSummary struct {
 	Intel struct {
 		EndpointsRankedJSON   string `json:"endpoints_ranked_json"`
 		ParamsRankedJSON      string `json:"params_ranked_json"`
+		URLsDiscoveredJSON    string `json:"urls_discovered_json"`
+		URLsRevalidatedJSON   string `json:"urls_revalidated_json"`
+		FormsDiscoveredJSON   string `json:"forms_discovered_json"`
+		BrowserWorkflowJSON   string `json:"browser_workflow_artifacts_json"`
+		EndpointClustersJSON  string `json:"endpoint_clusters_json"`
+		ResponseClustersJSON  string `json:"response_clusters_json"`
+		ResponseFingerprints  string `json:"response_fingerprints_json"`
+		ReconInventoryJSON    string `json:"recon_inventory_json"`
 		SecretsJSON           string `json:"secrets_findings_json"`
 		CORSJSON              string `json:"cors_findings_json"`
 		BypassJSON            string `json:"bypass_403_findings_json"`
