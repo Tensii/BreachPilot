@@ -92,8 +92,12 @@ func main() {
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS", fmt.Sprintf("%d", cfg.BrowserCaptureSettleWaitMs))
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS", fmt.Sprintf("%d", cfg.BrowserCaptureScrollSteps))
 		_ = os.Setenv("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", fmt.Sprintf("%d", cfg.BrowserCaptureMaxRoutesPerPage))
-		_ = os.Setenv("BREACHPILOT_BROWSER_PATH", cfg.BrowserCapturePath)
-		_ = os.Setenv("BREACHPILOT_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
+		if p := strings.TrimSpace(cfg.BrowserCapturePath); p != "" {
+			_ = os.Setenv("BREACHPILOT_BROWSER_PATH", p)
+		}
+		if r := strings.TrimSpace(cfg.ArtifactsRoot); r != "" {
+			_ = os.Setenv("BREACHPILOT_ARTIFACTS_ROOT", r)
+		}
 	}
 	listFile := ""
 	filtered := make([]string, 0, len(args))
@@ -227,6 +231,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		ProofTargetAllowlist:           cfg.ProofTargetAllowlist,
 		OOBHTTPListenAddr:              cfg.OOBHTTPListenAddr,
 		OOBHTTPPublicBaseURL:           cfg.OOBHTTPPublicBaseURL,
+		OOBPollWaitSec:                 cfg.OOBPollWaitSec,
 		AuthUserCookie:                 cfg.AuthUserCookie,
 		AuthAdminCookie:                cfg.AuthAdminCookie,
 		AuthAnonHeaders:                cfg.AuthAnonHeaders,
@@ -347,9 +352,7 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 		cliOpt.Progress = nil
 		cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
 
-		if currentMode != "full" {
-			nf.Send("job.started", job)
-		}
+		nf.Send("job.started", job)
 
 		if len(targets) > 1 && !jsonOut {
 			fmt.Printf("\x1b[34m[BATCH] Processing target: %s (%s)\x1b[0m\n", target, jobID)
@@ -393,6 +396,9 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 				fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
 			}
 		default:
+			if dropped := nf.DroppedEvents(); dropped > 0 {
+				log.Printf("[webhook] %d non-critical events were dropped due to queue saturation", dropped)
+			}
 			nf.Send("job.completed", job)
 		}
 
@@ -434,9 +440,13 @@ func parseTargetsFile(path string) ([]string, error) {
 		lineWithSpaces := replacer.Replace(trimmedLine)
 		for _, item := range strings.Fields(lineWithSpaces) {
 			t := strings.TrimSpace(item)
-			if t != "" {
-				targets = append(targets, t)
+			if t == "" {
+				continue
 			}
+			if err := scope.ValidateTarget(t); err != nil {
+				return nil, fmt.Errorf("invalid target %q in %s: %w", t, path, err)
+			}
+			targets = append(targets, t)
 		}
 	}
 	if len(targets) == 0 {
@@ -756,15 +766,13 @@ func nextRunID(artifactsRoot, target string) string {
 	safeDomain := scope.NormalizeTargetForDir(target)
 	domainDir := filepath.Join(artifactsRoot, safeDomain)
 	_ = os.MkdirAll(domainDir, 0o755)
-	run := 1
-	for {
+	for run := 1; ; run++ {
 		candidate := filepath.Join(domainDir, fmt.Sprintf("%d", run))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			break
+		// os.Mkdir is atomic on POSIX: only one caller succeeds for a given path.
+		if err := os.Mkdir(candidate, 0o755); err == nil {
+			return fmt.Sprintf("%s/%d", safeDomain, run)
 		}
-		run++
 	}
-	return fmt.Sprintf("%s/%d", safeDomain, run)
 }
 
 func probeCommand(raw string, extraArgs ...string) error {

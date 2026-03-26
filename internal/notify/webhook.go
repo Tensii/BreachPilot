@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,6 +40,9 @@ type Webhook struct {
 	logMu      sync.Mutex
 
 	findingsSentThisRun int32
+	droppedEvents       int64
+	stopCh              chan struct{}
+	logFile             *os.File
 }
 
 const findingCapCheckedKey = "_bp_finding_cap_checked"
@@ -53,7 +57,14 @@ func (w *Webhook) Start() {
 		}
 		w.criticalCh = make(chan webhookEvent, 64)
 		w.normalCh = make(chan webhookEvent, 512)
+		w.stopCh = make(chan struct{})
 		w.client = &http.Client{Timeout: 6 * time.Second}
+		if strings.TrimSpace(w.DebugLogPath) != "" {
+			_ = os.MkdirAll(filepath.Dir(w.DebugLogPath), 0o755)
+			if lf, err := os.OpenFile(w.DebugLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+				w.logFile = lf
+			}
+		}
 		w.wg.Add(1)
 		go w.loop()
 	})
@@ -128,7 +139,7 @@ func (w *Webhook) Send(event string, job *models.Job) {
 	select {
 	case w.normalCh <- webhookEvent{Name: event, Job: job}:
 	default:
-		// drop non-critical events when saturated
+		atomic.AddInt64(&w.droppedEvents, 1)
 	}
 }
 
@@ -145,6 +156,7 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 	select {
 	case w.normalCh <- webhookEvent{Name: eventType, Payload: payload}:
 	default:
+		atomic.AddInt64(&w.droppedEvents, 1)
 	}
 }
 
@@ -157,6 +169,9 @@ func (w *Webhook) Stop() {
 	w.stopOnce.Do(func() {
 		if w.criticalCh == nil && w.normalCh == nil {
 			return
+		}
+		if w.stopCh != nil {
+			close(w.stopCh)
 		}
 		if w.criticalCh != nil {
 			close(w.criticalCh)
@@ -172,6 +187,11 @@ func (w *Webhook) Stop() {
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
+			log.Printf("[webhook] drain timeout: some queued events may not have been delivered (url=%s)", redactURL(w.URL))
+		}
+		if w.logFile != nil {
+			_ = w.logFile.Close()
+			w.logFile = nil
 		}
 	})
 }
@@ -225,6 +245,14 @@ func (w *Webhook) FindingCap() int {
 	return w.FindingsCap
 }
 
+// DroppedEvents returns the number of non-critical webhook events dropped due to queue saturation.
+func (w *Webhook) DroppedEvents() int64 {
+	if w == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&w.droppedEvents)
+}
+
 func payloadFindingCapChecked(payload any) bool {
 	m, ok := payload.(map[string]any)
 	if !ok {
@@ -250,6 +278,13 @@ func sanitizeGenericPayload(payload any) any {
 }
 
 func (w *Webhook) postJSON(body map[string]any) {
+	// Sign over the canonical body before any provider reshaping.
+	canonicalBytes, _ := json.Marshal(body)
+	var sig string
+	if w.Secret != "" {
+		sig = signHMACSHA256(canonicalBytes, w.Secret)
+	}
+
 	payload := body
 	for _, p := range defaultProviders {
 		if p.Matches(w.URL) {
@@ -266,8 +301,7 @@ func (w *Webhook) postJSON(body map[string]any) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if w.Secret != "" {
-			sig := signHMACSHA256(b, w.Secret)
+		if sig != "" {
 			req.Header.Set("X-BreachPilot-Signature", "sha256="+sig)
 		}
 		resp, err := w.client.Do(req)
@@ -290,16 +324,22 @@ func (w *Webhook) postJSON(body map[string]any) {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		// Exponential backoff with a little jitter.
+		// Exponential backoff with a little jitter, interruptible on Stop().
 		base := time.Duration(attempt*attempt) * 200 * time.Millisecond
 		jitter := time.Duration((attempt*37)%120) * time.Millisecond
-		time.Sleep(base + jitter)
+		select {
+		case <-time.After(base + jitter):
+		case <-w.stopCh:
+			return
+		}
 	}
 	w.logDelivery("failed", body, w.Retries, 0, "max retries exceeded", "")
 }
 
 func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, status int, errMsg string, respBody string) {
-	if strings.TrimSpace(w.DebugLogPath) == "" {
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	if w.logFile == nil {
 		return
 	}
 	entry := map[string]any{
@@ -313,15 +353,7 @@ func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, st
 		"resp":    redactSensitive(respBody),
 	}
 	b, _ := json.Marshal(entry)
-	w.logMu.Lock()
-	defer w.logMu.Unlock()
-	_ = os.MkdirAll(filepath.Dir(w.DebugLogPath), 0o755)
-	f, err := os.OpenFile(w.DebugLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(append(b, '\n'))
+	_, _ = w.logFile.Write(append(b, '\n'))
 }
 
 func redactURL(raw string) string {

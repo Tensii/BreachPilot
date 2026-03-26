@@ -168,7 +168,7 @@ type Job struct {
 	ApproveIntrusive      bool                        `json:"approve_intrusive"`
 	Templates             []string                    `json:"templates,omitempty"`
 	ApprovalTicket        string                      `json:"approval_ticket,omitempty"`
-	ReconPath             string                      `json:"recon_summary"`
+	ReconPath             string                      `json:"recon_path"`
 	Status                JobStatus                   `json:"status"`
 	CreatedAt             time.Time                   `json:"created_at"`
 	StartedAt             time.Time                   `json:"started_at,omitempty"`

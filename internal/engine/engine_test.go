@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	configpkg "breachpilot/internal/config"
+	"breachpilot/internal/exploit"
 	"breachpilot/internal/models"
 )
 
@@ -577,4 +578,50 @@ func TestEffectiveNucleiTimeoutSecDisablesTimeoutInBoundlessMode(t *testing.T) {
 	if got := effectiveNucleiTimeoutSec(Options{NucleiTimeoutSec: 3600, BoundlessMode: false}); got != 3600 {
 		t.Fatalf("expected nuclei timeout to remain set, got %d", got)
 	}
+}
+
+func TestBuildDependencyStagesRespectsPrerequisites(t *testing.T) {
+	mods := []exploit.Module{
+		testModule{name: "auth-bypass"},
+		testModule{name: "open-redirect"},
+		testModule{name: "session-abuse"},
+	}
+	stages, _ := buildDependencyStages(mods)
+	if len(stages) < 2 {
+		t.Fatalf("expected at least two dependency stages, got %d", len(stages))
+	}
+	if stages[0][0].Name() != "open-redirect" || stages[0][1].Name() != "session-abuse" {
+		t.Fatalf("expected first stage to run prerequisites first, got %v", moduleNames(stages[0]))
+	}
+	last := stages[len(stages)-1]
+	if len(last) != 1 || last[0].Name() != "auth-bypass" {
+		t.Fatalf("expected auth-bypass in final stage, got %v", moduleNames(last))
+	}
+}
+
+func TestFilterModulesByAuthContextQualitySkipsDualAuthModulesOnWeakContext(t *testing.T) {
+	mods := []exploit.Module{
+		testModule{name: "auth-bypass"},
+		testModule{name: "jwt-access"},
+	}
+	planned, skipped, _ := filterModulesByAuthContextQuality(mods, observedAuthContext{
+		HasUser:          true,
+		HasAdmin:         true,
+		DistinctContexts: false,
+		QualityScore:     2,
+	})
+	if len(skipped) != 1 || skipped[0].Module != "auth-bypass" {
+		t.Fatalf("expected auth-bypass to be skipped by auth quality filter, got %+v", skipped)
+	}
+	if len(planned) != 1 || planned[0].Name() != "jwt-access" {
+		t.Fatalf("expected jwt-access to remain planned, got %v", moduleNames(planned))
+	}
+}
+
+type testModule struct{ name string }
+
+func (m testModule) Name() string { return m.name }
+
+func (m testModule) Run(context.Context, *models.Job, *models.ReconSummary, exploit.Options) ([]models.ExploitFinding, error) {
+	return nil, nil
 }

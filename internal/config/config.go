@@ -48,6 +48,7 @@ type Config struct {
 	ProofTargetAllowlist           string
 	OOBHTTPListenAddr              string
 	OOBHTTPPublicBaseURL           string
+	OOBPollWaitSec                 int
 	AuthUserCookie                 string
 	AuthAdminCookie                string
 	AuthAnonHeaders                string
@@ -122,6 +123,7 @@ func Load() Config {
 		ProofTargetAllowlist:           getEnv("BREACHPILOT_PROOF_TARGET_ALLOWLIST", ""),
 		OOBHTTPListenAddr:              getEnv("BREACHPILOT_OOB_HTTP_LISTEN_ADDR", ""),
 		OOBHTTPPublicBaseURL:           getEnv("BREACHPILOT_OOB_HTTP_PUBLIC_BASE_URL", ""),
+		OOBPollWaitSec:                 getEnvInt("BREACHPILOT_OOB_POLL_WAIT_SEC", 10),
 		AuthUserCookie:                 getEnv("BREACHPILOT_AUTH_USER_COOKIE", ""),
 		AuthAdminCookie:                getEnv("BREACHPILOT_AUTH_ADMIN_COOKIE", ""),
 		AuthAnonHeaders:                getEnv("BREACHPILOT_AUTH_ANON_HEADERS", ""),
@@ -183,17 +185,17 @@ func (c Config) Validate() error {
 	if c.WebhookRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_WEBHOOK_RETRIES: must be >= 0")
 	}
-	if c.ReconTimeoutSec <= 0 {
-		return fmt.Errorf("invalid BREACHPILOT_RECON_TIMEOUT_SEC: must be > 0")
+	if !c.BoundlessMode && c.ReconTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_RECON_TIMEOUT_SEC: must be > 0 (or enable BREACHPILOT_BOUNDLESS to disable timeouts)")
 	}
 	if c.ReconRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_RECON_RETRIES: must be >= 0")
 	}
-	if c.NucleiTimeoutSec <= 0 {
-		return fmt.Errorf("invalid BREACHPILOT_NUCLEI_TIMEOUT_SEC: must be > 0")
+	if !c.BoundlessMode && c.NucleiTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_NUCLEI_TIMEOUT_SEC: must be > 0 (or enable BREACHPILOT_BOUNDLESS to disable timeouts)")
 	}
-	if c.ModuleTimeoutSec <= 0 {
-		return fmt.Errorf("invalid BREACHPILOT_MODULE_TIMEOUT_SEC: must be > 0")
+	if !c.BoundlessMode && c.ModuleTimeoutSec <= 0 {
+		return fmt.Errorf("invalid BREACHPILOT_MODULE_TIMEOUT_SEC: must be > 0 (or enable BREACHPILOT_BOUNDLESS to disable timeouts)")
 	}
 	if c.ModuleRetries < 0 {
 		return fmt.Errorf("invalid BREACHPILOT_MODULE_RETRIES: must be >= 0")

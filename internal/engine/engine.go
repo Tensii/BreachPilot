@@ -96,6 +96,10 @@ const (
 var (
 	progressFractionRE = regexp.MustCompile(`(?i)\b(\d+)\s*/\s*(\d+)\s*(?:\((\d{1,3})%\))?`)
 	progressPercentRE  = regexp.MustCompile(`(?i)\b(\d{1,3})%\b`)
+	reconCorpusMatchMu sync.Mutex
+	reconCorpusMatchCache = map[string]int{}
+	workflowSignalCacheMu sync.Mutex
+	workflowSignalCache   = map[string]browserWorkflowSignals{}
 )
 
 type Options struct {
@@ -133,6 +137,7 @@ type Options struct {
 	ProofTargetAllowlist           string
 	OOBHTTPListenAddr              string
 	OOBHTTPPublicBaseURL           string
+	OOBPollWaitSec                 int
 	AuthUserCookie                 string
 	AuthAdminCookie                string
 	AuthAnonHeaders                string
@@ -471,6 +476,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	persistedSignals := loadCorrelationSignalsArtifact(artDir)
 	scoutModules = prioritizeModules(scoutModules, rs)
 	authBootstrapModules, scoutModules := splitAuthBootstrapModules(scoutModules)
+	scoutStages, scoutStagePreview := buildDependencyStages(scoutModules)
+	job.PlanPreview = append(job.PlanPreview, scoutStagePreview...)
 	if len(authBootstrapModules) > 0 {
 		bootstrapNames := moduleNames(authBootstrapModules)
 		emit(models.RuntimeEvent{
@@ -483,8 +490,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Progress: runtimeStageProgress("modules", "modules", 0, len(authBootstrapModules)),
 		})
 	}
-	if len(scoutModules) > 0 {
-		scoutNames := moduleNames(scoutModules)
+	if len(scoutStages) > 0 {
+		scoutNames := moduleNames(flattenModuleStages(scoutStages))
 		emit(models.RuntimeEvent{
 			Kind:     "module",
 			Stage:    "exploit.module",
@@ -494,6 +501,18 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Counts:   map[string]int{"planned": len(scoutModules)},
 			Progress: runtimeStageProgress("modules", "modules", 0, len(scoutModules)),
 		})
+		for idx, stage := range scoutStages {
+			stageNames := moduleNames(stage)
+			emit(models.RuntimeEvent{
+				Kind:     "module",
+				Stage:    "exploit.module",
+				Status:   "planned",
+				Message:  fmt.Sprintf("exploit.module.wave1.stage%d %s", idx+1, strings.Join(stageNames, ",")),
+				Target:   job.Target,
+				Counts:   map[string]int{"planned": len(stage)},
+				Progress: runtimeStageProgress("modules", "modules", 0, len(stage)),
+			})
+		}
 	}
 
 	// Initialize OOB Provider
@@ -603,18 +622,32 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Kind:    "module",
 		Stage:   "exploit.auth-context",
 		Status:  "ready",
-		Message: fmt.Sprintf("exploit.auth-context user=%t admin=%t source=%s", authObserved.HasUser, authObserved.HasAdmin, authObserved.Source),
+		Message: fmt.Sprintf("exploit.auth-context user=%t admin=%t distinct=%t quality=%d source=%s", authObserved.HasUser, authObserved.HasAdmin, authObserved.DistinctContexts, authObserved.QualityScore, authObserved.Source),
 		Target:  job.Target,
 		Counts: map[string]int{
 			"auth_user_context":  boolToInt(authObserved.HasUser),
 			"auth_admin_context": boolToInt(authObserved.HasAdmin),
+			"auth_distinct":      boolToInt(authObserved.DistinctContexts),
+			"auth_quality_score": authObserved.QualityScore,
 		},
 	})
 
-	if len(scoutModules) > 0 {
-		waveFindings, waveTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, scoutModules)
-		scoutFindings = append(scoutFindings, waveFindings...)
-		scoutTelemetry = append(scoutTelemetry, waveTelemetry...)
+	if len(scoutStages) > 0 {
+		for idx, stage := range scoutStages {
+			if len(stage) == 0 {
+				continue
+			}
+			emit(models.RuntimeEvent{
+				Kind:    "module",
+				Stage:   "exploit.module",
+				Status:  "started",
+				Message: fmt.Sprintf("exploit.module.wave1.stage%d.start %s", idx+1, strings.Join(moduleNames(stage), ",")),
+				Target:  job.Target,
+			})
+			waveFindings, waveTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, stage)
+			scoutFindings = append(scoutFindings, waveFindings...)
+			scoutTelemetry = append(scoutTelemetry, waveTelemetry...)
+		}
 	}
 	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
@@ -623,7 +656,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	correlatedProofModules, correlationSkipped, correlationPreview := correlateProofModules(proofModules, mergedSignals, rs, opt)
 	job.PlanPreview = append(job.PlanPreview, correlationPreview...)
 	correlatedProofModules = prioritizeProofModules(correlatedProofModules, mergedSignals, rs)
-	proofNames := moduleNames(correlatedProofModules)
+	correlatedProofModules, authQualitySkipped, authQualityPreview := filterModulesByAuthContextQuality(correlatedProofModules, authObserved)
+	job.PlanPreview = append(job.PlanPreview, authQualityPreview...)
+	proofStages, proofStagePreview := buildDependencyStages(correlatedProofModules)
+	job.PlanPreview = append(job.PlanPreview, proofStagePreview...)
+	proofNames := moduleNames(flattenModuleStages(proofStages))
 	if len(proofNames) > 0 {
 		emit(models.RuntimeEvent{
 			Kind:     "module",
@@ -634,12 +671,40 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Counts:   map[string]int{"planned": len(correlatedProofModules)},
 			Progress: runtimeStageProgress("modules", "modules", 0, len(correlatedProofModules)),
 		})
+		for idx, stage := range proofStages {
+			stageNames := moduleNames(stage)
+			emit(models.RuntimeEvent{
+				Kind:     "module",
+				Stage:    "exploit.module",
+				Status:   "planned",
+				Message:  fmt.Sprintf("exploit.module.wave2.stage%d %s", idx+1, strings.Join(stageNames, ",")),
+				Target:   job.Target,
+				Counts:   map[string]int{"planned": len(stage)},
+				Progress: runtimeStageProgress("modules", "modules", 0, len(stage)),
+			})
+		}
 	}
 	_ = applyObservedAuthFromSharedState(&exploitOpt, sharedState)
-	proofFindings, proofTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, correlatedProofModules)
+	proofFindings := make([]models.ExploitFinding, 0, 64)
+	proofTelemetry := make([]models.ExploitModuleTelemetry, 0, len(correlatedProofModules))
+	for idx, stage := range proofStages {
+		if len(stage) == 0 {
+			continue
+		}
+		emit(models.RuntimeEvent{
+			Kind:    "module",
+			Stage:   "exploit.module",
+			Status:  "started",
+			Message: fmt.Sprintf("exploit.module.wave2.stage%d.start %s", idx+1, strings.Join(moduleNames(stage), ",")),
+			Target:  job.Target,
+		})
+		stageFindings, stageTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, stage)
+		proofFindings = append(proofFindings, stageFindings...)
+		proofTelemetry = append(proofTelemetry, stageTelemetry...)
+	}
 	exploitFindings := append(scoutFindings, proofFindings...)
 	telemetry := append(scoutTelemetry, proofTelemetry...)
-	job.ModuleTelemetry = append(append(telemetry, plannerSkipped...), correlationSkipped...)
+	job.ModuleTelemetry = append(append(append(telemetry, plannerSkipped...), correlationSkipped...), authQualitySkipped...)
 	if ctx.Err() == context.Canceled {
 		job.Status = models.JobCancelled
 		job.FinishedAt = time.Now().UTC()
@@ -651,18 +716,21 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// --- OOB Verification Phase ---
 	if oobProvider != nil && ctx.Err() == nil {
+		// Wait to allow asynchronous payloads (like Blind XSS / Blind RCE) to fire.
+		oobWait := opt.OOBPollWaitSec
+		if oobWait <= 0 {
+			oobWait = 10
+		}
 		emit(models.RuntimeEvent{
 			Kind:    "oob",
 			Stage:   "exploit.oob.verify",
 			Status:  "polling",
-			Message: "Waiting up to 10s for asynchronous OOB callbacks...",
+			Message: fmt.Sprintf("Waiting up to %ds for asynchronous OOB callbacks...", oobWait),
 			Target:  job.Target,
 		})
-
-		// Wait to allow asynchronous payloads (like Blind XSS / Blind RCE) to fire
 		select {
 		case <-ctx.Done():
-		case <-time.After(10 * time.Second):
+		case <-time.After(time.Duration(oobWait) * time.Second):
 		}
 
 		if hits, err := oobProvider.Poll(ctx); err == nil && len(hits) > 0 {
@@ -2103,22 +2171,30 @@ func validateReconSummary(summaryPath, requestedTarget string) (models.ReconSumm
 	if err != nil {
 		return rs, fmt.Errorf("read summary: %w", err)
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
+	// Parse once into the struct, then validate field presence via the decoded struct.
+	if err := json.Unmarshal(b, &rs); err != nil {
 		return rs, fmt.Errorf("parse summary json: %w", err)
 	}
-	// Basic validation to ensure this is a recon summary and not a state file
-	if _, ok := raw["workdir"]; !ok {
-		if _, isState := raw["job_id"]; isState {
+	// Detect if the user accidentally passed a .breachpilot.state file by checking
+	// for a field that only state files have (job_id) and that summary files require (workdir).
+	if strings.TrimSpace(rs.Workdir) == "" {
+		// Check if this might be a state file by re-probing for job_id
+		var probe struct {
+			JobID string `json:"job_id"`
+		}
+		if jerr := json.Unmarshal(b, &probe); jerr == nil && probe.JobID != "" {
 			return rs, fmt.Errorf("invalid recon summary: file appears to be a .breachpilot.state file (expected summary.json)")
 		}
 		return rs, fmt.Errorf("invalid recon summary: missing 'workdir' field")
 	}
-	if sv, ok := raw["schema_version"].(string); ok && sv != "" && sv != models.SchemaVersion {
-		return rs, fmt.Errorf("incompatible schema_version: %s", sv)
+	// Schema version check via a lightweight probe (models.ReconSummary does not have this field).
+	var schemaPeek struct {
+		SchemaVersion string `json:"schema_version"`
 	}
-	if err := json.Unmarshal(b, &rs); err != nil {
-		return rs, fmt.Errorf("decode summary struct: %w", err)
+	if jerr := json.Unmarshal(b, &schemaPeek); jerr == nil {
+		if sv := strings.TrimSpace(schemaPeek.SchemaVersion); sv != "" && sv != models.SchemaVersion {
+			return rs, fmt.Errorf("incompatible schema_version: %s", sv)
+		}
 	}
 	ingest.NormalizeReconSummaryPaths(summaryPath, &rs)
 	live := strings.TrimSpace(rs.Live)
@@ -2977,21 +3053,24 @@ func reconCorpusMatchCount(path string, needles []string) int {
 	if path == "" || len(needles) == 0 {
 		return 0
 	}
+	lowered := normalizedNeedles(needles)
+	if len(lowered) == 0 {
+		return 0
+	}
+	cacheKey := reconCorpusMatchCacheKey(path, lowered)
+	if cacheKey != "" {
+		reconCorpusMatchMu.Lock()
+		if cached, ok := reconCorpusMatchCache[cacheKey]; ok {
+			reconCorpusMatchMu.Unlock()
+			return cached
+		}
+		reconCorpusMatchMu.Unlock()
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0
 	}
 	defer f.Close()
-	lowered := make([]string, 0, len(needles))
-	for _, needle := range needles {
-		needle = strings.ToLower(strings.TrimSpace(needle))
-		if needle != "" {
-			lowered = append(lowered, needle)
-		}
-	}
-	if len(lowered) == 0 {
-		return 0
-	}
 	seen := map[string]struct{}{}
 	scanner := bufio.NewScanner(f)
 	lineCount := 0
@@ -3013,7 +3092,44 @@ func reconCorpusMatchCount(path string, needles []string) int {
 			break
 		}
 	}
-	return len(seen)
+	count := len(seen)
+	if cacheKey != "" {
+		reconCorpusMatchMu.Lock()
+		reconCorpusMatchCache[cacheKey] = count
+		reconCorpusMatchMu.Unlock()
+	}
+	return count
+}
+
+func normalizedNeedles(needles []string) []string {
+	out := make([]string, 0, len(needles))
+	seen := map[string]struct{}{}
+	for _, needle := range needles {
+		needle = strings.ToLower(strings.TrimSpace(needle))
+		if needle == "" {
+			continue
+		}
+		if _, ok := seen[needle]; ok {
+			continue
+		}
+		seen[needle] = struct{}{}
+		out = append(out, needle)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func reconCorpusMatchCacheKey(path string, loweredNeedles []string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return strings.Join([]string{
+		path,
+		strconv.FormatInt(st.ModTime().UnixNano(), 10),
+		strconv.FormatInt(st.Size(), 10),
+		strings.Join(loweredNeedles, ","),
+	}, "|")
 }
 
 func moduleNames(mods []exploit.Module) []string {
@@ -3022,6 +3138,148 @@ func moduleNames(mods []exploit.Module) []string {
 		out = append(out, m.Name())
 	}
 	return out
+}
+
+func flattenModuleStages(stages [][]exploit.Module) []exploit.Module {
+	if len(stages) == 0 {
+		return nil
+	}
+	out := make([]exploit.Module, 0, 32)
+	for _, stage := range stages {
+		out = append(out, stage...)
+	}
+	return out
+}
+
+func buildDependencyStages(mods []exploit.Module) ([][]exploit.Module, []string) {
+	if len(mods) == 0 {
+		return nil, nil
+	}
+	pending := make([]exploit.Module, len(mods))
+	copy(pending, mods)
+	present := map[string]struct{}{}
+	for _, m := range mods {
+		present[strings.ToLower(strings.TrimSpace(m.Name()))] = struct{}{}
+	}
+	completed := map[string]struct{}{}
+	stages := make([][]exploit.Module, 0, len(mods))
+	preview := []string{fmt.Sprintf("Dependency scheduler evaluating %d module(s)", len(mods))}
+	for len(pending) > 0 {
+		stage := make([]exploit.Module, 0, len(pending))
+		rest := make([]exploit.Module, 0, len(pending))
+		for _, m := range pending {
+			name := strings.ToLower(strings.TrimSpace(m.Name()))
+			if moduleDependenciesSatisfied(name, present, completed) {
+				stage = append(stage, m)
+				continue
+			}
+			rest = append(rest, m)
+		}
+		if len(stage) == 0 {
+			stage = append(stage, pending[0])
+			rest = pending[1:]
+			preview = append(preview, fmt.Sprintf("Dependency scheduler forced %s due to dependency cycle", stage[0].Name()))
+		}
+		for _, m := range stage {
+			completed[strings.ToLower(strings.TrimSpace(m.Name()))] = struct{}{}
+		}
+		stages = append(stages, stage)
+		preview = append(preview, fmt.Sprintf("Dependency stage %d: %s", len(stages), strings.Join(moduleNames(stage), ", ")))
+		pending = rest
+	}
+	if len(preview) > 12 {
+		preview = append(preview[:12], fmt.Sprintf("Dependency scheduler omitted %d additional stage note(s)", len(preview)-12))
+	}
+	return stages, preview
+}
+
+func moduleDependenciesSatisfied(name string, present, completed map[string]struct{}) bool {
+	deps := moduleDependencyNames(name)
+	if len(deps) == 0 {
+		return true
+	}
+	for _, dep := range deps {
+		if _, tracked := present[dep]; !tracked {
+			continue
+		}
+		if _, done := completed[dep]; !done {
+			return false
+		}
+	}
+	return true
+}
+
+func moduleDependencyNames(name string) []string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "auth-bypass":
+		return []string{"open-redirect", "session-abuse", "privilege-path", "cors-poc"}
+	case "idor-playbook":
+		return []string{"session-abuse", "privilege-path"}
+	case "idor-size":
+		return []string{"session-abuse", "privilege-path"}
+	case "mutation-engine":
+		return []string{"http-method-tampering", "bypass-poc"}
+	case "jwt-access":
+		return []string{"session-abuse"}
+	case "ssrf-prober":
+		return []string{"open-redirect"}
+	case "crlf-injection":
+		return []string{"open-redirect", "http-method-tampering"}
+	case "advanced-injection", "rsql-injection":
+		return []string{"graphql-abuse", "js-endpoints"}
+	case "saml-probe":
+		return []string{"session-abuse"}
+	case "mass-assign":
+		return []string{"session-abuse"}
+	case "race-condition":
+		return []string{"state-change", "session-abuse"}
+	default:
+		return nil
+	}
+}
+
+func filterModulesByAuthContextQuality(mods []exploit.Module, observed observedAuthContext) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
+	if len(mods) == 0 {
+		return nil, nil, nil
+	}
+	planned := make([]exploit.Module, 0, len(mods))
+	skipped := make([]models.ExploitModuleTelemetry, 0, len(mods))
+	preview := []string{
+		fmt.Sprintf("Auth quality guard user=%t admin=%t distinct=%t score=%d", observed.HasUser, observed.HasAdmin, observed.DistinctContexts, observed.QualityScore),
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, m := range mods {
+		name := strings.ToLower(strings.TrimSpace(m.Name()))
+		if moduleRequiresDistinctDualAuth(name) && !(observed.HasUser && observed.HasAdmin && observed.DistinctContexts) {
+			reason := "requires distinct user/admin auth contexts"
+			skipped = append(skipped, models.ExploitModuleTelemetry{
+				Module:        m.Name(),
+				StartedAt:     now,
+				FinishedAt:    now,
+				DurationMs:    0,
+				FindingsCount: 0,
+				ErrorCount:    0,
+				Skipped:       true,
+				SkippedReason: "auth-quality: " + reason,
+			})
+			preview = append(preview, fmt.Sprintf("Auth quality skipped %s: %s", m.Name(), reason))
+			continue
+		}
+		planned = append(planned, m)
+	}
+	if len(preview) > 10 {
+		preview = append(preview[:10], fmt.Sprintf("Auth quality omitted %d additional module decision(s)", len(preview)-10))
+	}
+	return planned, skipped, preview
+}
+
+func moduleRequiresDistinctDualAuth(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "auth-bypass", "idor-playbook", "idor-size", "mass-assign":
+		return true
+	default:
+		return false
+	}
 }
 
 func reconURLCorpusPath(rs models.ReconSummary) string {
@@ -3046,13 +3304,17 @@ func reconURLCorpusPath(rs models.ReconSummary) string {
 }
 
 type observedAuthContext struct {
-	UserCookie  string
-	UserHeader  string
-	AdminCookie string
-	AdminHeader string
-	HasUser     bool
-	HasAdmin    bool
-	Source      string
+	UserCookie       string
+	UserHeader       string
+	AdminCookie      string
+	AdminHeader      string
+	HasUser          bool
+	HasAdmin         bool
+	DistinctContexts bool
+	UserQuality      int
+	AdminQuality     int
+	QualityScore     int
+	Source           string
 }
 
 func splitAuthBootstrapModules(mods []exploit.Module) ([]exploit.Module, []exploit.Module) {
@@ -3092,8 +3354,18 @@ func applyObservedAuthFromSharedState(opt *exploit.Options, state *exploit.Share
 	if observed.AdminHeader != "" {
 		opt.AuthAdminHeaders = observed.AdminHeader
 	}
-	observed.HasUser = strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != ""
-	observed.HasAdmin = strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != ""
+	observed.UserQuality = authMaterialQuality(opt.AuthUserCookie, opt.AuthUserHeaders)
+	observed.AdminQuality = authMaterialQuality(opt.AuthAdminCookie, opt.AuthAdminHeaders)
+	observed.HasUser = observed.UserQuality > 0
+	observed.HasAdmin = observed.AdminQuality > 0
+	observed.DistinctContexts = authMaterialDistinct(opt.AuthUserCookie, opt.AuthUserHeaders, opt.AuthAdminCookie, opt.AuthAdminHeaders)
+	observed.QualityScore = observed.UserQuality + observed.AdminQuality
+	if observed.HasUser && observed.HasAdmin && !observed.DistinctContexts {
+		observed.QualityScore--
+	}
+	if observed.QualityScore < 0 {
+		observed.QualityScore = 0
+	}
 	if observed.Source == "" {
 		switch {
 		case observed.HasUser || observed.HasAdmin:
@@ -3140,6 +3412,61 @@ func observedAuthFromSharedState(state *exploit.SharedState) observedAuthContext
 		out.Source = "none"
 	}
 	return out
+}
+
+func authMaterialQuality(cookie, header string) int {
+	cookie = strings.TrimSpace(cookie)
+	header = strings.TrimSpace(header)
+	if cookie == "" && header == "" {
+		return 0
+	}
+	combined := strings.ToLower(strings.TrimSpace(cookie + "\n" + header))
+	if looksPlaceholderAuthMaterial(combined) {
+		return 1
+	}
+	if (cookie != "" && strings.Contains(cookie, "=")) || (header != "" && strings.Contains(header, ":")) {
+		return 2
+	}
+	return 1
+}
+
+func looksPlaceholderAuthMaterial(raw string) bool {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return false
+	}
+	tokens := []string{
+		"changeme", "replace_me", "replace-this", "placeholder", "example",
+		"your_cookie", "your token", "<cookie>", "<token>", "insert token",
+		"insert cookie", "todo", "dummy",
+	}
+	for _, token := range tokens {
+		if strings.Contains(raw, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func authMaterialDistinct(userCookie, userHeaders, adminCookie, adminHeaders string) bool {
+	userSig := authContextSignature(userCookie, userHeaders)
+	adminSig := authContextSignature(adminCookie, adminHeaders)
+	if userSig == "" || adminSig == "" {
+		return false
+	}
+	return userSig != adminSig
+}
+
+func authContextSignature(cookie, headers string) string {
+	cookie = strings.ToLower(strings.TrimSpace(cookie))
+	headerRows := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(headers)), func(r rune) bool {
+		return r == '\n' || r == ';'
+	})
+	for i, row := range headerRows {
+		headerRows[i] = strings.TrimSpace(row)
+	}
+	sort.Strings(headerRows)
+	return cookie + "|" + strings.Join(headerRows, "|")
 }
 
 func boolToInt(v bool) int {
@@ -3417,6 +3744,15 @@ func setJobError(job *models.Job, code string, msg string) {
 }
 
 func loadBrowserWorkflowSignals(rs models.ReconSummary) browserWorkflowSignals {
+	cacheKey := workflowSignalsCacheKey(rs)
+	if cacheKey != "" {
+		workflowSignalCacheMu.Lock()
+		if cached, ok := workflowSignalCache[cacheKey]; ok {
+			workflowSignalCacheMu.Unlock()
+			return cached
+		}
+		workflowSignalCacheMu.Unlock()
+	}
 	signals := browserWorkflowSignals{}
 	workdir := strings.TrimSpace(rs.Workdir)
 	if workdir != "" {
@@ -3428,7 +3764,42 @@ func loadBrowserWorkflowSignals(rs models.ReconSummary) browserWorkflowSignals {
 	if path := strings.TrimSpace(rs.Intel.BrowserWorkflowJSON); path != "" {
 		signals = mergeBrowserWorkflowSignals(signals, summarizeWorkflowItemsJSON(path))
 	}
+	if cacheKey != "" {
+		workflowSignalCacheMu.Lock()
+		workflowSignalCache[cacheKey] = signals
+		workflowSignalCacheMu.Unlock()
+	}
 	return signals
+}
+
+func workflowSignalsCacheKey(rs models.ReconSummary) string {
+	workdir := strings.TrimSpace(rs.Workdir)
+	workflowPath := strings.TrimSpace(rs.Intel.BrowserWorkflowJSON)
+	if workdir == "" && workflowPath == "" {
+		return ""
+	}
+	artifactPath := ""
+	if workdir != "" {
+		artifactPath = filepath.Join(workdir, "browser_capture_artifact.json")
+	}
+	return strings.Join([]string{
+		workdir,
+		workflowPath,
+		fileStamp(artifactPath),
+		fileStamp(workflowPath),
+	}, "|")
+}
+
+func fileStamp(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return "missing"
+	}
+	return strconv.FormatInt(st.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(st.Size(), 10)
 }
 
 func summarizeBrowserCaptureArtifact(artifact browsercapture.Artifact) browserWorkflowSignals {

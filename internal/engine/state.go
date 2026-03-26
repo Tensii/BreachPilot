@@ -16,9 +16,10 @@ const StateFile = ".breachpilot.state"
 
 // StateManager persists the execution state of a job to allow resumption.
 type StateManager struct {
-	path  string
-	state models.JobState
-	mu    sync.Mutex
+	path       string
+	state      models.JobState
+	modulesSet map[string]struct{}
+	mu         sync.Mutex
 }
 
 // NewStateManager creates or loads a state manager for a job directory.
@@ -26,7 +27,7 @@ func NewStateManager(jobDir string, job *models.Job) (*StateManager, error) {
 	if jobDir == "" {
 		return nil, fmt.Errorf("jobDir is required")
 	}
-	if err := os.MkdirAll(jobDir, 0755); err != nil {
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create job dir: %w", err)
 	}
 
@@ -40,6 +41,7 @@ func NewStateManager(jobDir string, job *models.Job) (*StateManager, error) {
 			StartedAt:       time.Now().UTC().Format(time.RFC3339),
 			ModulesFinished: []string{},
 		},
+		modulesSet: make(map[string]struct{}),
 	}
 
 	// Try to load existing state
@@ -58,7 +60,8 @@ func NewStateManager(jobDir string, job *models.Job) (*StateManager, error) {
 // NewStateManagerFromPath loads an existing state from a .breachpilot.state file.
 func NewStateManagerFromPath(statePath string) (*StateManager, error) {
 	sm := &StateManager{
-		path: statePath,
+		path:       statePath,
+		modulesSet: make(map[string]struct{}),
 	}
 	if err := sm.Load(); err != nil {
 		return nil, fmt.Errorf("failed to load state from %s: %w", statePath, err)
@@ -85,29 +88,30 @@ func (sm *StateManager) Load() error {
 		state.ModulesFinished = []string{}
 	}
 	sm.state = state
+	sm.modulesSet = make(map[string]struct{}, len(state.ModulesFinished))
+	for _, m := range state.ModulesFinished {
+		sm.modulesSet[m] = struct{}{}
+	}
 	return nil
 }
 
 // Save writes the current state to disk.
 func (sm *StateManager) Save() error {
+	// Marshal under the lock for a consistent snapshot, then release before disk I/O.
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	sm.state.LastUpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	data, err := json.MarshalIndent(sm.state, "", "  ")
+	sm.mu.Unlock()
 	if err != nil {
 		return err
 	}
 
-	err = os.WriteFile(sm.path, data, 0644)
-	if err != nil {
-		// Try temp file swap for atomic write
-		tmp := sm.path + ".tmp"
-		if err := os.WriteFile(tmp, data, 0644); err == nil {
-			return os.Rename(tmp, sm.path)
-		}
+	// Always use atomic temp-file swap to prevent partial writes on crash.
+	tmp := sm.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
 	}
-	return err
+	return os.Rename(tmp, sm.path)
 }
 
 // MarkReconCompleted flags the recon phase as finished.
@@ -130,14 +134,11 @@ func (sm *StateManager) MarkNucleiCompleted() error {
 // MarkModuleCompleted flags a specific custom module as finished.
 func (sm *StateManager) MarkModuleCompleted(moduleName string) error {
 	sm.mu.Lock()
-	found := false
-	for _, m := range sm.state.ModulesFinished {
-		if m == moduleName {
-			found = true
-			break
-		}
+	if sm.modulesSet == nil {
+		sm.modulesSet = make(map[string]struct{})
 	}
-	if !found {
+	if _, exists := sm.modulesSet[moduleName]; !exists {
+		sm.modulesSet[moduleName] = struct{}{}
 		sm.state.ModulesFinished = append(sm.state.ModulesFinished, moduleName)
 	}
 	sm.mu.Unlock()
@@ -162,12 +163,8 @@ func (sm *StateManager) IsNucleiCompleted() bool {
 func (sm *StateManager) IsModuleCompleted(moduleName string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	for _, m := range sm.state.ModulesFinished {
-		if m == moduleName {
-			return true
-		}
-	}
-	return false
+	_, ok := sm.modulesSet[moduleName]
+	return ok
 }
 
 // State returns a copy of the current job state.

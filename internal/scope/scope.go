@@ -2,6 +2,7 @@ package scope
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"strings"
@@ -14,18 +15,29 @@ func ValidateTarget(target string) error {
 	if t == "" {
 		return errors.New("target is required")
 	}
-	if t == "localhost" || strings.HasPrefix(t, "localhost:") {
+	// Strip protocol prefix for validation only (not for use as the target itself)
+	check := t
+	for _, pfx := range []string{"https://", "http://"} {
+		if strings.HasPrefix(check, pfx) {
+			check = check[len(pfx):]
+			break
+		}
+	}
+	check = strings.TrimRight(check, "/")
+	// Strip port suffix for hostname validation
+	if h, _, err := net.SplitHostPort(check); err == nil {
+		check = h
+	}
+	if check == "localhost" {
 		return nil
 	}
-	if ip := net.ParseIP(t); ip != nil {
-		// Allow local/private for dev/test purposes
+	if ip := net.ParseIP(check); ip != nil {
 		return nil
 	}
-	// Allow single-word targets if they look like hostnames (common in local labs)
-	if hostRE.MatchString(t) {
+	if hostRE.MatchString(check) {
 		return nil
 	}
-	return nil
+	return fmt.Errorf("invalid target %q: must be a hostname, IP address, or host:port", target)
 }
 
 // NormalizeTargetForDir sanitizes a target into a safe directory name.

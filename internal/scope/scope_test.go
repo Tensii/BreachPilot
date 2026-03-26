@@ -31,3 +31,30 @@ func TestNormalizeTargetForDir(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  string
+		wantErr bool
+	}{
+		{name: "reject path traversal", target: "../etc/passwd", wantErr: true},
+		{name: "accept domain", target: "example.com", wantErr: false},
+		{name: "accept domain with port", target: "example.com:8080", wantErr: false},
+		{name: "accept ipv4", target: "192.168.1.1", wantErr: false},
+		{name: "accept localhost port", target: "localhost:3000", wantErr: false},
+		{name: "reject whitespace target", target: "foo bar", wantErr: true},
+		{name: "reject empty", target: "", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTarget(tc.target)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for target %q", tc.target)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("did not expect error for target %q: %v", tc.target, err)
+			}
+		})
+	}
+}
