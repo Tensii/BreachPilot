@@ -415,7 +415,6 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 	return nil
 }
 
-
 func parseTargetsFile(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -454,7 +453,6 @@ func parseTargetsFile(path string) ([]string, error) {
 	}
 	return targets, nil
 }
-
 
 func formatCLISummary(job *models.Job, mode string) []string {
 	if job == nil {
@@ -840,6 +838,10 @@ func printStartupBanner(cfg config.Config) {
 	green := "\x1b[32m"
 	yellow := "\x1b[33m"
 	gray := "\x1b[90m"
+	red := "\x1b[31m"
+	magenta := "\x1b[35m"
+	white := "\x1b[97m"
+	bold := "\x1b[1m"
 	reset := "\x1b[0m"
 
 	redact := func(v string) string {
@@ -853,34 +855,52 @@ func printStartupBanner(cfg config.Config) {
 	if minSev == "" {
 		minSev = "none"
 	}
-
-	fmt.Println(cyan + "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓" + reset)
-	fmt.Println(cyan + "┃  ☠️🔥  BREACHPILOT // OFFENSIVE RUNTIME ONLINE                           ┃" + reset)
-	fmt.Println(cyan + "┃  [ RECON ] -> [ TRIAGE ] -> [ VERIFY ] -> [ EXPLOIT ] -> [ REPORT ]    ┃" + reset)
-	fmt.Println(cyan + "┃  \"quiet in logs, loud in findings\"                                    ┃" + reset)
-	fmt.Println(cyan + "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛" + reset)
-	fmt.Printf("%s[WEBHOOKS]%s recon=%s exploit=%s retries=%d\n", green, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
+	modes := make([]string, 0, 4)
+	if cfg.AggressiveMode {
+		modes = append(modes, "aggressive")
+	}
+	if cfg.BoundlessMode {
+		modes = append(modes, "boundless")
+	}
+	if cfg.ProofMode {
+		modes = append(modes, "proof")
+	}
+	if len(modes) == 0 {
+		modes = append(modes, "standard")
+	}
 	reconTimeoutLabel := fmt.Sprintf("%ds", cfg.ReconTimeoutSec)
 	nucleiTimeoutLabel := fmt.Sprintf("%ds", cfg.NucleiTimeoutSec)
+	moduleTimeoutLabel := fmt.Sprintf("%ds", cfg.ModuleTimeoutSec)
 	if cfg.BoundlessMode {
 		reconTimeoutLabel = "off(boundless)"
 		nucleiTimeoutLabel = "off(boundless)"
+		moduleTimeoutLabel = "off(boundless)"
 	}
-	fmt.Printf("%s[RUNTIME ]%s nuclei=%s recon_timeout=%s nuclei_timeout=%s\n", green, reset, cfg.NucleiBin, reconTimeoutLabel, nucleiTimeoutLabel)
-	fmt.Printf("%s[PROFILE ]%s scan_profile=%s min_severity=%s rate_limit_rps=%d\n", yellow, reset, emptyAs(cfg.ScanProfile, "none"), minSev, cfg.RateLimitRPS)
-	fmt.Printf("%s[REPORT  ]%s formats=%s artifacts=%s\n", yellow, reset, emptyAs(cfg.ReportFormats, "json,md,html"), cfg.ArtifactsRoot)
-	fmt.Printf("%s[FLAGS   ]%s val=%t agg=%t bound=%t proof=%t skip_n=%t bc=%t only=%s skip=%s\n", gray, reset, cfg.ValidationOnly, cfg.AggressiveMode, cfg.BoundlessMode, cfg.ProofMode, cfg.SkipNuclei, cfg.BrowserCaptureEnabled, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
-	fmt.Printf("%s[ENGINE  ]%s default exploit lane=exploit-core context_modules=explicit-only|validation_only|deep\n", gray, reset)
+
+	fmt.Println(magenta + "╔══════════════════════════════════════════════════════════════════════════╗" + reset)
+	fmt.Println(magenta + "║" + bold + "  BREACHPILOT // RED-TEAM TERMINAL                                  " + reset + magenta + "║" + reset)
+	fmt.Println(magenta + "║  " + green + "◉ RECON" + magenta + "  ➜  " + yellow + "◉ TRIAGE" + magenta + "  ➜  " + cyan + "◉ VERIFY" + magenta + "  ➜  " + red + "◉ EXPLOIT" + magenta + "  ➜  " + white + "◉ REPORT" + magenta + "  ║" + reset)
+	fmt.Println(magenta + "╚══════════════════════════════════════════════════════════════════════════╝" + reset)
+	fmt.Printf("%s┌─ SESSION ───────────────────────────────────────────────────────────────┐%s\n", gray, reset)
+	fmt.Printf("%s│%s mode=%s  profile=%s  min_severity=%s\n", gray, reset, strings.Join(modes, ","), emptyAs(cfg.ScanProfile, "none"), minSev)
+	fmt.Printf("%s│%s skip_nuclei=%t  browser_capture=%t  only=%s  skip=%s\n", gray, reset, cfg.SkipNuclei, cfg.BrowserCaptureEnabled, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
+	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", gray, reset)
+	fmt.Printf("%s┌─ RUNTIME ───────────────────────────────────────────────────────────────┐%s\n", cyan, reset)
+	fmt.Printf("%s│%s nuclei=%s  rps=%d  module_timeout=%s\n", cyan, reset, cfg.NucleiBin, cfg.RateLimitRPS, moduleTimeoutLabel)
+	fmt.Printf("%s│%s recon_timeout=%s  nuclei_timeout=%s  recon_retries=%d\n", cyan, reset, reconTimeoutLabel, nucleiTimeoutLabel, cfg.ReconRetries)
+	fmt.Printf("%s│%s webhooks(recon/exploit)=%s/%s retries=%d\n", cyan, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
+	fmt.Printf("%s│%s artifacts=%s  reports=%s\n", cyan, reset, cfg.ArtifactsRoot, emptyAs(cfg.ReportFormats, "json,md,html"))
+	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", cyan, reset)
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
 			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")
-		fmt.Printf("\x1b[31m[PROOF   ]\x1b[0m allowlist=%s live auth contexts=%t\n", emptyAs(cfg.ProofTargetAllowlist, "all (no restriction)"), liveAuth)
+		fmt.Printf("%s[PROOF]%s allowlist=%s live_auth_contexts=%t\n", red, reset, emptyAs(cfg.ProofTargetAllowlist, "all (no restriction)"), liveAuth)
 	}
 	if cfg.AggressiveMode {
-		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ☠️ AGGRESSIVE MODE ENABLED — active verification probes ON\n")
+		fmt.Printf("%s[MODE ]%s ☠️ aggressive verification probes are enabled\n", red, reset)
 	}
 	if cfg.BoundlessMode {
-		fmt.Printf("\x1b[31m[MODE    ]\x1b[0m ∞ BOUNDLESS MODE ENABLED — module limits and timeouts relaxed for this run\n")
+		fmt.Printf("%s[MODE ]%s ∞ boundless run: limits and timeouts are relaxed\n", red, reset)
 	}
 }
 

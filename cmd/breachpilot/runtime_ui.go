@@ -180,24 +180,33 @@ func (t *cliRuntimeTracker) snapshot() string {
 func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
 	label := stageLabel(ev.Stage)
 	status := strings.ToUpper(emptyAs(ev.Status, "info"))
-	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m \x1b[1m%s\x1b[0m %s", status, label, snapshotWithDetail(snapshot, ev.Message))
+	color := statusColor(ev.Status)
+	icon := statusIcon(ev.Status)
+	return fmt.Sprintf("%s[%s]%s %s %s %s", color, status, "\x1b[0m", icon, label, snapshotWithDetail(snapshot, ev.Message))
 }
 
 func renderRuntimeModule(ev models.RuntimeEvent, snapshot string) string {
 	color := "\x1b[33m"
+	icon := "◉"
 	switch ev.Status {
 	case "completed":
 		color = "\x1b[32m"
+		icon = "✔"
 	case "error":
 		color = "\x1b[31m"
+		icon = "✖"
 	case "skipped":
 		color = "\x1b[90m"
+		icon = "⤼"
+	case "started":
+		color = "\x1b[36m"
+		icon = "⚡"
 	}
 	detail := ev.Module
 	if findings, ok := ev.Counts["findings"]; ok {
 		detail = fmt.Sprintf("%s findings=%d", ev.Module, findings)
 	}
-	return fmt.Sprintf("%s[MODULE]\x1b[0m %s %s", color, detail, snapshot)
+	return fmt.Sprintf("%s[MODULE]%s %s %s %s", color, "\x1b[0m", icon, detail, snapshot)
 }
 
 func renderRuntimeFinding(f models.FindingPreview, snapshot string) string {
@@ -206,22 +215,26 @@ func renderRuntimeFinding(f models.FindingPreview, snapshot string) string {
 	if len(title) > 78 {
 		title = title[:78] + "..."
 	}
-	return fmt.Sprintf("%s[HIT]\x1b[0m %-8s %-9s %-18s %s | %s", color, strings.ToUpper(f.Severity), emptyAs(f.Validation, "signal"), f.Module, title, snapshot)
+	return fmt.Sprintf("%s[HIT]%s ☣ %-8s %-9s %-18s %s | %s", color, "\x1b[0m", strings.ToUpper(f.Severity), emptyAs(f.Validation, "signal"), f.Module, title, snapshot)
 }
 
 func renderRuntimeSummary(ev models.RuntimeEvent, snapshot string) string {
 	nuclei := ev.Counts["nuclei"]
 	exploit := ev.Counts["exploit"]
 	filtered := ev.Counts["filtered"]
-	return fmt.Sprintf("\x1b[35m[SUMMARY]\x1b[0m nuclei=%d exploit=%d filtered=%d %s", nuclei, exploit, filtered, snapshot)
+	return fmt.Sprintf("\x1b[35m[SUMMARY]\x1b[0m ✔ nuclei=%d exploit=%d filtered=%d %s", nuclei, exploit, filtered, snapshot)
 }
 
 func renderRuntimeProgress(ev models.RuntimeEvent, snapshot string) string {
-	return fmt.Sprintf("\x1b[34m[PROGRESS]\x1b[0m %s | %s", strings.TrimSpace(ev.Message), snapshot)
+	bar := ""
+	if ev.Progress != nil {
+		bar = " " + progressBar(14, ev.Progress.Percent)
+	}
+	return fmt.Sprintf("\x1b[34m[PROGRESS]\x1b[0m%s %s | %s", bar, strings.TrimSpace(ev.Message), snapshot)
 }
 
 func renderRuntimeLog(ev models.RuntimeEvent) string {
-	return fmt.Sprintf("\x1b[90m[LOG]\x1b[0m %s", ev.Message)
+	return fmt.Sprintf("\x1b[90m[LOG]\x1b[0m ▸ %s", ev.Message)
 }
 
 func stageLabel(stage string) string {
@@ -257,6 +270,57 @@ func severityColor(sev string) string {
 	default:
 		return "\x1b[90m"
 	}
+}
+
+func statusColor(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "success", "resumed":
+		return "\x1b[32m"
+	case "started", "running":
+		return "\x1b[36m"
+	case "warning", "planned", "polling":
+		return "\x1b[33m"
+	case "error", "failed", "cancelled", "rejected":
+		return "\x1b[31m"
+	default:
+		return "\x1b[35m"
+	}
+}
+
+func statusIcon(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "success", "resumed":
+		return "✔"
+	case "started", "running":
+		return "⚡"
+	case "warning":
+		return "⚠"
+	case "error", "failed", "cancelled", "rejected":
+		return "✖"
+	case "polling":
+		return "⌛"
+	case "planned":
+		return "◎"
+	default:
+		return "◆"
+	}
+}
+
+func progressBar(width, percent int) string {
+	if width <= 0 {
+		width = 10
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := (percent * width) / 100
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
 }
 
 func snapshotWithDetail(snapshot, detail string) string {

@@ -141,9 +141,28 @@ _RX_ATTR = re.compile(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(".*?"|\'.*?\'|[^\s>]
 _RX_ROBOTS_ALLOW = re.compile(r"^\s*(?:allow|disallow)\s*:\s*(\S+)\s*$", re.I)
 _RX_SITEMAP_LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.I)
 _RX_PARAM_IN_TEXT = re.compile(r"[?&]([A-Za-z0-9_.-]{1,64})=", re.I)
+_RX_HTTP_URL = re.compile(r"https?://[^\s\"'<>]+", re.I)
 
 _ARCHIVE_URL_SOURCES = frozenset({"gau", "wayback"})
-_LIVE_URL_SOURCES = frozenset({"crawl_live", "js_extracted", "robots", "sitemap", "form_action", "redirect_chain"})
+_LIVE_URL_SOURCES = frozenset({"crawl_live", "js_extracted", "xnlinkfinder", "robots", "sitemap", "form_action", "redirect_chain"})
+_GF_PATTERN_BUCKETS: dict[str, str] = {
+    "xss": "xss",
+    "sqli": "sqli",
+    "ssrf": "ssrf",
+    "lfi": "lfi",
+    "redirect": "redirect",
+    "rce": "rce",
+    "ssti": "ssti",
+}
+_GF_QSREPLACE_PAYLOADS: dict[str, str] = {
+    "xss": "BPXSS",
+    "sqli": "BPSQLI",
+    "ssrf": "https://bp-oob.invalid",
+    "lfi": "../../../../etc/passwd",
+    "redirect": "https://bp-redirect.invalid",
+    "rce": "$(id)",
+    "ssti": "{{7*7}}",
+}
 _HIGH_RISK_PARAM_NAMES = frozenset({
     "id", "ids", "uid", "user", "user_id", "account", "account_id", "role",
     "redirect", "next", "url", "dest", "destination", "return", "returnurl", "callback",
@@ -903,6 +922,7 @@ class ReconConfig:
     katana_timeout: int = 300
     gospider_timeout: int = 300
     hakrawler_timeout: int = 300
+    xnlinkfinder_timeout: int = 300
     katana_depth: int = 3
     katana_js_crawl: bool = True
     gau_timeout: int = 300
@@ -931,6 +951,7 @@ class ReconConfig:
     naabu_top_ports: str = ""
     skip_portscan: bool = False
     dns_bruteforce_timeout: int = 600
+    dns_bruteforce_mode: str = "auto"  # auto|puredns|dnsx
     skip_dns_bruteforce: bool = False
     arjun_timeout: int = 400
     arjun_host_cap: int = 50
@@ -963,6 +984,7 @@ class ReconConfig:
     url_revalidate_cap: int = 2000
     url_revalidate_get_cap: int = 600
     url_revalidate_body_max: int = 200000
+    gf_bucket_cap: int = 2000
 
 
 @dataclass(frozen=True)
@@ -975,6 +997,8 @@ class ToolVersions:
     katana: str = "github.com/projectdiscovery/katana/cmd/katana@v1.1.2"
     gau: str = "github.com/lc/gau/v2/cmd/gau@v2.2.4"
     nuclei: str = "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.4.10"
+    gf: str = "github.com/tomnomnom/gf@latest"
+    qsreplace: str = "github.com/tomnomnom/qsreplace@latest"
 
 
 def validate_target(value: str) -> bool:
@@ -1106,6 +1130,9 @@ class Runner:
         self.asnmap_bin = resolve_tool("asnmap")
         self.gospider_bin = resolve_tool("gospider")
         self.hakrawler_bin = resolve_tool("hakrawler")
+        self.xnlinkfinder_bin = resolve_tool("xnLinkFinder") or resolve_tool("xnlinkfinder")
+        self.gf_bin = resolve_tool("gf")
+        self.qsreplace_bin = resolve_tool("qsreplace")
         self.gowitness_bin = resolve_tool("gowitness")
         self.secretfinder_py = str(Path.home() / ".local/share/secretfinder/SecretFinder.py")
         self._hydrate_httpx_cache()
@@ -1500,6 +1527,7 @@ class Runner:
             ("urls/urls_all.txt", self.urls / "urls_all.txt"),
             ("urls/urls_params.txt", self.urls / "urls_params.txt"),
             ("urls/katana_urls.txt", self.urls / "katana_urls.txt"),
+            ("urls/xnlinkfinder_urls.txt", self.urls / "xnlinkfinder_urls.txt"),
             ("urls/gau_urls.txt", self.urls / "gau_urls.txt"),
         ]
         reused = 0
@@ -2275,10 +2303,14 @@ class Runner:
         score = 20
         if any(s in _LIVE_URL_SOURCES for s in sources):
             score += 35
+        if "xnlinkfinder" in sources:
+            score += 8
         if "form_action" in sources:
             score += 10
         if "js_extracted" in sources:
             score += 8
+        if any(s.startswith("gf_") for s in sources):
+            score += 10
         if "redirect_chain" in sources:
             score += 6
         if any(s in _ARCHIVE_URL_SOURCES for s in sources):
@@ -2331,6 +2363,143 @@ class Runner:
         out["robots"] = sorted(set(out["robots"]))
         out["sitemap"] = sorted(set(out["sitemap"]))
         return out
+
+    def _extract_urls_from_blob(self, text: str) -> list[str]:
+        urls: set[str] = set()
+        for m in _RX_HTTP_URL.findall(text or ""):
+            u = normalize_url_for_output(m.strip())
+            if u:
+                urls.add(u)
+        stripped = (text or "").strip()
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            u = normalize_url_for_output(stripped.split()[0])
+            if u:
+                urls.add(u)
+        return sorted(urls)
+
+    def _run_xnlinkfinder(self, live_hosts: Path, out_file: Path) -> list[str]:
+        if not self.xnlinkfinder_bin:
+            return []
+        if not live_hosts.exists() or live_hosts.stat().st_size == 0:
+            return []
+        self.run_tool(
+            "xnLinkFinder",
+            [self.xnlinkfinder_bin, "-i", str(live_hosts), "-o", str(out_file)],
+            timeout=max(60, int(self.config.xnlinkfinder_timeout)),
+            stdout_path=self.logs / "xnlinkfinder.stdout.log",
+            stderr_path=self.logs / "xnlinkfinder.stderr.log",
+            allow_failure=True,
+        )
+        if not out_file.exists():
+            return []
+        out: set[str] = set()
+        for line in out_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for u in self._extract_urls_from_blob(line):
+                out.add(u)
+        return sorted(out)
+
+    def _build_vuln_url_buckets(self, urls_all_list: list[str], params_urls: list[str]) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+        bucket_sets: dict[str, set[str]] = {name: set() for name in sorted(set(_GF_PATTERN_BUCKETS.values()))}
+        source_tags_by_url: dict[str, set[str]] = {}
+        corpus = sorted({normalize_url_for_output(u) for u in (urls_all_list + params_urls) if normalize_url_for_output(u)})
+        corpus_file = self.urls / "gf_corpus.txt"
+        corpus_file.write_text("\n".join(corpus) + ("\n" if corpus else ""), encoding="utf-8")
+        if not corpus:
+            self.write_json(self.intel / "vuln_url_buckets.json", {"total": 0, "buckets": {}, "generated_at": now_utc_iso()})
+            return {}, {}
+
+        # Use gf when available; fall back to heuristic patterning when gf is missing/patterns are absent.
+        if self.gf_bin:
+            for pattern, bucket in _GF_PATTERN_BUCKETS.items():
+                out_path = self.cache / f"gf_{pattern}.txt"
+                self.run_tool(
+                    f"gf {pattern}",
+                    [self.gf_bin, pattern, str(corpus_file)],
+                    timeout=90,
+                    stdout_path=out_path,
+                    stderr_path=self.logs / f"gf_{pattern}.stderr.log",
+                    allow_failure=True,
+                )
+                if out_path.exists() and out_path.stat().st_size > 0:
+                    for line in out_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        for u in self._extract_urls_from_blob(line):
+                            bucket_sets[bucket].add(u)
+
+        # Heuristic fill: ensures buckets stay useful even if gf patterns are unavailable.
+        for raw in corpus:
+            u = normalize_url_for_output(raw)
+            if not u:
+                continue
+            parsed = urllib.parse.urlsplit(u)
+            path_l = (parsed.path or "").lower()
+            params_l = [k.lower() for k, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)]
+            hints = set()
+            for p in params_l:
+                hints.update(classify_param_name(p))
+
+            if any(x in params_l for x in ("q", "s", "search", "query", "keyword", "term", "message", "comment", "text")):
+                bucket_sets["xss"].add(u)
+            if any(x in params_l for x in ("id", "uid", "user_id", "order", "sort", "where", "group", "filter")):
+                bucket_sets["sqli"].add(u)
+            if "redirect_like" in hints or any(x in params_l for x in ("url", "uri", "target", "dest", "destination", "callback", "next", "redirect", "return")):
+                bucket_sets["ssrf"].add(u)
+                bucket_sets["redirect"].add(u)
+            if "file_like" in hints or any(x in params_l for x in ("file", "path", "template", "include", "download", "doc", "folder")):
+                bucket_sets["lfi"].add(u)
+            if any(x in params_l for x in ("cmd", "exec", "command", "shell", "code", "expression")):
+                bucket_sets["rce"].add(u)
+            if any(x in params_l for x in ("template", "view", "render", "fmt", "format")):
+                bucket_sets["ssti"].add(u)
+            if any(x in path_l for x in ("/graphql", "/graphiql", "/api", "/admin", "/debug")):
+                bucket_sets["ssrf"].add(u)
+
+        # qsreplace fuzz variants improve mutation-ready buckets.
+        if self.qsreplace_bin:
+            for bucket, payload in _GF_QSREPLACE_PAYLOADS.items():
+                seeds = sorted({u for u in bucket_sets.get(bucket, set()) if "?" in u and "=" in u})
+                if not seeds:
+                    continue
+                in_file = self.cache / f"qsreplace_{bucket}_in.txt"
+                out_file = self.cache / f"qsreplace_{bucket}_out.txt"
+                in_file.write_text("\n".join(seeds) + "\n", encoding="utf-8")
+                cmd = f"{shlex.quote(self.qsreplace_bin)} {shlex.quote(payload)} < {shlex.quote(str(in_file))}"
+                self.run_tool(
+                    f"qsreplace {bucket}",
+                    cmd,
+                    timeout=90,
+                    stdout_path=out_file,
+                    stderr_path=self.logs / f"qsreplace_{bucket}.stderr.log",
+                    allow_failure=True,
+                )
+                if out_file.exists() and out_file.stat().st_size > 0:
+                    for line in out_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        for u in self._extract_urls_from_blob(line):
+                            bucket_sets[bucket].add(u)
+
+        cap = max(200, int(self.config.gf_bucket_cap))
+        buckets: dict[str, list[str]] = {}
+        for bucket, values in bucket_sets.items():
+            rows = sorted(values)[:cap]
+            buckets[bucket] = rows
+            out_file = self.urls / f"vuln_{bucket}.txt"
+            out_file.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+            for u in rows:
+                source_tags_by_url.setdefault(u, set()).add(f"gf_{bucket}")
+
+        total = sum(len(v) for v in buckets.values())
+        self.write_json(
+            self.intel / "vuln_url_buckets.json",
+            {
+                "total": total,
+                "generated_at": now_utc_iso(),
+                "sources": {
+                    "gf_enabled": bool(self.gf_bin),
+                    "qsreplace_enabled": bool(self.qsreplace_bin),
+                },
+                "buckets": buckets,
+            },
+        )
+        return buckets, source_tags_by_url
 
     def _revalidate_discovered_urls(self, entries: list[dict]) -> tuple[list[dict], list[dict], list[dict], list[str]]:
         if not entries:
@@ -2485,6 +2654,7 @@ class Runner:
         gau_urls = self.urls / "gau_urls.txt"
         gospider_urls = self.urls / "gospider_urls.txt"
         hakrawler_urls = self.urls / "hakrawler_urls.txt"
+        xnlinkfinder_urls = self.urls / "xnlinkfinder_urls.txt"
         urls_all = self.urls / "urls_all.txt"
         urls_params = self.urls / "urls_params.txt"
         urls_live = self.urls / "urls_live.txt"
@@ -2496,8 +2666,9 @@ class Runner:
         endpoint_clusters_json = self.intel / "endpoint_clusters.json"
         fingerprints_json = self.intel / "response_fingerprints.json"
         response_clusters_json = self.intel / "response_clusters.json"
+        vuln_buckets_json = self.intel / "vuln_url_buckets.json"
         inventory_json = self.intel / "recon_inventory.json"
-        self.touch_files(katana_urls, gau_urls, gospider_urls, hakrawler_urls, urls_all, urls_params, urls_live, urls_archive)
+        self.touch_files(katana_urls, gau_urls, gospider_urls, hakrawler_urls, xnlinkfinder_urls, urls_all, urls_params, urls_live, urls_archive)
         live_hosts = self.workdir / "live_hosts.txt"
         if self.katana_bin and live_hosts.exists() and live_hosts.stat().st_size > 0:
             self.run_tool("katana", [self.katana_bin, "-list", str(live_hosts), "-silent", "-nc", "-kf", "all", "-c", str(max(1, self.config.url_workers)), "-d", str(self.config.katana_depth)] + (["-jc"] if self.config.katana_js_crawl else []) + ["-o", str(katana_urls)], timeout=self.config.katana_timeout, allow_failure=True)
@@ -2525,6 +2696,7 @@ class Runner:
                 allow_failure=True,
             )
             hk_input_file.unlink(missing_ok=True)
+        xn_urls = self._run_xnlinkfinder(live_hosts, xnlinkfinder_urls)
 
         discovered: dict[str, dict] = {}
 
@@ -2557,6 +2729,7 @@ class Runner:
             (katana_urls, "crawl_live", "live"),
             (gospider_urls, "crawl_live", "live"),
             (hakrawler_urls, "crawl_live", "live"),
+            (xnlinkfinder_urls, "xnlinkfinder", "live"),
             (gau_urls, "gau", "archive"),
         ]:
             if not p.exists():
@@ -2566,6 +2739,8 @@ class Runner:
                 if not u:
                     continue
                 add_url(u, source, sclass, "GET")
+        for u in xn_urls:
+            add_url(u, "xnlinkfinder", "live", "GET")
 
         js_paths_file = self.intel / "secrets_js_endpoints.txt"
         if js_paths_file.exists():
@@ -2590,6 +2765,14 @@ class Runner:
             add_url(u, "robots", "live", "GET")
         for u in aux.get("sitemap") or []:
             add_url(u, "sitemap", "live", "GET")
+
+        # Vulnerability-focused buckets (reconftw-style gf/qsreplace technique).
+        current_urls = sorted(discovered.keys())
+        current_params = [u for u in current_urls if "?" in u and "=" in u]
+        _, bucket_sources = self._build_vuln_url_buckets(current_urls, current_params)
+        for url, tags in bucket_sources.items():
+            for tag in sorted(tags):
+                add_url(url, tag, "pattern_match", "GET")
 
         discovered_entries = list(discovered.values())
         for row in discovered_entries:
@@ -2758,6 +2941,8 @@ class Runner:
         self.write_json(endpoint_clusters_json, {"total": len(endpoint_cluster_rows), "items": endpoint_cluster_rows})
         self.write_json(fingerprints_json, {"total": len(fingerprint_rows), "items": fingerprint_rows})
         self.write_json(response_clusters_json, {"total": len(response_cluster_rows), "items": response_cluster_rows})
+        if not vuln_buckets_json.exists():
+            self.write_json(vuln_buckets_json, {"total": 0, "buckets": {}, "generated_at": now_utc_iso()})
         self.write_json(inventory_json, {
             "hosts_discovered": self._count_lines(self.workdir / "all_subdomains.txt"),
             "origins_live": len(live_origins),
@@ -2771,6 +2956,7 @@ class Runner:
                 "urls_archive": str(urls_archive),
                 "urls_discovered_json": str(discovered_json),
                 "urls_revalidated_json": str(revalidated_json),
+                "vuln_url_buckets_json": str(vuln_buckets_json),
             },
         })
 
@@ -3619,6 +3805,23 @@ class Runner:
         workflow_items = self._load_json_items(self.intel / "browser_workflow_artifacts.json")
         response_clusters = self._load_json_items(self.intel / "response_clusters.json")
         endpoint_clusters = self._load_json_items(self.intel / "endpoint_clusters.json")
+        vuln_bucket_map: dict[str, list[str]] = {}
+        vuln_bucket_json = self.intel / "vuln_url_buckets.json"
+        if vuln_bucket_json.exists():
+            try:
+                payload = json.loads(vuln_bucket_json.read_text(encoding="utf-8", errors="ignore"))
+                buckets = payload.get("buckets", {}) if isinstance(payload, dict) else {}
+                if isinstance(buckets, dict):
+                    for bucket_name, urls in buckets.items():
+                        if not isinstance(urls, list):
+                            continue
+                        for item in urls:
+                            u = normalize_url_for_output(str(item or ""))
+                            if not u:
+                                continue
+                            vuln_bucket_map.setdefault(u, []).append(str(bucket_name))
+            except Exception:
+                vuln_bucket_map = {}
         params_payload = {}
         params_ranked_json = self.intel / "params_ranked.json"
         if params_ranked_json.exists():
@@ -3741,6 +3944,13 @@ class Runner:
             if "js_extracted" in sources:
                 score += 10
                 reasons.append("seen_in_js")
+            if "xnlinkfinder" in sources:
+                score += 9
+                reasons.append("seen_in_xnlinkfinder")
+            gf_hits = sorted({s.replace("gf_", "", 1) for s in sources if s.startswith("gf_")})
+            if gf_hits:
+                score += min(18, 5 * len(gf_hits))
+                reasons.append("gf_pattern_match")
             if "redirect_chain" in sources:
                 score += 6
                 reasons.append("redirect_chain")
@@ -3750,6 +3960,17 @@ class Runner:
             if "js_extracted" in sources and "crawl_live" in sources:
                 score += 8
                 reasons.append("seen_in_js_and_live")
+            if "pattern_match" in source_classes:
+                score += 6
+                reasons.append("pattern_matched_surface")
+            templated = str(c.get("templated_route") or template_url_path(u))
+            matched_buckets = sorted(set(vuln_bucket_map.get(u, []) + vuln_bucket_map.get(templated, [])))
+            if matched_buckets:
+                score += min(20, 6 * len(matched_buckets))
+                reasons.append("vuln_bucket_signal")
+                if any(b in {"ssrf", "sqli", "rce", "lfi", "redirect"} for b in matched_buckets):
+                    score += 6
+                    reasons.append("high_impact_bucket")
 
             methods = sorted(set(c["methods"]))
             if len(methods) > 1:
@@ -3770,7 +3991,6 @@ class Runner:
             else:
                 risky_params = []
 
-            templated = str(c.get("templated_route") or template_url_path(u))
             if any(x in templated for x in ("{id}", "{uuid}", "{hex}", "{slug}")):
                 score += 11
                 reasons.append("object_pattern_route")
@@ -3820,6 +4040,7 @@ class Runner:
                 "templated_route": templated,
                 "param_names": param_names[:20],
                 "high_risk_params": risky_params[:12],
+                "vuln_buckets": matched_buckets[:8],
                 "methods": methods,
                 "response_fingerprint_cluster_size": fp_size,
                 "workflow_hits": len(workflow_hits),
@@ -3943,6 +4164,7 @@ class Runner:
             f"- Forms discovered: `{self.intel / 'forms_discovered.json'}`\n",
             f"- Browser workflow artifacts: `{self.intel / 'browser_workflow_artifacts.json'}`\n",
             f"- Host/App inventory split: `{self.intel / 'recon_inventory.json'}`\n",
+            f"- Vulnerability URL buckets: `{self.intel / 'vuln_url_buckets.json'}`\n",
             f"- Endpoint ranking: `{self.intel / 'endpoints_ranked.md'}`\n",
             f"- Secrets summary: `{self.intel / 'secrets_summary.json'}`\n",
             f"- Secrets findings md: `{self.intel / 'secrets_findings.md'}`\n",
@@ -3964,6 +4186,7 @@ class Runner:
             "httpx": {"text": str(self.workdir / "httpx_results.txt"), "jsonl": str(self.workdir / "httpx_results.json")},
             "urls": {
                 "katana": str(self.urls / "katana_urls.txt"),
+                "xnlinkfinder": str(self.urls / "xnlinkfinder_urls.txt"),
                 "gau": str(self.urls / "gau_urls.txt"),
                 "all": str(self.urls / "urls_all.txt"),
                 "params": str(self.urls / "urls_params.txt"),
@@ -3997,6 +4220,7 @@ class Runner:
                 "urls_revalidated_json": str(self.intel / "urls_revalidated.json"),
                 "forms_discovered_json": str(self.intel / "forms_discovered.json"),
                 "browser_workflow_artifacts_json": str(self.intel / "browser_workflow_artifacts.json"),
+                "vuln_url_buckets_json": str(self.intel / "vuln_url_buckets.json"),
                 "endpoint_clusters_json": str(self.intel / "endpoint_clusters.json"),
                 "response_fingerprints_json": str(self.intel / "response_fingerprints.json"),
                 "response_clusters_json": str(self.intel / "response_clusters.json"),
@@ -4177,28 +4401,89 @@ class Runner:
     def stage_dns_bruteforce(self) -> None:
         if self.is_done("dns_bruteforce"):
             return
-        if self.config.skip_dns_bruteforce or not self.puredns_bin:
-            self.record_stage_status("dns_bruteforce", "skipped", "skip-dns-bruteforce or puredns missing")
+        if self.config.skip_dns_bruteforce:
+            self.record_stage_status("dns_bruteforce", "skipped", "skip-dns-bruteforce enabled")
             self.mark_done("dns_bruteforce")
             return
+        try:
+            ipaddress.ip_address(self.target)
+            self.record_stage_status("dns_bruteforce", "skipped", "target is an IP; dns bruteforce is hostname-only")
+            self.mark_done("dns_bruteforce")
+            return
+        except Exception:
+            pass
+
+        can_puredns = bool(self.puredns_bin)
+        can_dnsx = bool(self.dnsx_bin)
+        if (not can_puredns) and (not can_dnsx):
+            self.record_stage_status("dns_bruteforce", "skipped", "puredns and dnsx are both missing")
+            self.mark_done("dns_bruteforce")
+            return
+
         wordlist = ensure_dns_wordlist()
         resolvers = ensure_resolvers_list()
         brute_out = self.workdir / "bruteforce_subdomains.txt"
+        dnsx_out = self.workdir / "dnsx_bruteforce_subdomains.txt"
         all_subs = self.workdir / "all_subdomains.txt"
-        self.touch_files(brute_out)
-        self.run_tool("puredns bruteforce", [self.puredns_bin, "bruteforce", str(wordlist), self.target, "--resolvers", str(resolvers), "--write", str(brute_out), "--quiet"], timeout=self.config.dns_bruteforce_timeout, allow_failure=True)
+        self.touch_files(brute_out, dnsx_out)
+
+        mode = str(self.config.dns_bruteforce_mode or "auto").strip().lower()
+        if mode not in {"auto", "puredns", "dnsx"}:
+            mode = "auto"
+        resolver_used = ""
+
+        def _read_non_comment_lines(path: Path) -> set[str]:
+            if not path.exists() or path.stat().st_size == 0:
+                return set()
+            return {
+                x.strip()
+                for x in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if x.strip() and not x.strip().startswith("#")
+            }
+
+        puredns_found: set[str] = set()
+        dnsx_found: set[str] = set()
+
+        if can_puredns and mode in {"auto", "puredns"}:
+            self.run_tool(
+                "puredns bruteforce",
+                [self.puredns_bin, "bruteforce", str(wordlist), self.target, "--resolvers", str(resolvers), "--write", str(brute_out), "--quiet"],
+                timeout=self.config.dns_bruteforce_timeout,
+                allow_failure=True,
+            )
+            puredns_found = _read_non_comment_lines(brute_out)
+            if puredns_found:
+                resolver_used = "puredns"
+
+        should_try_dnsx = can_dnsx and (
+            mode == "dnsx" or (mode == "auto" and len(puredns_found) == 0)
+        )
+        if should_try_dnsx:
+            self.run_tool(
+                "dnsx bruteforce fallback",
+                [self.dnsx_bin, "-d", self.target, "-w", str(wordlist), "-silent", "-retry", "2", "-r", str(resolvers), "-o", str(dnsx_out)],
+                timeout=max(120, int(self.config.dns_bruteforce_timeout)),
+                allow_failure=True,
+            )
+            dnsx_found = _read_non_comment_lines(dnsx_out)
+            if dnsx_found and not resolver_used:
+                resolver_used = "dnsx"
+
         existing = set(
             x.strip() for x in all_subs.read_text(encoding="utf-8", errors="ignore").splitlines()
             if x.strip() and not x.strip().startswith("#")
         ) if all_subs.exists() else set()
-        new_subs = set(
-            x.strip() for x in brute_out.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if x.strip() and not x.strip().startswith("#")
-        ) if brute_out.exists() else set()
+        new_subs = set(puredns_found | dnsx_found)
         merged = sorted(existing | new_subs)
         all_subs.write_text("\n".join(merged) + "\n", encoding="utf-8")
         gained = len(new_subs - existing)
-        self.record_stage_status("dns_bruteforce", "completed", f"found={len(new_subs)} new={gained} total={len(merged)}", metrics={
+        if not resolver_used:
+            resolver_used = "none"
+        self.record_stage_status("dns_bruteforce", "completed", f"mode={mode} resolver={resolver_used} found={len(new_subs)} new={gained} total={len(merged)}", metrics={
+            "mode": mode,
+            "resolver_used": resolver_used,
+            "puredns_found": len(puredns_found),
+            "dnsx_found": len(dnsx_found),
             "found": len(new_subs),
             "new": gained,
             "total_subdomains": len(merged),
@@ -5337,6 +5622,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--naabu-ports", type=str)
     p.add_argument("--skip-dns-bruteforce", action="store_true")
     p.add_argument("--dns-bruteforce-timeout", type=int)
+    p.add_argument("--dns-bruteforce-mode", choices=["auto", "puredns", "dnsx"], type=str)
     p.add_argument("--skip-param-discovery", action="store_true")
     p.add_argument("--arjun-host-cap", type=int)
     p.add_argument("--arjun-threads", type=int)
@@ -5400,6 +5686,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--katana-timeout", type=int)
     p.add_argument("--gospider-timeout", type=int)
     p.add_argument("--hakrawler-timeout", type=int)
+    p.add_argument("--xnlinkfinder-timeout", type=int)
     p.add_argument("--katana-depth", type=int)
     p.add_argument("--no-katana-js-crawl", dest="katana_js_crawl", action="store_false")
     p.add_argument("--gau-timeout", type=int)
@@ -5409,6 +5696,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--url-revalidate-cap", type=int)
     p.add_argument("--url-revalidate-get-cap", type=int)
     p.add_argument("--url-revalidate-body-max", type=int)
+    p.add_argument("--gf-bucket-cap", type=int)
     p.add_argument("--force-update-templates", action="store_true")
     p.add_argument("--ffuf-version", type=str)
     p.add_argument("--httpx-version", type=str)
@@ -5418,6 +5706,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--katana-version", type=str)
     p.add_argument("--gau-version", type=str)
     p.add_argument("--nuclei-version", type=str)
+    p.add_argument("--gf-version", type=str)
+    p.add_argument("--qsreplace-version", type=str)
     p.add_argument("--update-tools", action="store_true")
     p.add_argument("--output-format", choices=["md"], default="md")
     p.add_argument("--debug-artifacts", action="store_true")
@@ -5534,6 +5824,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "katana_timeout": args.katana_timeout,
         "gospider_timeout": args.gospider_timeout,
         "hakrawler_timeout": args.hakrawler_timeout,
+        "xnlinkfinder_timeout": args.xnlinkfinder_timeout,
         "katana_depth": args.katana_depth,
         "katana_js_crawl": args.katana_js_crawl,
         "gau_timeout": args.gau_timeout,
@@ -5543,6 +5834,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "url_revalidate_cap": args.url_revalidate_cap,
         "url_revalidate_get_cap": args.url_revalidate_get_cap,
         "url_revalidate_body_max": args.url_revalidate_body_max,
+        "gf_bucket_cap": args.gf_bucket_cap,
         "skip_secrets": args.skip_secrets,
         "skip_takeover": args.skip_takeover,
         "skip_cors": args.skip_cors,
@@ -5553,6 +5845,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "naabu_ports": args.naabu_ports,
         "skip_dns_bruteforce": args.skip_dns_bruteforce,
         "dns_bruteforce_timeout": args.dns_bruteforce_timeout,
+        "dns_bruteforce_mode": args.dns_bruteforce_mode,
         "skip_param_discovery": args.skip_param_discovery,
         "arjun_host_cap": args.arjun_host_cap,
         "arjun_threads": args.arjun_threads,
@@ -5602,6 +5895,8 @@ def build_tool_versions(args: argparse.Namespace, cfg: dict) -> ToolVersions:
         "katana": args.katana_version,
         "gau": args.gau_version,
         "nuclei": args.nuclei_version,
+        "gf": args.gf_version,
+        "qsreplace": args.qsreplace_version,
     }
     for key, value in cli_map.items():
         if value:
@@ -5738,7 +6033,7 @@ def process_target(target: str, args: argparse.Namespace, recon_config: ReconCon
 
 def run_doctor() -> int:
     core_bins = ["ffuf", "httpx", "subfinder", "dnsx", "katana", "gau", "nuclei"]
-    ext_bins = ["naabu", "puredns", "dalfox", "asnmap", "gospider", "hakrawler", "arjun", "dirsearch", "graphw00f"]
+    ext_bins = ["naabu", "puredns", "dalfox", "asnmap", "gospider", "hakrawler", "xnLinkFinder", "gf", "qsreplace", "arjun", "dirsearch", "graphw00f"]
     missing_core = []
 
     log("[*] Doctor: checking PATH and tooling")
@@ -5778,6 +6073,15 @@ def run_doctor() -> int:
         return 2
     log("[*] Doctor passed")
     return 0
+
+
+def detect_missing_core_tools_for_bootstrap() -> list[str]:
+    core_bins = ["ffuf", "httpx", "subfinder", "dnsx", "katana", "gau", "nuclei", "dirsearch"]
+    missing = []
+    for b in core_bins:
+        if not resolve_tool(b):
+            missing.append(b)
+    return missing
 
 
 def main():
@@ -5832,7 +6136,18 @@ def main():
     set_logger(log)
     if args.update_tools:
         log("[*] --update-tools: forcing reinstall of all tools")
+    missing_core = detect_missing_core_tools_for_bootstrap()
+    bootstrap_started_at = 0.0
+    if missing_core:
+        bootstrap_started_at = time.monotonic()
+        preview = ", ".join(missing_core[:8])
+        extra = "" if len(missing_core) <= 8 else ", ..."
+        log(f"[*] First-run tool bootstrap detected: missing core tools ({preview}{extra})")
+        log("[*] Installing recon toolchain now. This can take several minutes on a fresh machine.")
     install_required_tools(tool_versions, skip_secrets=args.skip_secrets, force_update=args.update_tools)
+    if missing_core and bootstrap_started_at > 0:
+        elapsed = time.monotonic() - bootstrap_started_at
+        log(f"[+] First-run tool bootstrap completed in {elapsed:.1f}s")
 
     if args.resume:
         workdir = Path(args.resume)

@@ -517,6 +517,21 @@ def install_hakrawler(force: bool = False) -> None:
         log("[!] Go install for hakrawler failed")
     raise RuntimeError("Failed to install hakrawler")
 
+def install_xnlinkfinder(force: bool = False) -> None:
+    if (command_exists("xnLinkFinder") or command_exists("xnlinkfinder")) and not force:
+        return
+    ensure_pipx()
+    run("pipx install xnLinkFinder", check=False, quiet=True)
+    if command_exists("xnLinkFinder") or command_exists("xnlinkfinder"):
+        return
+    run("pipx install git+https://github.com/xnl-h4ck3r/xnLinkFinder.git", check=False, quiet=True)
+
+def install_gf(version_ref: str, force: bool = False) -> None:
+    install_go_tool("gf", f"go install {version_ref}", force=force)
+
+def install_qsreplace(version_ref: str, force: bool = False) -> None:
+    install_go_tool("qsreplace", f"go install {version_ref}", force=force)
+
 def install_gowitness(force: bool = False) -> None:
     install_go_tool("gowitness", "go install github.com/sensepost/gowitness@latest", force=force)
 
@@ -529,12 +544,19 @@ def install_subzy(force: bool = False) -> None:
         return
 
 def resolve_tool(name: str) -> str:
-    preferred = [Path.home() / ".local/bin" / name, Path.home() / "go/bin" / name]
-    for p in preferred:
-        if p.exists() and os.access(p, os.X_OK):
-            return str(p)
-    p = shutil.which(name)
-    return p or ""
+    candidates = [name]
+    lname = name.lower()
+    if lname != name:
+        candidates.append(lname)
+    for cand in candidates:
+        preferred = [Path.home() / ".local/bin" / cand, Path.home() / "go/bin" / cand]
+        for p in preferred:
+            if p.exists() and os.access(p, os.X_OK):
+                return str(p)
+        p = shutil.which(cand)
+        if p:
+            return p
+    return ""
 
 def verify_tool(bin_name: str, test_cmd: str) -> None:
     if not resolve_tool(bin_name):
@@ -579,6 +601,9 @@ def install_required_tools(versions, skip_secrets: bool = False, force_update: b
     install_asnmap(force=force_update)
     install_gospider(force=force_update)
     install_hakrawler(force=force_update)
+    install_xnlinkfinder(force=force_update)
+    install_gf(versions.gf, force=force_update)
+    install_qsreplace(versions.qsreplace, force=force_update)
     install_gowitness(force=force_update)
     try:
         verify_tool("dirsearch", "dirsearch --help")
@@ -592,7 +617,7 @@ def install_required_tools(versions, skip_secrets: bool = False, force_update: b
     verify_tool("katana", "katana -h")
     verify_tool("gau", "gau --help")
     verify_tool("nuclei", "nuclei -h")
-    for _bn, _cmd in [("naabu","naabu -h"),("puredns","puredns --help"),("arjun","arjun --help"),("dalfox","dalfox version"),("graphw00f","graphw00f --help"),("asnmap","asnmap -h"),("gospider","gospider -h"),("gowitness","gowitness --help")]:
+    for _bn, _cmd in [("naabu","naabu -h"),("puredns","puredns --help"),("arjun","arjun --help"),("dalfox","dalfox version"),("graphw00f","graphw00f --help"),("asnmap","asnmap -h"),("gospider","gospider -h"),("xnLinkFinder","xnLinkFinder -h"),("gf","gf -h"),("qsreplace","qsreplace -h"),("gowitness","gowitness --help")]:
         try:
             verify_tool(_bn, _cmd)
         except Exception as e:
@@ -605,4 +630,3 @@ def install_required_tools(versions, skip_secrets: bool = False, force_update: b
         install_gitleaks(force=force_update)
         install_secretfinder(force=force_update)
         install_s3scanner(force=force_update)
-
