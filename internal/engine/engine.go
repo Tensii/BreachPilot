@@ -3379,6 +3379,10 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if paramMatches+endpointMatches >= 2 {
 			return true, fmt.Sprintf("stacked query-oriented parameter or endpoint patterns detected (%d)", paramMatches+endpointMatches)
 		}
+		needleMatches := reconCorpusNeedleMatchCount(rs.Intel.ParamsRankedJSON, []string{"id", "query", "search", "filter", "where", "sort"})
+		if needleMatches >= 2 {
+			return true, fmt.Sprintf("ranked parameters contain multiple query-like hints (%d)", needleMatches)
+		}
 		if wf.QueryLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d parameterized/query-like step(s)", wf.QueryLikeSteps)
 		}
@@ -3572,6 +3576,7 @@ func reconCorpusMatchCount(path string, needles []string) int {
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
+	matchedLines := map[string]struct{}{}
 	count := 0
 	for scanner.Scan() {
 		line := strings.ToLower(scanner.Text())
@@ -3580,7 +3585,10 @@ func reconCorpusMatchCount(path string, needles []string) int {
 		}
 		for _, needle := range lowered {
 			if strings.Contains(line, needle) {
-				count++
+				if _, exists := matchedLines[line]; !exists {
+					matchedLines[line] = struct{}{}
+					count++
+				}
 				break
 			}
 		}
@@ -3591,6 +3599,43 @@ func reconCorpusMatchCount(path string, needles []string) int {
 		reconCorpusMatchMu.Unlock()
 	}
 	return count
+}
+
+// reconCorpusNeedleMatchCount counts distinct needles found anywhere in file contents.
+func reconCorpusNeedleMatchCount(path string, needles []string) int {
+	path = strings.TrimSpace(path)
+	if path == "" || len(needles) == 0 {
+		return 0
+	}
+	lowered := normalizedNeedles(needles)
+	if len(lowered) == 0 {
+		return 0
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	found := map[string]struct{}{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.ToLower(scanner.Text())
+		if line == "" {
+			continue
+		}
+		for _, needle := range lowered {
+			if _, ok := found[needle]; ok {
+				continue
+			}
+			if strings.Contains(line, needle) {
+				found[needle] = struct{}{}
+			}
+		}
+		if len(found) == len(lowered) {
+			break
+		}
+	}
+	return len(found)
 }
 
 func normalizedNeedles(needles []string) []string {
