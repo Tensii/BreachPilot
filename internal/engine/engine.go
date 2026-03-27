@@ -24,6 +24,7 @@ import (
 	configpkg "breachpilot/internal/config"
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/browsercapture"
+	"breachpilot/internal/exploit/discovery"
 	"breachpilot/internal/exploit/filter"
 	"breachpilot/internal/exploit/httppolicy"
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
@@ -76,6 +77,7 @@ import (
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	xxeinjection "breachpilot/internal/exploit/modules/xxeinjection"
 	oob "breachpilot/internal/exploit/oob"
+	"breachpilot/internal/exploit/waf"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
 	notifypkg "breachpilot/internal/notify"
@@ -158,6 +160,7 @@ type Options struct {
 	BrowserCaptureScrollSteps      int
 	BrowserCaptureMaxRoutesPerPage int
 	BrowserCapturePath             string
+	SharedState                    *exploit.SharedState
 }
 
 // Notifier sends structured events.
@@ -491,6 +494,51 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	scoutModules, proofModules := splitModulesByPlannerStage(exploitModules)
 	persistedSignals := loadCorrelationSignalsArtifact(artDir)
 	scoutModules = prioritizeModules(scoutModules, rs)
+
+	sharedState := exploit.NewSharedState()
+	opt.SharedState = sharedState
+	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
+	httpRuntime := httppolicy.NewRuntime(httppolicy.Config{
+		RateLimitRPS:            opt.RateLimitRPS,
+		MaxInFlight:             httpMaxInFlight,
+		Jitter:                  time.Duration(opt.HTTPJitterMS) * time.Millisecond,
+		CircuitBreakerThreshold: opt.HTTPCircuitBreakerThreshold,
+		CircuitBreakerCooldown:  time.Duration(opt.HTTPCircuitBreakerCooldownMS) * time.Millisecond,
+		WaitOnCircuitOpen:       opt.HTTPCircuitBreakerWait,
+		AdaptiveEvent: func(event httppolicy.AdaptiveEvent) {
+			emit(models.RuntimeEvent{
+				Kind:    "stage",
+				Stage:   "exploit.http",
+				Status:  "throttled",
+				Message: fmt.Sprintf("exploit.http adaptive throttle host=%s status=%d delay=%s", event.Host, event.StatusCode, event.Delay.Round(time.Millisecond)),
+				Target:  job.Target,
+				Counts: map[string]int{
+					"status_code":          event.StatusCode,
+					"adaptive_delay_ms":    int(event.Delay / time.Millisecond),
+					"previous_delay_ms":    int(event.PreviousDelay / time.Millisecond),
+					"retry_after_delay_ms": int(event.RetryAfterDelay / time.Millisecond),
+				},
+			})
+		},
+	})
+	defer httpRuntime.Close()
+	probeRuntimeBaseline(ctx, job, rs, httpRuntime)
+	populateTechSharedState(sharedState, rs.Tech, httpRuntime)
+	scoutModules = injectTechDrivenScoutModules(scoutModules, sharedState, registeredAllModuleInstances())
+	techHints := discovery.TechHints{
+		IsWordPress: sharedState.HasPrefix("tech.cms", "wordpress"),
+		IsSpring:    sharedState.HasPrefix("tech.framework", "spring"),
+		IsLaravel:   sharedState.HasPrefix("tech.framework", "laravel"),
+		IsDrupal:    sharedState.HasPrefix("tech.cms", "drupal"),
+		HasGraphQL:  sharedState.IsSet("tech.graphql"),
+		WAFDetected: sharedState.IsSet("tech.waf_detected"),
+	}
+	wafProfile := waf.FromSharedState(sharedState)
+	var wafProfileRef *waf.Profile
+	if wafProfile.Detected {
+		wafProfileRef = &wafProfile
+	}
+
 	authBootstrapModules, scoutModules := splitAuthBootstrapModules(scoutModules)
 	scoutStages, scoutStagePreview := buildDependencyStages(scoutModules)
 	job.PlanPreview = append(job.PlanPreview, scoutStagePreview...)
@@ -557,32 +605,6 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		}
 	}
 
-	sharedState := exploit.NewSharedState()
-	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
-	httpRuntime := httppolicy.NewRuntime(httppolicy.Config{
-		RateLimitRPS:            opt.RateLimitRPS,
-		MaxInFlight:             httpMaxInFlight,
-		Jitter:                  time.Duration(opt.HTTPJitterMS) * time.Millisecond,
-		CircuitBreakerThreshold: opt.HTTPCircuitBreakerThreshold,
-		CircuitBreakerCooldown:  time.Duration(opt.HTTPCircuitBreakerCooldownMS) * time.Millisecond,
-		WaitOnCircuitOpen:       opt.HTTPCircuitBreakerWait,
-		AdaptiveEvent: func(event httppolicy.AdaptiveEvent) {
-			emit(models.RuntimeEvent{
-				Kind:    "stage",
-				Stage:   "exploit.http",
-				Status:  "throttled",
-				Message: fmt.Sprintf("exploit.http adaptive throttle host=%s status=%d delay=%s", event.Host, event.StatusCode, event.Delay.Round(time.Millisecond)),
-				Target:  job.Target,
-				Counts: map[string]int{
-					"status_code":          event.StatusCode,
-					"adaptive_delay_ms":    int(event.Delay / time.Millisecond),
-					"previous_delay_ms":    int(event.PreviousDelay / time.Millisecond),
-					"retry_after_delay_ms": int(event.RetryAfterDelay / time.Millisecond),
-				},
-			})
-		},
-	})
-	defer httpRuntime.Close()
 	exploitOpt := exploit.Options{
 		ArtifactsRoot:                  opt.ArtifactsRoot,
 		Progress:                       opt.Progress,
@@ -616,7 +638,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		BrowserCaptureMaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
 		BrowserCapturePath:             opt.BrowserCapturePath,
 		HTTPRuntime:                    httpRuntime,
+		DiscoveryHints:                 techHints,
 		SharedState:                    sharedState,
+		WAFProfile:                     wafProfileRef,
 		OOBProvider:                    oobProvider,
 	}
 
@@ -2923,6 +2947,149 @@ func splitModulesByPlannerStage(mods []exploit.Module) ([]exploit.Module, []expl
 	return scout, proof
 }
 
+// probeRuntimeBaseline performs one lightweight baseline request and stores
+// derived technology signals on the runtime.
+func probeRuntimeBaseline(ctx context.Context, job *models.Job, rs models.ReconSummary, rt *httppolicy.Runtime) {
+	if rt == nil {
+		return
+	}
+	target := strings.TrimSpace(rs.Target)
+	if target == "" && job != nil {
+		target = strings.TrimSpace(job.Target)
+	}
+	if target == "" || strings.EqualFold(target, "from-summary") {
+		return
+	}
+	lower := strings.ToLower(target)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		target = "https://" + target
+	}
+	req, err := httppolicy.NewRequest(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return
+	}
+	resp, err := rt.Client(httppolicy.ClientOptions{
+		Timeout:           httppolicy.DefaultTimeout,
+		NoFollowRedirects: true,
+	}).Do(req)
+	if err != nil || resp == nil {
+		return
+	}
+	rt.TechObserved = rt.ExtractTechFromResponse(resp)
+}
+
+// populateTechSharedState writes technology fingerprint data into
+// the shared state bag so that all modules can query it without
+// needing a direct TechFingerprint reference.
+func populateTechSharedState(ss *exploit.SharedState, tf models.TechFingerprint, rt *httppolicy.Runtime) {
+	if ss == nil {
+		return
+	}
+	if rt != nil && rt.TechObserved.Server != "" {
+		tf = mergeTechFingerprints(tf, rt.TechObserved)
+	}
+	if tf.Server != "" {
+		ss.Set("tech.server", tf.Server)
+	}
+	if tf.WAF != "" {
+		ss.Set("tech.waf", tf.WAF)
+	}
+	if tf.WAFDetected {
+		ss.Set("tech.waf_detected", "1")
+	}
+	if tf.Framework != "" {
+		ss.Set("tech.framework", tf.Framework)
+	}
+	if tf.CMS != "" {
+		ss.Set("tech.cms", tf.CMS)
+	}
+	if tf.GraphQLDetected {
+		ss.Set("tech.graphql", "1")
+	}
+	for _, lang := range tf.Languages {
+		lang = strings.ToLower(strings.TrimSpace(lang))
+		if lang == "" {
+			continue
+		}
+		ss.Set("tech.lang."+lang, "1")
+	}
+	for _, jsf := range tf.JSFrameworks {
+		jsf = strings.ToLower(strings.TrimSpace(jsf))
+		if jsf == "" {
+			continue
+		}
+		ss.Set("tech.jsfw."+jsf, "1")
+	}
+}
+
+// mergeTechFingerprints overlays live observations on top of recon-provided
+// technology metadata and merges list-like fields.
+func mergeTechFingerprints(base, live models.TechFingerprint) models.TechFingerprint {
+	if live.Server != "" {
+		base.Server = live.Server
+	}
+	if live.PoweredBy != "" {
+		base.PoweredBy = live.PoweredBy
+	}
+	if live.Framework != "" {
+		base.Framework = live.Framework
+	}
+	if live.WAF != "" {
+		base.WAF = live.WAF
+	}
+	if live.WAFDetected {
+		base.WAFDetected = true
+	}
+	if live.GraphQLDetected {
+		base.GraphQLDetected = true
+	}
+	base.Languages = mergeStringSlices(base.Languages, live.Languages)
+	base.JSFrameworks = mergeStringSlices(base.JSFrameworks, live.JSFrameworks)
+	base.Technologies = mergeStringSlices(base.Technologies, live.Technologies)
+	return base
+}
+
+// mergeStringSlices combines two string slices while preserving first-seen order.
+func mergeStringSlices(a, b []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range append(a, b...) {
+		k := strings.ToLower(strings.TrimSpace(s))
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// injectTechDrivenScoutModules appends modules that should always
+// run in the scout phase when a specific technology is detected,
+// even if they would not otherwise be scheduled.
+func injectTechDrivenScoutModules(mods []exploit.Module, ss *exploit.SharedState, allRegistered []exploit.Module) []exploit.Module {
+	if ss == nil {
+		return mods
+	}
+	alreadyScheduled := map[string]bool{}
+	for _, m := range mods {
+		alreadyScheduled[strings.ToLower(m.Name())] = true
+	}
+	// If GraphQL is detected and graphql-abuse is not already a scout, inject it.
+	if ss.IsSet("tech.graphql") && !alreadyScheduled["graphql-abuse"] {
+		for _, m := range allRegistered {
+			if strings.ToLower(m.Name()) == "graphql-abuse" {
+				mods = append(mods, m)
+				break
+			}
+		}
+	}
+	return mods
+}
+
 func modulePlannerStage(name string) string {
 	switch name {
 	case "auth-bypass", "idor-playbook", "state-change", "upload-abuse", "mutation-engine", "jwt-access", "ssrf-prober", "crlf-injection", "advanced-injection", "rsql-injection", "idor-size", "saml-probe":
@@ -3104,11 +3271,24 @@ func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
 }
 
 func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
-	_ = opt
 	wf := loadBrowserWorkflowSignals(rs)
 	urlCorpus := reconURLCorpusPath(rs)
+	techWAF := opt.SharedState != nil && opt.SharedState.IsSet("tech.waf_detected")
+	techGraphQL := opt.SharedState != nil && (opt.SharedState.IsSet("tech.graphql") || rs.Tech.GraphQLDetected)
+	techWordPress := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.cms", "wordpress")
+	techSpring := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.framework", "spring")
+	techLaravel := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.framework", "laravel")
+	techNode := opt.SharedState != nil && opt.SharedState.IsSet("tech.lang.node.js")
 	switch name {
+	case "graphql-abuse":
+		if techGraphQL {
+			return true, "GraphQL detected from tech fingerprint — direct probe without scout confirmation"
+		}
+		return true, "no correlation constraint"
 	case "auth-bypass":
+		if techWordPress {
+			return true, "WordPress detected — auth bypass probe for REST API and xmlrpc"
+		}
 		if signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2) {
 			return true, fmt.Sprintf("strong redirect/session/CORS scout lead available (strength=%d)", maxCorrelationStrength(signals, "cors-poc", "open-redirect", "session-abuse", "privilege-path"))
 		}
@@ -3141,11 +3321,17 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		return false, "needs upload-oriented URLs"
 	case "mutation-engine":
+		if techWAF {
+			return true, "WAF detected — mutation engine required to find bypass vectors"
+		}
 		if signals.hasModuleAtLeast("bypass-poc", 2) || signals.hasModuleAtLeast("nuclei-triage", 1) || signals.hasModuleAtLeast("http-method-tampering", 1) {
 			return true, fmt.Sprintf("mutation/bypass lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "bypass-poc", "nuclei-triage", "http-method-tampering"))
 		}
 		return false, "needs bypass or method tampering scout lead"
 	case "jwt-access":
+		if techNode || techLaravel || techSpring {
+			return true, fmt.Sprintf("framework detected that commonly uses JWT (%s) — direct probe", readTechFramework(opt.SharedState))
+		}
 		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("secrets-validator", 2) {
 			return true, fmt.Sprintf("auth token lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "secrets-validator"))
 		}
@@ -3182,6 +3368,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		return false, "needs redirect or header manipulation scout lead"
 	case "advanced-injection", "rsql-injection":
+		if techLaravel {
+			return true, "Laravel detected — injection probe for Eloquent ORM endpoints"
+		}
 		if signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
 			return true, fmt.Sprintf("query/injection lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "graphql-abuse", "js-endpoints", "nuclei-triage"))
 		}
@@ -3239,6 +3428,20 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 	default:
 		return true, "no correlation constraint"
 	}
+}
+
+// readTechFramework returns the strongest framework or CMS hint captured in shared state.
+func readTechFramework(ss *exploit.SharedState) string {
+	if ss == nil {
+		return "unknown"
+	}
+	if v, ok := ss.Get("tech.framework"); ok && v != "" {
+		return v
+	}
+	if v, ok := ss.Get("tech.cms"); ok && v != "" {
+		return v
+	}
+	return "detected"
 }
 
 func maxCorrelationStrength(signals correlationSignals, names ...string) int {
@@ -3337,12 +3540,17 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 }
 
 func reconCorpusContainsAny(path string, needles []string) bool {
+	return reconCorpusHasMatch(path, needles)
+}
+
+// reconCorpusHasMatch is a convenience wrapper over reconCorpusMatchCount.
+func reconCorpusHasMatch(path string, needles []string) bool {
 	return reconCorpusMatchCount(path, needles) > 0
 }
 
 func reconCorpusMatchCount(path string, needles []string) int {
 	path = strings.TrimSpace(path)
-	if path == "" || len(needles) == 0 {
+	if path == "" {
 		return 0
 	}
 	lowered := normalizedNeedles(needles)
@@ -3363,28 +3571,20 @@ func reconCorpusMatchCount(path string, needles []string) int {
 		return 0
 	}
 	defer f.Close()
-	seen := map[string]struct{}{}
 	scanner := bufio.NewScanner(f)
-	lineCount := 0
+	count := 0
 	for scanner.Scan() {
-		lineCount++
-		if lineCount > 100000 {
-			break
-		}
 		line := strings.ToLower(scanner.Text())
-		for _, needle := range lowered {
-			if _, ok := seen[needle]; ok {
-				continue
-			}
-			if strings.Contains(line, needle) {
-				seen[needle] = struct{}{}
-			}
+		if line == "" {
+			continue
 		}
-		if len(seen) == len(lowered) {
-			break
+		for _, needle := range lowered {
+			if strings.Contains(line, needle) {
+				count++
+				break
+			}
 		}
 	}
-	count := len(seen)
 	if cacheKey != "" {
 		reconCorpusMatchMu.Lock()
 		reconCorpusMatchCache[cacheKey] = count

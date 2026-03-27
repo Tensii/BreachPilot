@@ -87,6 +87,23 @@ type CORSFinding struct {
 	Origin        string `json:"origin"`
 }
 
+// TechFingerprint holds technology stack data extracted by reconHarvest
+// or derived from live HTTP probes. Fields are best-effort and may be
+// empty when the target doesn't expose enough signal.
+type TechFingerprint struct {
+	Server              string   `json:"server,omitempty"`     // e.g. "nginx/1.24.0"
+	PoweredBy           string   `json:"powered_by,omitempty"` // X-Powered-By value
+	Framework           string   `json:"framework,omitempty"`  // e.g. "Laravel", "Spring Boot"
+	CMS                 string   `json:"cms,omitempty"`        // e.g. "WordPress", "Drupal"
+	WAF                 string   `json:"waf,omitempty"`        // e.g. "Cloudflare", "AWS WAF"
+	WAFDetected         bool     `json:"waf_detected,omitempty"`
+	GraphQLDetected     bool     `json:"graphql_detected,omitempty"`
+	Languages           []string `json:"languages,omitempty"`             // e.g. ["PHP","JavaScript"]
+	JSFrameworks        []string `json:"js_frameworks,omitempty"`         // e.g. ["React","Next.js"]
+	Technologies        []string `json:"technologies,omitempty"`          // flat list from wappalyzer output
+	TechFingerprintJSON string   `json:"tech_fingerprint_json,omitempty"` // path to wappalyzer JSON
+}
+
 type ReconSummary struct {
 	Target  string `json:"target"`
 	Workdir string `json:"workdir"`
@@ -116,6 +133,7 @@ type ReconSummary struct {
 		SubdomainTakeoverJSON string `json:"subdomain_takeover_json"`
 		JSEndpointsJSON       string `json:"js_endpoints_json"`
 	} `json:"intel"`
+	Tech TechFingerprint `json:"tech,omitempty"`
 }
 
 type ExploitModuleTelemetry struct {
