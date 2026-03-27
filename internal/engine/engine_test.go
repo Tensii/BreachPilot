@@ -388,8 +388,8 @@ func TestWriteRuntimeConfigSnapshotIncludesResolvedExploitSettings(t *testing.T)
 }
 
 func TestResolvedOOBProviderLabel(t *testing.T) {
-	if got := resolvedOOBProviderLabel(Options{}); got != "disabled" {
-		t.Fatalf("expected disabled provider label, got %q", got)
+	if got := resolvedOOBProviderLabel(Options{}); got != "interactsh" {
+		t.Fatalf("expected interactsh provider label by default, got %q", got)
 	}
 	if got := resolvedOOBProviderLabel(Options{ProofMode: true}); got != "interactsh" {
 		t.Fatalf("expected interactsh provider label, got %q", got)

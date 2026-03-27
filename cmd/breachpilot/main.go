@@ -60,11 +60,15 @@ func main() {
 		return
 	}
 	if len(args) == 1 && args[0] == "browser-check" {
-		path := browsercapture.FindBrowserPath()
+		path, status := browsercapture.EnsureBrowserPathWithStatus("")
 		if p := strings.TrimSpace(os.Getenv("BREACHPILOT_BROWSER_PATH")); p != "" {
 			path = p
 		}
 		fmt.Printf("Browser path: %s\n", path)
+		if strings.TrimSpace(path) == "" {
+			fmt.Fprintf(os.Stderr, "FAIL: %s\n", status)
+			os.Exit(1)
+		}
 		if err := browsercapture.BrowserHealthCheck(path); err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 			os.Exit(1)
@@ -755,6 +759,12 @@ func runSetup(opt engine.Options) error {
 		return fmt.Errorf("[setup] artifacts dir failed: %w", err)
 	}
 	fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m artifacts dir ready: %s\n", opt.ArtifactsRoot)
+
+	if path, status := browsercapture.EnsureBrowserPathWithStatus(strings.TrimSpace(opt.BrowserCapturePath)); strings.TrimSpace(path) != "" {
+		fmt.Printf("\x1b[32m[SETUP ✓]\x1b[0m browser ready: %s\n", path)
+	} else {
+		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m browser not ready: %s\n", status)
+	}
 	fmt.Println("\x1b[36m[SETUP] done. system armed.\x1b[0m")
 	return nil
 }
@@ -889,7 +899,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s│%s nuclei=%s  rps=%d  module_timeout=%s\n", cyan, reset, cfg.NucleiBin, cfg.RateLimitRPS, moduleTimeoutLabel)
 	fmt.Printf("%s│%s recon_timeout=%s  nuclei_timeout=%s  recon_retries=%d\n", cyan, reset, reconTimeoutLabel, nucleiTimeoutLabel, cfg.ReconRetries)
 	fmt.Printf("%s│%s webhooks(recon/exploit)=%s/%s retries=%d\n", cyan, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
-	fmt.Printf("%s│%s artifacts=%s  reports=%s\n", cyan, reset, cfg.ArtifactsRoot, emptyAs(cfg.ReportFormats, "json,md,html"))
+	fmt.Printf("%s│%s artifacts=%s  reports=%s\n", cyan, reset, cfg.ArtifactsRoot, emptyAs(cfg.ReportFormats, "json,md,bbmd,bbpdf,html"))
 	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", cyan, reset)
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&

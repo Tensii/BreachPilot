@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 
 // StateFile is the name of the state checkpoint inside a job directory.
 const StateFile = ".breachpilot.state"
+const stateBackupSuffix = ".bak"
+const stateTempSuffix = ".tmp"
 
 // StateManager persists the execution state of a job to allow resumption.
 type StateManager struct {
@@ -74,66 +78,56 @@ func (sm *StateManager) Load() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	data, err := os.ReadFile(sm.path)
+	var state models.JobState
+	loadedFrom, err := sm.loadStateWithRecovery(&state)
 	if err != nil {
 		return err
 	}
 
-	var state models.JobState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return err
-	}
-
-	if state.ModulesFinished == nil {
-		state.ModulesFinished = []string{}
-	}
+	state.ModulesFinished = normalizeModulesList(state.ModulesFinished)
 	sm.state = state
 	sm.modulesSet = make(map[string]struct{}, len(state.ModulesFinished))
 	for _, m := range state.ModulesFinished {
 		sm.modulesSet[m] = struct{}{}
+	}
+
+	// If recovery succeeded from backup/temp, immediately re-seal the primary file.
+	if loadedFrom != sm.path {
+		if err := sm.saveLocked(); err != nil {
+			return fmt.Errorf("state recovered from %s but failed to rewrite primary: %w", loadedFrom, err)
+		}
 	}
 	return nil
 }
 
 // Save writes the current state to disk.
 func (sm *StateManager) Save() error {
-	// Marshal under the lock for a consistent snapshot, then release before disk I/O.
 	sm.mu.Lock()
-	sm.state.LastUpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	data, err := json.MarshalIndent(sm.state, "", "  ")
-	sm.mu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	// Always use atomic temp-file swap to prevent partial writes on crash.
-	tmp := sm.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, sm.path)
+	defer sm.mu.Unlock()
+	return sm.saveLocked()
 }
 
 // MarkReconCompleted flags the recon phase as finished.
 func (sm *StateManager) MarkReconCompleted(reconPath string) error {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	sm.state.ReconCompleted = true
 	sm.state.ReconPath = reconPath
-	sm.mu.Unlock()
-	return sm.Save()
+	return sm.saveLocked()
 }
 
 // MarkNucleiCompleted flags the nuclei phase as finished.
 func (sm *StateManager) MarkNucleiCompleted() error {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	sm.state.NucleiCompleted = true
-	sm.mu.Unlock()
-	return sm.Save()
+	return sm.saveLocked()
 }
 
 // MarkModuleCompleted flags a specific custom module as finished.
 func (sm *StateManager) MarkModuleCompleted(moduleName string) error {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	if sm.modulesSet == nil {
 		sm.modulesSet = make(map[string]struct{})
 	}
@@ -141,8 +135,7 @@ func (sm *StateManager) MarkModuleCompleted(moduleName string) error {
 		sm.modulesSet[moduleName] = struct{}{}
 		sm.state.ModulesFinished = append(sm.state.ModulesFinished, moduleName)
 	}
-	sm.mu.Unlock()
-	return sm.Save()
+	return sm.saveLocked()
 }
 
 // IsReconCompleted returns true if recon is fully completed.
@@ -172,4 +165,118 @@ func (sm *StateManager) State() models.JobState {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.state
+}
+
+func (sm *StateManager) loadStateWithRecovery(dst *models.JobState) (string, error) {
+	candidates := []string{
+		sm.path,
+		sm.path + stateBackupSuffix,
+		sm.path + stateTempSuffix,
+	}
+
+	type parseFailure struct {
+		path string
+		err  error
+	}
+	failures := make([]parseFailure, 0, len(candidates))
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			failures = append(failures, parseFailure{path: p, err: err})
+			continue
+		}
+		if err := json.Unmarshal(b, dst); err != nil {
+			failures = append(failures, parseFailure{path: p, err: err})
+			continue
+		}
+		if strings.TrimSpace(dst.JobID) == "" {
+			failures = append(failures, parseFailure{path: p, err: fmt.Errorf("missing job_id")})
+			continue
+		}
+		return p, nil
+	}
+
+	if len(failures) == 0 {
+		return "", os.ErrNotExist
+	}
+	last := failures[len(failures)-1]
+	return "", fmt.Errorf("state file unreadable (last candidate %s): %w", last.path, last.err)
+}
+
+func normalizeModulesList(in []string) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (sm *StateManager) saveLocked() error {
+	sm.state.LastUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	sm.state.ModulesFinished = normalizeModulesList(sm.state.ModulesFinished)
+
+	data, err := json.MarshalIndent(sm.state, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	// Keep backup aligned with the latest committed snapshot so recovery preserves progress.
+	if err := writeFileWithSync(sm.path+stateBackupSuffix, data, 0o644); err != nil {
+		return fmt.Errorf("write state backup: %w", err)
+	}
+
+	tmp := sm.path + stateTempSuffix
+	if err := writeFileWithSync(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, sm.path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename state temp file: %w", err)
+	}
+	if err := syncParentDir(sm.path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeFileWithSync(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncParentDir(path string) error {
+	dir := filepath.Dir(path)
+	df, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer df.Close()
+	return df.Sync()
 }

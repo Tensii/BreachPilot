@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 
 	"breachpilot/internal/models"
@@ -102,5 +104,81 @@ func TestStateManager(t *testing.T) {
 	}
 	if !sm3.IsReconCompleted() {
 		t.Fatalf("state loaded from path lost recon completion")
+	}
+}
+
+func TestStateManagerRecoversFromBackupWhenPrimaryCorrupt(t *testing.T) {
+	tempDir := t.TempDir()
+	job := &models.Job{ID: "recover-job", Target: "example.com", Mode: "full"}
+	jobDir := filepath.Join(tempDir, job.ID)
+
+	sm, err := NewStateManager(jobDir, job)
+	if err != nil {
+		t.Fatalf("failed to create state manager: %v", err)
+	}
+	if err := sm.MarkReconCompleted("/tmp/recon/summary.json"); err != nil {
+		t.Fatalf("mark recon completed: %v", err)
+	}
+	if err := sm.MarkModuleCompleted("dom-xss"); err != nil {
+		t.Fatalf("mark module completed: %v", err)
+	}
+
+	statePath := filepath.Join(jobDir, StateFile)
+	backupPath := statePath + stateBackupSuffix
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("expected backup state file at %s: %v", backupPath, err)
+	}
+
+	if err := os.WriteFile(statePath, []byte("{corrupt-json"), 0o644); err != nil {
+		t.Fatalf("failed to corrupt primary state file: %v", err)
+	}
+
+	loaded, err := NewStateManagerFromPath(statePath)
+	if err != nil {
+		t.Fatalf("expected recovery from backup, got error: %v", err)
+	}
+	if !loaded.IsReconCompleted() {
+		t.Fatalf("recovered state missing recon completion")
+	}
+	if !loaded.IsModuleCompleted("dom-xss") {
+		t.Fatalf("recovered state missing completed module")
+	}
+}
+
+func TestStateManagerConcurrentModuleMarksPersistAll(t *testing.T) {
+	tempDir := t.TempDir()
+	job := &models.Job{ID: "concurrency-job", Target: "example.com", Mode: "full"}
+	jobDir := filepath.Join(tempDir, job.ID)
+
+	sm, err := NewStateManager(jobDir, job)
+	if err != nil {
+		t.Fatalf("failed to create state manager: %v", err)
+	}
+
+	const total = 30
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sm.MarkModuleCompleted("m" + strconv.Itoa(i))
+		}()
+	}
+	wg.Wait()
+
+	statePath := filepath.Join(jobDir, StateFile)
+	reloaded, err := NewStateManagerFromPath(statePath)
+	if err != nil {
+		t.Fatalf("failed to reload state: %v", err)
+	}
+	if len(reloaded.State().ModulesFinished) != total {
+		t.Fatalf("expected %d completed modules, got %d", total, len(reloaded.State().ModulesFinished))
+	}
+	for i := 0; i < total; i++ {
+		name := "m" + strconv.Itoa(i)
+		if !reloaded.IsModuleCompleted(name) {
+			t.Fatalf("missing completed module %s after concurrent writes", name)
+		}
 	}
 }

@@ -581,7 +581,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// Initialize OOB Provider
 	var oobProvider oob.Provider
-	if opt.AggressiveMode || opt.ProofMode {
+	if shouldInitializeOOBProvider(opt, scoutModules, proofModules) {
 		provider, providerLabel, err := newOOBProvider(opt)
 		switch {
 		case err == nil && provider != nil:
@@ -1014,9 +1014,11 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		job.RiskScore = job.RiskSummary.OverallScore
 	}
 
-	leadFindings := exploit.SignalOnlyFindings(exploitFindings)
+	exploitFindings = exploit.ApplyHybridQualityGates(exploitFindings)
+	leadFindings := exploit.AnnotateConfidenceBands(exploit.SignalOnlyFindings(exploitFindings))
 	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
 	exploitFindings = reliableFindings
+	exploitFindings = exploit.PrepareEvidenceBundles(exploitFindings, artDir)
 	job.FilteredCount += reliabilityFiltered
 	job.ModuleTelemetry = annotateModuleTelemetryYield(job.ModuleTelemetry, rawExploitFindings, exploitFindings)
 
@@ -1125,6 +1127,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 						"severity":                sev,
 						"title":                   f.Title,
 						"confidence":              f.Confidence,
+						"confidence_band":         f.ConfidenceBand,
 						"validation":              f.Validation,
 						"evidence":                f.Evidence,
 						"report_path":             job.ExploitReportPath,
@@ -4628,12 +4631,32 @@ func newOOBProvider(opt Options) (oob.Provider, string, error) {
 	return p, "interactsh", nil
 }
 
+func shouldInitializeOOBProvider(opt Options, scoutModules, proofModules []exploit.Module) bool {
+	if strings.TrimSpace(opt.OOBHTTPPublicBaseURL) != "" {
+		return true
+	}
+	if opt.AggressiveMode || opt.ProofMode {
+		return true
+	}
+	oobCapable := map[string]struct{}{
+		"ssrf-prober":        {},
+		"xxeinjection":       {},
+		"cmdinject":          {},
+		"advanced-injection": {},
+		"deserialization":    {},
+	}
+	for _, m := range append(append([]exploit.Module{}, scoutModules...), proofModules...) {
+		name := strings.ToLower(strings.TrimSpace(m.Name()))
+		if _, ok := oobCapable[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func resolvedOOBProviderLabel(opt Options) string {
 	if strings.TrimSpace(opt.OOBHTTPPublicBaseURL) != "" {
 		return "builtin-http"
 	}
-	if opt.AggressiveMode || opt.ProofMode {
-		return "interactsh"
-	}
-	return "disabled"
+	return "interactsh"
 }

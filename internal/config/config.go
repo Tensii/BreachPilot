@@ -103,7 +103,7 @@ func Load() Config {
 		ValidationOnly:                 getEnvBool("BREACHPILOT_VALIDATION_ONLY", false),
 		ConfigPath:                     configPath,
 		PreviousReportPath:             getEnv("BREACHPILOT_PREVIOUS_REPORT", ""),
-		ReportFormats:                  getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,html"),
+		ReportFormats:                  getEnv("BREACHPILOT_REPORT_FORMATS", "json,md,bbmd,bbpdf,html"),
 		ScanProfile:                    getEnv("BREACHPILOT_SCAN_PROFILE", ""),
 		MaxParallel:                    getEnvInt("BREACHPILOT_MAX_PARALLEL", 0),
 		RateLimitRPS:                   getEnvInt("BREACHPILOT_RATE_LIMIT_RPS", 0),
@@ -292,7 +292,7 @@ func (c Config) RedactedSummary() string {
 	}
 	reportFormats := strings.TrimSpace(c.ReportFormats)
 	if reportFormats == "" {
-		reportFormats = "json,md,html"
+		reportFormats = "json,md,bbmd,bbpdf,html"
 	}
 	ctxCount := 0
 	if strings.TrimSpace(c.AuthUserCookie) != "" || strings.TrimSpace(c.AuthUserHeaders) != "" {
