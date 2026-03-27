@@ -77,6 +77,7 @@ import (
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	xxeinjection "breachpilot/internal/exploit/modules/xxeinjection"
 	oob "breachpilot/internal/exploit/oob"
+	sessionrt "breachpilot/internal/exploit/session"
 	"breachpilot/internal/exploit/waf"
 	"breachpilot/internal/ingest"
 	"breachpilot/internal/models"
@@ -695,7 +696,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	_ = saveCorrelationSignalsArtifact(artDir, mergedSignals)
 	correlatedProofModules, correlationSkipped, correlationPreview := correlateProofModules(proofModules, mergedSignals, rs, opt)
 	job.PlanPreview = append(job.PlanPreview, correlationPreview...)
-	correlatedProofModules = prioritizeProofModules(correlatedProofModules, mergedSignals, rs)
+	precisionPriors := loadModulePrecisionPriors(opt.PreviousReportPath)
+	correlatedProofModules = prioritizeProofModules(correlatedProofModules, mergedSignals, rs, precisionPriors)
 	correlatedProofModules, authQualitySkipped, authQualityPreview := filterModulesByAuthContextQuality(correlatedProofModules, authObserved)
 	job.PlanPreview = append(job.PlanPreview, authQualityPreview...)
 	proofStages, proofStagePreview := buildDependencyStages(correlatedProofModules)
@@ -756,43 +758,64 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	// --- OOB Verification Phase ---
 	if oobProvider != nil && ctx.Err() == nil {
-		// Wait to allow asynchronous payloads (like Blind XSS / Blind RCE) to fire.
+		_ = persistOOBCorrelationSnapshot(artDir, oobProvider)
+		// Poll repeatedly to reduce missed late callbacks and persist each hit batch.
 		oobWait := opt.OOBPollWaitSec
 		if oobWait <= 0 {
-			oobWait = 10
+			oobWait = 20
 		}
 		emit(models.RuntimeEvent{
 			Kind:    "oob",
 			Stage:   "exploit.oob.verify",
 			Status:  "polling",
-			Message: fmt.Sprintf("Waiting up to %ds for asynchronous OOB callbacks...", oobWait),
+			Message: fmt.Sprintf("Polling up to %ds for asynchronous OOB callbacks...", oobWait),
 			Target:  job.Target,
 		})
-		select {
-		case <-ctx.Done():
-		case <-time.After(time.Duration(oobWait) * time.Second):
+
+		collectedHits := make([]oob.Hit, 0, 16)
+		seenHit := map[string]struct{}{}
+		startedPolling := time.Now()
+		pollEvery := 5 * time.Second
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			hits, err := oobProvider.Poll(ctx)
+			if err == nil && len(hits) > 0 {
+				for _, hit := range hits {
+					key := fmt.Sprintf("%s|%s|%s", hit.CorrelationMeta, hit.Protocol, hit.Timestamp.UTC().Format(time.RFC3339Nano))
+					if _, ok := seenHit[key]; ok {
+						continue
+					}
+					seenHit[key] = struct{}{}
+					collectedHits = append(collectedHits, hit)
+				}
+				_ = appendOOBHits(artDir, hits)
+			}
+			if time.Since(startedPolling) >= time.Duration(oobWait)*time.Second {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(pollEvery):
+			}
 		}
 
-		if hits, err := oobProvider.Poll(ctx); err == nil && len(hits) > 0 {
+		if len(collectedHits) > 0 {
 			emit(models.RuntimeEvent{
 				Kind:    "oob",
 				Stage:   "exploit.oob.verify",
 				Status:  "hits",
-				Message: fmt.Sprintf("Received %d OOB interaction(s)", len(hits)),
+				Message: fmt.Sprintf("Received %d OOB interaction(s)", len(collectedHits)),
 				Target:  job.Target,
-				Counts:  map[string]int{"oob_hits": len(hits)},
+				Counts:  map[string]int{"oob_hits": len(collectedHits)},
 			})
 
-			for _, hit := range hits {
+			for _, hit := range collectedHits {
 				corr, hasCorr := oob.LookupCorrelation(oobProvider, hit.CorrelationMeta)
-				moduleName := "oob-listener"
+				moduleName := moduleFromCorrelationMeta(hit.CorrelationMeta, "oob-listener")
 				if hasCorr && strings.TrimSpace(corr.Module) != "" {
 					moduleName = corr.Module
-				} else {
-					parts := strings.SplitN(hit.CorrelationMeta, "-", 2)
-					if len(parts) == 2 {
-						moduleName = parts[0]
-					}
 				}
 
 				title := fmt.Sprintf("Out-Of-Band %s Interaction Received", strings.ToUpper(hit.Protocol))
@@ -1014,6 +1037,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		job.RiskScore = job.RiskSummary.OverallScore
 	}
 
+	exploitFindings = exploit.AutoReplayConfirmedFindings(exploitFindings, exploitOpt)
+	exploitFindings = applyAuthContextMatrix(exploitFindings, exploitOpt)
 	exploitFindings = exploit.ApplyHybridQualityGates(exploitFindings)
 	leadFindings := exploit.AnnotateConfidenceBands(exploit.SignalOnlyFindings(exploitFindings))
 	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
@@ -2041,6 +2066,179 @@ func appendUniqueStrings(a, b []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+func moduleFromCorrelationMeta(meta, fallback string) string {
+	meta = strings.ToLower(strings.TrimSpace(meta))
+	if meta == "" {
+		return fallback
+	}
+	token := meta
+	if idx := strings.IndexRune(meta, '-'); idx > 0 {
+		token = meta[:idx]
+	}
+	if token == "" {
+		return fallback
+	}
+	for _, r := range token {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return fallback
+		}
+	}
+	return token
+}
+
+func persistOOBCorrelationSnapshot(artDir string, provider oob.Provider) error {
+	if strings.TrimSpace(artDir) == "" || provider == nil {
+		return nil
+	}
+	snapshot := oob.SnapshotCorrelations(provider)
+	if len(snapshot) == 0 {
+		return nil
+	}
+	type row struct {
+		CorrelationMeta string          `json:"correlation_meta"`
+		Correlation     oob.Correlation `json:"correlation"`
+	}
+	rows := make([]row, 0, len(snapshot))
+	for k, v := range snapshot {
+		rows = append(rows, row{CorrelationMeta: k, Correlation: v})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].CorrelationMeta < rows[j].CorrelationMeta })
+	payload := map[string]any{
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+		"rows":         rows,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(filepath.Join(artDir, "oob_correlations.json"), b, 0o644)
+}
+
+func appendOOBHits(artDir string, hits []oob.Hit) error {
+	if strings.TrimSpace(artDir) == "" || len(hits) == 0 {
+		return nil
+	}
+	path := filepath.Join(artDir, "oob_hits.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, hit := range hits {
+		record := map[string]any{
+			"protocol":         hit.Protocol,
+			"source_ip":        hit.SourceIP,
+			"correlation_meta": hit.CorrelationMeta,
+			"raw_request":      hit.RawRequest,
+			"timestamp":        hit.Timestamp.UTC().Format(time.RFC3339Nano),
+		}
+		if err := enc.Encode(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyAuthContextMatrix(findings []models.ExploitFinding, opt exploit.Options) []models.ExploitFinding {
+	if len(findings) == 0 || opt.HTTPRuntime == nil {
+		return findings
+	}
+	roles := sessionrt.BuildRoleContexts(opt.AuthAnonHeaders, opt.AuthUserHeaders, opt.AuthAdminHeaders, opt.AuthUserCookie, opt.AuthAdminCookie)
+	if len(roles) == 0 {
+		return findings
+	}
+	engine := sessionrt.New(5*time.Second, opt.HTTPRuntime)
+	for i := range findings {
+		if !isAuthSensitiveFinding(findings[i]) {
+			continue
+		}
+		artifact, ok := loadProofArtifactForMatrix(findings[i].ArtifactPath)
+		if !ok || len(artifact.Exchanges) == 0 {
+			continue
+		}
+		probe := artifact.Exchanges[len(artifact.Exchanges)-1]
+		method := strings.ToUpper(strings.TrimSpace(probe.RequestMethod))
+		if method == "" {
+			method = http.MethodGet
+		}
+		targetURL := strings.TrimSpace(probe.RequestURL)
+		if targetURL == "" {
+			targetURL = strings.TrimSpace(findings[i].Target)
+		}
+		if targetURL == "" {
+			continue
+		}
+		spec := sessionrt.ProbeSpec{
+			Method:  method,
+			URL:     targetURL,
+			Headers: probe.RequestHeaders,
+			Body:    probe.RequestBody,
+		}
+		snaps := engine.Probe(spec, roles)
+		if len(snaps) == 0 {
+			continue
+		}
+		analysis := sessionrt.AnalyzeAccess(snaps)
+		if findings[i].DynamicMetadata == nil {
+			findings[i].DynamicMetadata = map[string]any{}
+		}
+		findings[i].DynamicMetadata["auth_matrix_reason"] = analysis.Reason
+		findings[i].DynamicMetadata["auth_matrix_has_real_roles"] = analysis.HasRealRoleContexts
+		findings[i].DynamicMetadata["auth_matrix_anon_allowed"] = analysis.AnonAllowed
+		findings[i].DynamicMetadata["auth_matrix_user_allowed"] = analysis.UserAllowed
+		findings[i].DynamicMetadata["auth_matrix_admin_allowed"] = analysis.AdminAllowed
+		findings[i].DynamicMetadata["auth_matrix_user_matches_admin"] = analysis.UserMatchesAdmin
+		findings[i].DynamicMetadata["auth_matrix_protected_from_anon"] = analysis.ProtectedFromAnon
+
+		val := strings.ToLower(strings.TrimSpace(findings[i].Validation))
+		if (val == "confirmed" || val == "weaponized") && !analysis.HasRealRoleContexts {
+			findings[i].Validation = "verified"
+			if findings[i].Confidence > 89 {
+				findings[i].Confidence = 89
+			}
+		}
+		if analysis.LikelyWeakBoundary {
+			if val == "signal" {
+				findings[i].Validation = "verified"
+				if findings[i].Confidence < 82 {
+					findings[i].Confidence = 82
+				}
+			}
+		}
+	}
+	return findings
+}
+
+func isAuthSensitiveFinding(f models.ExploitFinding) bool {
+	module := strings.ToLower(strings.TrimSpace(f.Module))
+	switch module {
+	case "auth-bypass", "idor-playbook", "idor-size", "state-change", "session-abuse", "privilege-path", "idor":
+		return true
+	}
+	joined := strings.ToLower(strings.TrimSpace(f.Title + " " + f.Evidence))
+	return strings.Contains(joined, "idor") ||
+		strings.Contains(joined, "access control") ||
+		strings.Contains(joined, "privilege") ||
+		strings.Contains(joined, "csrf")
+}
+
+func loadProofArtifactForMatrix(path string) (exploit.ProofArtifact, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return exploit.ProofArtifact{}, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return exploit.ProofArtifact{}, false
+	}
+	var artifact exploit.ProofArtifact
+	if err := json.Unmarshal(b, &artifact); err != nil {
+		return exploit.ProofArtifact{}, false
+	}
+	return artifact, true
 }
 
 type nucleiErrorLogEntry struct {
@@ -3103,7 +3301,9 @@ func modulePlannerStage(name string) string {
 }
 
 type correlationSignals struct {
-	modules map[string]int
+	modules      map[string]int
+	scopeByKey   map[string]struct{}
+	scopeOverlap map[string]int
 }
 
 func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary, opt Options) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
@@ -3141,7 +3341,12 @@ func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs
 }
 
 func buildCorrelationSignals(findings []models.ExploitFinding) correlationSignals {
-	s := correlationSignals{modules: make(map[string]int, len(findings))}
+	s := correlationSignals{
+		modules:      make(map[string]int, len(findings)),
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
+	moduleScopes := map[string]map[string]struct{}{}
 	for _, f := range findings {
 		name := strings.ToLower(strings.TrimSpace(f.Module))
 		if name == "" {
@@ -3151,16 +3356,55 @@ func buildCorrelationSignals(findings []models.ExploitFinding) correlationSignal
 		if strength > s.modules[name] {
 			s.modules[name] = strength
 		}
+		scope := correlationScopeKey(f.Target)
+		if scope == "" {
+			continue
+		}
+		k := name + "|" + scope
+		s.scopeByKey[k] = struct{}{}
+		if _, ok := moduleScopes[name]; !ok {
+			moduleScopes[name] = map[string]struct{}{}
+		}
+		moduleScopes[name][scope] = struct{}{}
+	}
+	for a, aScopes := range moduleScopes {
+		for b, bScopes := range moduleScopes {
+			if a >= b {
+				continue
+			}
+			overlap := 0
+			for scope := range aScopes {
+				if _, ok := bScopes[scope]; ok {
+					overlap++
+				}
+			}
+			if overlap > 0 {
+				s.scopeOverlap[a+"|"+b] = overlap
+				s.scopeOverlap[b+"|"+a] = overlap
+			}
+		}
 	}
 	return s
 }
 
 func mergeCorrelationSignals(parts ...correlationSignals) correlationSignals {
-	merged := correlationSignals{modules: map[string]int{}}
+	merged := correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
 	for _, part := range parts {
 		for name, strength := range part.modules {
 			if strength > merged.modules[name] {
 				merged.modules[name] = strength
+			}
+		}
+		for k := range part.scopeByKey {
+			merged.scopeByKey[k] = struct{}{}
+		}
+		for k, v := range part.scopeOverlap {
+			if v > merged.scopeOverlap[k] {
+				merged.scopeOverlap[k] = v
 			}
 		}
 	}
@@ -3177,6 +3421,18 @@ func (s correlationSignals) strength(name string) int {
 
 func (s correlationSignals) hasModuleAtLeast(name string, min int) bool {
 	return s.strength(name) >= min
+}
+
+func (s correlationSignals) hasScopeOverlap(a, b string) bool {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == "" || b == "" {
+		return false
+	}
+	if s.scopeOverlap[a+"|"+b] > 0 {
+		return true
+	}
+	return false
 }
 
 func findingCorrelationStrength(f models.ExploitFinding) int {
@@ -3208,6 +3464,28 @@ func validationStrength(v string) int {
 	default:
 		return 0
 	}
+}
+
+func correlationScopeKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.ToLower(raw)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return strings.ToLower(raw)
+	}
+	p := strings.TrimSpace(u.EscapedPath())
+	if p == "" {
+		p = "/"
+	}
+	if len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = strings.TrimSuffix(p, "/")
+	}
+	return strings.ToLower(strings.TrimSpace(u.Host + p))
 }
 
 func saveCorrelationSignalsArtifact(artDir string, signals correlationSignals) error {
@@ -3276,6 +3554,7 @@ func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
 func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
 	wf := loadBrowserWorkflowSignals(rs)
 	urlCorpus := reconURLCorpusPath(rs)
+	hasScopedSignals := len(signals.scopeByKey) > 0
 	techWAF := opt.SharedState != nil && opt.SharedState.IsSet("tech.waf_detected")
 	techGraphQL := opt.SharedState != nil && (opt.SharedState.IsSet("tech.graphql") || rs.Tech.GraphQLDetected)
 	techWordPress := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.cms", "wordpress")
@@ -3292,7 +3571,12 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if techWordPress {
 			return true, "WordPress detected — auth bypass probe for REST API and xmlrpc"
 		}
-		if signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2) {
+		globalStrong := signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("open-redirect", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("privilege-path", 2)
+		scopedStrong := (signals.hasModuleAtLeast("cors-poc", 2) && signals.hasScopeOverlap("cors-poc", "session-abuse")) ||
+			(signals.hasModuleAtLeast("open-redirect", 2) && signals.hasScopeOverlap("open-redirect", "session-abuse")) ||
+			(signals.hasModuleAtLeast("session-abuse", 2) && signals.hasScopeOverlap("session-abuse", "privilege-path")) ||
+			(signals.hasModuleAtLeast("privilege-path", 2) && signals.hasScopeOverlap("privilege-path", "session-abuse"))
+		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("strong redirect/session/CORS scout lead available (strength=%d)", maxCorrelationStrength(signals, "cors-poc", "open-redirect", "session-abuse", "privilege-path"))
 		}
 		if strings.TrimSpace(rs.Intel.CORSJSON) != "" {
@@ -3300,12 +3584,20 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		return false, "needs strong redirect/session/CORS lead from scouts"
 	case "idor-playbook":
-		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+		globalStrong := signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1)
+		scopedStrong := (signals.hasModuleAtLeast("privilege-path", 2) && signals.hasScopeOverlap("privilege-path", "session-abuse")) ||
+			(signals.hasModuleAtLeast("session-abuse", 2) && signals.hasScopeOverlap("session-abuse", "graphql-abuse")) ||
+			(signals.hasModuleAtLeast("graphql-abuse", 2) && signals.hasScopeOverlap("graphql-abuse", "js-endpoints"))
+		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("authorization/object-access scout lead available (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
 		}
 		return false, "needs strong privilege/session/graphql/object lead from scouts"
 	case "state-change":
-		if signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+		globalStrong := signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("cors-poc", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1)
+		scopedStrong := (signals.hasModuleAtLeast("session-abuse", 2) && signals.hasScopeOverlap("session-abuse", "js-endpoints")) ||
+			(signals.hasModuleAtLeast("cors-poc", 2) && signals.hasScopeOverlap("cors-poc", "session-abuse")) ||
+			(signals.hasModuleAtLeast("graphql-abuse", 2) && signals.hasScopeOverlap("graphql-abuse", "session-abuse"))
+		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("state-change lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "session-abuse", "cors-poc", "graphql-abuse", "js-endpoints"))
 		}
 		if matches := reconCorpusMatchCount(urlCorpus, []string{"post", "put", "patch", "delete", "update", "settings", "profile", "account", "password", "billing"}); matches >= 2 {
@@ -3420,7 +3712,10 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		return false, "needs URL corpus"
 	case "idor-size":
-		if signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1) {
+		globalStrong := signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1)
+		scopedStrong := (signals.hasModuleAtLeast("privilege-path", 2) && signals.hasScopeOverlap("privilege-path", "session-abuse")) ||
+			(signals.hasModuleAtLeast("session-abuse", 2) && signals.hasScopeOverlap("session-abuse", "graphql-abuse"))
+		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("object-access lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
 		}
 		return false, "needs object-access lead from scouts"
@@ -3461,7 +3756,7 @@ func maxCorrelationStrength(signals correlationSignals, names ...string) int {
 	return best
 }
 
-func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary) []exploit.Module {
+func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary, precisionPriors map[string]float64) []exploit.Module {
 	if len(mods) <= 1 {
 		return mods
 	}
@@ -3475,8 +3770,8 @@ func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, r
 	sort.SliceStable(out, func(i, j int) bool {
 		aName := strings.ToLower(strings.TrimSpace(out[i].Name()))
 		bName := strings.ToLower(strings.TrimSpace(out[j].Name()))
-		aScore := correlationPriorityScore(aName, signals, rs)
-		bScore := correlationPriorityScore(bName, signals, rs)
+		aScore := correlationPriorityScore(aName, signals, rs, precisionPriors)
+		bScore := correlationPriorityScore(bName, signals, rs, precisionPriors)
 		if aScore != bScore {
 			return aScore > bScore
 		}
@@ -3485,7 +3780,7 @@ func prioritizeProofModules(mods []exploit.Module, signals correlationSignals, r
 	return out
 }
 
-func correlationPriorityScore(name string, signals correlationSignals, rs models.ReconSummary) int {
+func correlationPriorityScore(name string, signals correlationSignals, rs models.ReconSummary, precisionPriors map[string]float64) int {
 	score := maxCorrelationStrength(signals, name) * 100
 	urlCorpus := reconURLCorpusPath(rs)
 	switch name {
@@ -3543,7 +3838,53 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 		score += maxCorrelationStrength(signals, "session-abuse") * 30
 		score += reconCorpusMatchCount(urlCorpus, []string{"saml", "sso", "assertion", "acs", "metadata"}) * 5
 	}
+	if len(precisionPriors) > 0 {
+		if p, ok := precisionPriors[name]; ok {
+			if p < 0 {
+				p = 0
+			}
+			if p > 1 {
+				p = 1
+			}
+			// Feedback loop: previous accepted/raw precision nudges future scheduling.
+			// 0.50 => neutral, >0.50 boost, <0.50 slight penalty.
+			score += int((p - 0.5) * 80.0)
+		}
+	}
 	return score
+}
+
+func loadModulePrecisionPriors(previousReportPath string) map[string]float64 {
+	previousReportPath = strings.TrimSpace(previousReportPath)
+	if previousReportPath == "" {
+		return nil
+	}
+	summaryPath := filepath.Join(filepath.Dir(previousReportPath), "calibration_summary.json")
+	b, err := os.ReadFile(summaryPath)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	var payload struct {
+		ModuleMetrics []struct {
+			Module         string  `json:"module"`
+			PrecisionProxy float64 `json:"precision_proxy"`
+		} `json:"module_metrics"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil || len(payload.ModuleMetrics) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(payload.ModuleMetrics))
+	for _, item := range payload.ModuleMetrics {
+		name := strings.ToLower(strings.TrimSpace(item.Module))
+		if name == "" {
+			continue
+		}
+		out[name] = item.PrecisionProxy
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func reconCorpusContainsAny(path string, needles []string) bool {

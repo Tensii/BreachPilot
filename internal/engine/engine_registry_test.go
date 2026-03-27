@@ -264,7 +264,7 @@ func TestPrioritizeProofModulesPrefersStrongCorrelationChains(t *testing.T) {
 		{Module: "session-abuse", Validation: "verified"},
 	})
 
-	prioritized := prioritizeProofModules(mods, signals, rs)
+	prioritized := prioritizeProofModules(mods, signals, rs, nil)
 	if len(prioritized) != 2 {
 		t.Fatalf("expected 2 prioritized modules, got %d", len(prioritized))
 	}
