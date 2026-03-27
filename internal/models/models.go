@@ -63,6 +63,8 @@ type ExploitFinding struct {
 	MatchedIndicator string                 `json:"matched_indicator,omitempty"`
 	MatchedSnippet   string                 `json:"matched_snippet,omitempty"`
 	Capabilities     []string               `json:"capabilities,omitempty"`
+	EvidenceScore    float64                `json:"evidence_score,omitempty"` // 0–100 evidence strength
+	ImpactScore      float64                `json:"impact_score,omitempty"`   // 0–100 impact potential
 
 	// RiskScore holds the contextual score computed by the scoring engine.
 	// Zero value = not yet scored.

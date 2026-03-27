@@ -94,9 +94,9 @@ const (
 )
 
 var (
-	progressFractionRE = regexp.MustCompile(`(?i)\b(\d+)\s*/\s*(\d+)\s*(?:\((\d{1,3})%\))?`)
-	progressPercentRE  = regexp.MustCompile(`(?i)\b(\d{1,3})%\b`)
-	reconCorpusMatchMu sync.Mutex
+	progressFractionRE    = regexp.MustCompile(`(?i)\b(\d+)\s*/\s*(\d+)\s*(?:\((\d{1,3})%\))?`)
+	progressPercentRE     = regexp.MustCompile(`(?i)\b(\d{1,3})%\b`)
+	reconCorpusMatchMu    sync.Mutex
 	reconCorpusMatchCache = map[string]int{}
 	workflowSignalCacheMu sync.Mutex
 	workflowSignalCache   = map[string]browserWorkflowSignals{}
@@ -371,6 +371,22 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			Message:  fmt.Sprintf("exploit.targeting using ranked endpoints: %d", rankedCount),
 			Target:   job.Target,
 			Counts:   map[string]int{"ranked_endpoints": rankedCount},
+			Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
+		})
+	}
+	if filteredInput, filteredCount, droppedHosts := buildErrorAwareNucleiInput(nucleiInput, outErrors, artDir); filteredCount > 0 {
+		nucleiInput = filteredInput
+		nucleiTargetsTotal = filteredCount
+		emit(models.RuntimeEvent{
+			Kind:    "stage",
+			Stage:   "exploit.targeting",
+			Status:  "info",
+			Message: fmt.Sprintf("exploit.targeting host-error-aware pruning applied: dropped_hosts=%d targets=%d", droppedHosts, filteredCount),
+			Target:  job.Target,
+			Counts: map[string]int{
+				"dropped_hosts":  droppedHosts,
+				"nuclei_targets": filteredCount,
+			},
 			Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
 		})
 	}
@@ -1123,6 +1139,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		_ = writeJobReport(job, opt.ArtifactsRoot)
 		return err
 	}
+	_ = writeCalibrationArtifacts(rawExploitFindings, exploitFindings, artDir, job)
 	rptOpts := exploit.ReportOptions{
 		Formats:            opt.ReportFormats,
 		PreviousReportPath: opt.PreviousReportPath,
@@ -1416,10 +1433,11 @@ func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors 
 	if strings.TrimSpace(outErrors) != "" {
 		args = append(args, "-error-log", outErrors)
 	}
+	maxHostErrors := adaptiveNucleiMaxHostErrors(nucleiInput, outErrors)
 	if job != nil && (strings.Contains(job.Target, "localhost") || strings.Contains(job.Target, "127.0.0.1")) {
 		args = append(args, "-concurrency", "10", "-max-host-error", "10")
 	} else {
-		args = append(args, "-c", "35", "-bs", "25", "-max-host-error", "35")
+		args = append(args, "-c", "35", "-bs", "25", "-max-host-error", strconv.Itoa(maxHostErrors))
 	}
 	if job != nil && len(job.Templates) > 0 {
 		args = append(args, "-t", strings.Join(job.Templates, ","))
@@ -1443,6 +1461,158 @@ func defaultNucleiRequestTimeoutSec(job *models.Job) int {
 		}
 	}
 	return 10
+}
+
+func adaptiveNucleiMaxHostErrors(nucleiInput, outErrors string) int {
+	maxHostErrors := 35
+	targets := countLinesSafe(nucleiInput)
+	switch {
+	case targets > 150:
+		maxHostErrors = 10
+	case targets > 80:
+		maxHostErrors = 14
+	case targets > 40:
+		maxHostErrors = 18
+	}
+	noisy := collectNoisyErrorHosts(outErrors, 8)
+	if len(noisy) >= 8 && maxHostErrors > 10 {
+		maxHostErrors = 10
+	} else if len(noisy) >= 3 && maxHostErrors > 12 {
+		maxHostErrors = 12
+	}
+	if maxHostErrors < 8 {
+		maxHostErrors = 8
+	}
+	return maxHostErrors
+}
+
+func buildErrorAwareNucleiInput(nucleiInput, outErrors, artDir string) (string, int, int) {
+	noisy := collectNoisyErrorHosts(outErrors, 15)
+	if len(noisy) == 0 {
+		return "", 0, 0
+	}
+	raw, err := os.ReadFile(nucleiInput)
+	if err != nil {
+		return "", 0, 0
+	}
+	lines := strings.Split(string(raw), "\n")
+	kept := make([]string, 0, len(lines))
+	droppedHosts := map[string]struct{}{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		host := nucleiTargetHost(line)
+		if host != "" {
+			if _, bad := noisy[host]; bad {
+				droppedHosts[host] = struct{}{}
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	if len(droppedHosts) == 0 || len(kept) == 0 {
+		return "", 0, 0
+	}
+	filteredPath := filepath.Join(artDir, "nuclei_targets_erroraware.txt")
+	if err := os.WriteFile(filteredPath, []byte(strings.Join(kept, "\n")+"\n"), 0o644); err != nil {
+		return "", 0, 0
+	}
+	return filteredPath, len(kept), len(droppedHosts)
+}
+
+type nucleiErrorLine struct {
+	Address string `json:"address"`
+	Error   string `json:"error"`
+	Kind    string `json:"kind"`
+}
+
+func collectNoisyErrorHosts(path string, threshold int) map[string]int {
+	out := map[string]int{}
+	if strings.TrimSpace(path) == "" || threshold <= 0 {
+		return out
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer file.Close()
+	counts := map[string]int{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var entry nucleiErrorLine
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		host := hostFromAddress(entry.Address)
+		if host == "" {
+			continue
+		}
+		if !isSchedulingPenaltyError(entry) {
+			continue
+		}
+		counts[host]++
+	}
+	for host, n := range counts {
+		if n >= threshold {
+			out[host] = n
+		}
+	}
+	return out
+}
+
+func isSchedulingPenaltyError(e nucleiErrorLine) bool {
+	kind := strings.ToLower(strings.TrimSpace(e.Kind))
+	errText := strings.ToLower(strings.TrimSpace(e.Error))
+	if strings.Contains(kind, "temporary") || strings.Contains(kind, "unknown") {
+		return true
+	}
+	return strings.Contains(errText, "timeout") ||
+		strings.Contains(errText, "deadline exceeded") ||
+		strings.Contains(errText, "connection reset") ||
+		strings.Contains(errText, "readstatusline: eof")
+}
+
+func hostFromAddress(addr string) string {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return ""
+	}
+	if strings.HasPrefix(addr, "[") {
+		if idx := strings.Index(addr, "]"); idx > 1 {
+			return strings.TrimSpace(addr[1:idx])
+		}
+	}
+	if strings.Count(addr, ":") == 1 {
+		parts := strings.SplitN(addr, ":", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	return addr
+}
+
+func nucleiTargetHost(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(line); err == nil && parsed != nil && parsed.Hostname() != "" {
+		return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	}
+	if !strings.Contains(line, "://") {
+		if parsed, err := url.Parse("http://" + line); err == nil && parsed != nil && parsed.Hostname() != "" {
+			return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+		}
+	}
+	return ""
+}
+
+func countLinesSafe(path string) int {
+	n, err := countLines(path)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func buildRankedNucleiInput(path string, artDir string) (string, int) {
@@ -1638,6 +1808,128 @@ func writeExploitFindingsJSONL(findings []models.ExploitFinding, artDir string, 
 	job.ExploitFindingsCount = len(findings)
 	job.ExploitFindingsPath = path
 	return nil
+}
+
+func writeCalibrationArtifacts(rawFindings, acceptedFindings []models.ExploitFinding, artDir string, job *models.Job) error {
+	if strings.TrimSpace(artDir) == "" {
+		return nil
+	}
+	accepted := make(map[string]struct{}, len(acceptedFindings))
+	for _, f := range acceptedFindings {
+		accepted[exploit.FindingFingerprint(f)] = struct{}{}
+	}
+
+	type moduleAgg struct {
+		Raw      int `json:"raw"`
+		Accepted int `json:"accepted"`
+		Rejected int `json:"rejected"`
+	}
+	moduleStats := map[string]*moduleAgg{}
+
+	calPath := filepath.Join(artDir, "calibration_findings.jsonl")
+	f, err := os.Create(calPath)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	for _, finding := range rawFindings {
+		key := exploit.FindingFingerprint(finding)
+		_, ok := accepted[key]
+		mod := strings.ToLower(strings.TrimSpace(finding.Module))
+		if _, exists := moduleStats[mod]; !exists {
+			moduleStats[mod] = &moduleAgg{}
+		}
+		moduleStats[mod].Raw++
+		if ok {
+			moduleStats[mod].Accepted++
+		} else {
+			moduleStats[mod].Rejected++
+		}
+		record := map[string]any{
+			"job_id":          job.ID,
+			"target":          job.Target,
+			"module":          finding.Module,
+			"severity":        strings.ToUpper(strings.TrimSpace(finding.Severity)),
+			"validation":      strings.ToLower(strings.TrimSpace(finding.Validation)),
+			"confidence":      finding.Confidence,
+			"accepted":        ok,
+			"title":           finding.Title,
+			"url":             finding.Target,
+			"evidence":        finding.Evidence,
+			"risk_score":      finding.RiskScore.Final,
+			"timestamp":       finding.Timestamp,
+			"artifact_source": "exploit_pipeline",
+		}
+		if err := enc.Encode(record); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	type moduleSummary struct {
+		Module         string  `json:"module"`
+		Raw            int     `json:"raw"`
+		Accepted       int     `json:"accepted"`
+		Rejected       int     `json:"rejected"`
+		PrecisionProxy float64 `json:"precision_proxy"`
+	}
+	outModules := make([]moduleSummary, 0, len(moduleStats))
+	for module, st := range moduleStats {
+		precision := 0.0
+		if st.Raw > 0 {
+			precision = float64(st.Accepted) / float64(st.Raw)
+		}
+		outModules = append(outModules, moduleSummary{
+			Module:         module,
+			Raw:            st.Raw,
+			Accepted:       st.Accepted,
+			Rejected:       st.Rejected,
+			PrecisionProxy: mathRound(precision, 4),
+		})
+	}
+	sort.Slice(outModules, func(i, j int) bool {
+		if outModules[i].PrecisionProxy != outModules[j].PrecisionProxy {
+			return outModules[i].PrecisionProxy > outModules[j].PrecisionProxy
+		}
+		if outModules[i].Accepted != outModules[j].Accepted {
+			return outModules[i].Accepted > outModules[j].Accepted
+		}
+		return outModules[i].Module < outModules[j].Module
+	})
+
+	summary := map[string]any{
+		"generated_at":        time.Now().UTC().Format(time.RFC3339),
+		"job_id":              job.ID,
+		"target":              job.Target,
+		"raw_findings":        len(rawFindings),
+		"accepted_findings":   len(acceptedFindings),
+		"rejected_findings":   len(rawFindings) - len(acceptedFindings),
+		"calibration_dataset": filepath.Base(calPath),
+		"module_metrics":      outModules,
+		"notes": []string{
+			"precision_proxy is accepted/raw and should be calibrated against manually labeled truth sets",
+			"use this summary to tune module thresholds and profile budgets over time",
+		},
+	}
+	b, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(artDir, "calibration_summary.json"), b, 0o644)
+}
+
+func mathRound(v float64, places int) float64 {
+	if places <= 0 {
+		return float64(int(v + 0.5))
+	}
+	pow := 1.0
+	for i := 0; i < places; i++ {
+		pow *= 10
+	}
+	return float64(int(v*pow+0.5)) / pow
 }
 
 func annotateModuleTelemetryYield(in []models.ExploitModuleTelemetry, rawFindings []models.ExploitFinding, acceptedFindings []models.ExploitFinding) []models.ExploitModuleTelemetry {
