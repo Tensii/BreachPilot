@@ -1,6 +1,9 @@
 BINARY=breachpilot
+CRITICAL_PKGS=./internal/engine ./internal/exploit ./internal/exploit/httppolicy ./internal/notify
+FLAKE_PKGS=./cmd/breachpilot ./internal/config ./internal/notify ./internal/exploit/httppolicy
+COVERAGE_THRESHOLD=50
 
-.PHONY: build test test-race vet ci run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
+.PHONY: build test test-race test-race-critical test-flake coverage-critical vet ci run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
 
 build:
 	go build -o $(BINARY) ./cmd/breachpilot
@@ -10,6 +13,15 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-race-critical:
+	go test -race $(CRITICAL_PKGS)
+
+test-flake:
+	go test -count=3 $(FLAKE_PKGS)
+
+coverage-critical:
+	./scripts/check_critical_coverage.sh $(COVERAGE_THRESHOLD)
 
 vet:
 	go vet ./...

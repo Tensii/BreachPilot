@@ -10,6 +10,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -26,3 +27,23 @@ jobs:
       - run: make vet
       - run: make test
       - run: make build
+  reliability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          - "1.24.x"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Chromium
+        run: sudo apt-get update && sudo apt-get install -y chromium-browser libgbm1 libnss3 libatk-bridge2.0-0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - run: go version
+      - run: make test-race-critical
+      - run: make test-flake
+      - run: make coverage-critical

@@ -210,5 +210,7 @@ type Job struct {
 	FilteredCount         int                         `json:"filtered_count,omitempty"`
 	ReconDurationSec      float64                     `json:"recon_duration_sec,omitempty"`
 	ExploitDurationSec    float64                     `json:"exploit_duration_sec,omitempty"`
+	WebhookDroppedEvents  int64                       `json:"webhook_dropped_events,omitempty"`
+	WebhookSpooledEvents  int64                       `json:"webhook_spooled_events,omitempty"`
 	ReportPath            string                      `json:"report_path,omitempty"`
 }

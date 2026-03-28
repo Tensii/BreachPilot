@@ -3,7 +3,11 @@ package notify
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,5 +128,85 @@ func TestWebhookFindingsCapPreventsSpam(t *testing.T) {
 	defer mu.Unlock()
 	if count > 3 {
 		t.Fatalf("expected finding webhook cap to suppress spam, got %d sends", count)
+	}
+}
+
+func TestWebhookReliableModeSpoolsOnQueueBackpressure(t *testing.T) {
+	spoolPath := filepath.Join(t.TempDir(), "webhook-spool.jsonl")
+	nf := &Webhook{
+		URL:          "http://127.0.0.1:1",
+		Retries:      1,
+		ReliableMode: true,
+		QueueTimeout: 1 * time.Millisecond,
+		SpoolPath:    spoolPath,
+	}
+
+	for i := 0; i < 2000; i++ {
+		nf.SendGeneric("exploit.finding", map[string]any{"job_id": "j1", "idx": i})
+	}
+	nf.Stop()
+
+	if nf.SpooledEvents() == 0 {
+		t.Fatal("expected reliable mode to spool events under sustained queue backpressure")
+	}
+	b, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("expected spool file to exist: %v", err)
+	}
+	if len(b) == 0 {
+		t.Fatal("expected spool file to contain queued events")
+	}
+}
+
+func TestWebhookCountersAndCapsHelpers(t *testing.T) {
+	var nilWebhook *Webhook
+	if nilWebhook.FindingCap() != 0 {
+		t.Fatal("expected nil webhook finding cap to be zero")
+	}
+	if nilWebhook.DroppedEvents() != 0 {
+		t.Fatal("expected nil webhook dropped events to be zero")
+	}
+	if nilWebhook.SpooledEvents() != 0 {
+		t.Fatal("expected nil webhook spooled events to be zero")
+	}
+
+	w := &Webhook{}
+	if w.FindingCap() != 20 {
+		t.Fatalf("expected default finding cap 20, got %d", w.FindingCap())
+	}
+	atomic.StoreInt64(&w.droppedEvents, 7)
+	atomic.StoreInt64(&w.spooledEvents, 3)
+	if w.DroppedEvents() != 7 {
+		t.Fatalf("expected dropped events 7, got %d", w.DroppedEvents())
+	}
+	if w.SpooledEvents() != 3 {
+		t.Fatalf("expected spooled events 3, got %d", w.SpooledEvents())
+	}
+}
+
+func TestSignHMACSHA256IsDeterministic(t *testing.T) {
+	one := signHMACSHA256([]byte("payload"), "secret")
+	two := signHMACSHA256([]byte("payload"), "secret")
+	if one == "" || two == "" {
+		t.Fatal("expected non-empty signatures")
+	}
+	if one != two {
+		t.Fatal("expected deterministic signature for same payload/secret")
+	}
+	three := signHMACSHA256([]byte("payload-2"), "secret")
+	if one == three {
+		t.Fatal("expected different payload to produce different signature")
+	}
+}
+
+func TestRedactURLShortAndLong(t *testing.T) {
+	if got := redactURL(""); got != "" {
+		t.Fatalf("expected empty redact for empty input, got %q", got)
+	}
+	if got := redactURL("https://discord.com/api/webhooks/abc/def"); !strings.Contains(got, "<redacted>") {
+		t.Fatalf("expected redacted webhook URL, got %q", got)
+	}
+	if got := redactURL("https://example.com/very/long/path"); !strings.Contains(got, "<redacted>") {
+		t.Fatalf("expected redacted long URL, got %q", got)
 	}
 }

@@ -30,6 +30,9 @@ type Webhook struct {
 	Retries      int
 	DebugLogPath string
 	FindingsCap  int
+	ReliableMode bool
+	QueueTimeout time.Duration
+	SpoolPath    string
 
 	criticalCh chan webhookEvent
 	normalCh   chan webhookEvent
@@ -41,6 +44,7 @@ type Webhook struct {
 
 	findingsSentThisRun int32
 	droppedEvents       int64
+	spooledEvents       int64
 	stopCh              chan struct{}
 	logFile             *os.File
 }
@@ -55,6 +59,9 @@ func (w *Webhook) Start() {
 		if w.Retries <= 0 {
 			w.Retries = 3
 		}
+		if w.QueueTimeout <= 0 {
+			w.QueueTimeout = 2 * time.Second
+		}
 		w.criticalCh = make(chan webhookEvent, 64)
 		w.normalCh = make(chan webhookEvent, 512)
 		w.stopCh = make(chan struct{})
@@ -64,6 +71,9 @@ func (w *Webhook) Start() {
 			if lf, err := os.OpenFile(w.DebugLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 				w.logFile = lf
 			}
+		}
+		if w.ReliableMode && strings.TrimSpace(w.SpoolPath) == "" && strings.TrimSpace(w.DebugLogPath) != "" {
+			w.SpoolPath = strings.TrimSuffix(w.DebugLogPath, ".jsonl") + ".spool.jsonl"
 		}
 		w.wg.Add(1)
 		go w.loop()
@@ -139,7 +149,7 @@ func (w *Webhook) Send(event string, job *models.Job) {
 	select {
 	case w.normalCh <- webhookEvent{Name: event, Job: job}:
 	default:
-		atomic.AddInt64(&w.droppedEvents, 1)
+		w.enqueueNormal(webhookEvent{Name: event, Job: job})
 	}
 }
 
@@ -156,7 +166,7 @@ func (w *Webhook) SendGeneric(eventType string, payload any) {
 	select {
 	case w.normalCh <- webhookEvent{Name: eventType, Payload: payload}:
 	default:
-		atomic.AddInt64(&w.droppedEvents, 1)
+		w.enqueueNormal(webhookEvent{Name: eventType, Payload: payload})
 	}
 }
 
@@ -253,6 +263,14 @@ func (w *Webhook) DroppedEvents() int64 {
 	return atomic.LoadInt64(&w.droppedEvents)
 }
 
+// SpooledEvents returns the number of events persisted to spool because queueing could not keep up.
+func (w *Webhook) SpooledEvents() int64 {
+	if w == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&w.spooledEvents)
+}
+
 func payloadFindingCapChecked(payload any) bool {
 	m, ok := payload.(map[string]any)
 	if !ok {
@@ -275,6 +293,58 @@ func sanitizeGenericPayload(payload any) any {
 		out[k] = v
 	}
 	return out
+}
+
+func (w *Webhook) enqueueNormal(ev webhookEvent) {
+	if !w.ReliableMode {
+		atomic.AddInt64(&w.droppedEvents, 1)
+		return
+	}
+	select {
+	case w.normalCh <- ev:
+		return
+	case <-time.After(w.QueueTimeout):
+		if w.spoolEvent(ev) {
+			atomic.AddInt64(&w.spooledEvents, 1)
+			return
+		}
+		atomic.AddInt64(&w.droppedEvents, 1)
+	}
+}
+
+func (w *Webhook) spoolEvent(ev webhookEvent) bool {
+	path := strings.TrimSpace(w.SpoolPath)
+	if path == "" {
+		return false
+	}
+	record := map[string]any{
+		"ts":    time.Now().UTC().Format(time.RFC3339),
+		"event": ev.Name,
+	}
+	if ev.Payload != nil {
+		record["payload"] = sanitizeGenericPayload(ev.Payload)
+	} else {
+		record["job"] = ev.Job
+	}
+	b, err := json.Marshal(record)
+	if err != nil {
+		return false
+	}
+
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return false
+	}
+	return true
 }
 
 func (w *Webhook) postJSON(body map[string]any) {

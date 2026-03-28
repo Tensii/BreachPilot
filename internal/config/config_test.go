@@ -166,3 +166,33 @@ func TestLoadBrowserCaptureOptions(t *testing.T) {
 		t.Fatalf("browser capture options did not load correctly: %+v", cfg)
 	}
 }
+
+func TestLoadWebhookReliabilityOptions(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_WEBHOOK_RELIABLE_MODE", "true")
+	_ = os.Setenv("BREACHPILOT_WEBHOOK_QUEUE_BLOCK_TIMEOUT_MS", "3500")
+	_ = os.Setenv("BREACHPILOT_WEBHOOK_SPOOL_PATH", "/tmp/bp-webhook-spool.jsonl")
+	defer os.Unsetenv("BREACHPILOT_WEBHOOK_RELIABLE_MODE")
+	defer os.Unsetenv("BREACHPILOT_WEBHOOK_QUEUE_BLOCK_TIMEOUT_MS")
+	defer os.Unsetenv("BREACHPILOT_WEBHOOK_SPOOL_PATH")
+
+	cfg := Load()
+	if !cfg.WebhookReliableMode || cfg.WebhookQueueBlockTimeoutMS != 3500 || cfg.WebhookSpoolPath != "/tmp/bp-webhook-spool.jsonl" {
+		t.Fatalf("webhook reliability options did not load correctly: %+v", cfg)
+	}
+}
+
+func TestValidateWebhookReliableModeRequiresPositiveQueueTimeout(t *testing.T) {
+	cfg := Config{
+		NucleiBin:                  "echo",
+		WebhookRetries:             1,
+		WebhookReliableMode:        true,
+		WebhookQueueBlockTimeoutMS: 0,
+		ReconTimeoutSec:            1,
+		ReconRetries:               0,
+		NucleiTimeoutSec:           1,
+		ModuleTimeoutSec:           1,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error when reliable mode is enabled with zero queue timeout")
+	}
+}

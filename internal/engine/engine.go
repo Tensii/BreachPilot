@@ -1037,7 +1037,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		job.RiskScore = job.RiskSummary.OverallScore
 	}
 
-	exploitFindings = exploit.AutoReplayConfirmedFindings(exploitFindings, exploitOpt)
+	exploitFindings = exploit.AutoReplayConfirmedFindingsWithContext(ctx, exploitFindings, exploitOpt)
 	exploitFindings = applyAuthContextMatrix(exploitFindings, exploitOpt)
 	exploitFindings = exploit.ApplyHybridQualityGates(exploitFindings)
 	leadFindings := exploit.AnnotateConfidenceBands(exploit.SignalOnlyFindings(exploitFindings))
@@ -1770,7 +1770,10 @@ func buildRankedNucleiInput(path string, artDir string) (string, int) {
 	}
 	items = collapseNucleiTargets(items)
 	out := filepath.Join(artDir, "nuclei_targets_ranked.txt")
-	_ = os.WriteFile(out, []byte(strings.Join(items, "\n")+"\n"), 0o644)
+	if err := os.WriteFile(out, []byte(strings.Join(items, "\n")+"\n"), 0o644); err != nil {
+		log.Printf("warning: failed to write ranked nuclei targets: %v", err)
+		return "", 0
+	}
 	return out, len(items)
 }
 

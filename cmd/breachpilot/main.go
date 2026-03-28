@@ -169,10 +169,28 @@ func main() {
 	printStartupBanner(cfg)
 
 	engOpt := buildEngineOptions(cfg)
-	nf := &notify.Webhook{URL: cfg.ExploitWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl"), FindingsCap: cfg.WebhookFindingsCap}
+	nf := &notify.Webhook{
+		URL:          cfg.ExploitWebhookURL,
+		Secret:       cfg.WebhookSecret,
+		Retries:      cfg.WebhookRetries,
+		DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_exploit_debug.jsonl"),
+		FindingsCap:  cfg.WebhookFindingsCap,
+		ReliableMode: cfg.WebhookReliableMode,
+		QueueTimeout: time.Duration(cfg.WebhookQueueBlockTimeoutMS) * time.Millisecond,
+		SpoolPath:    webhookSpoolPath(cfg.WebhookSpoolPath, "exploit"),
+	}
 	nf.Start()
 	defer nf.Stop()
-	rf := &notify.Webhook{URL: cfg.ReconWebhookURL, Secret: cfg.WebhookSecret, Retries: cfg.WebhookRetries, DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl"), FindingsCap: cfg.WebhookFindingsCap}
+	rf := &notify.Webhook{
+		URL:          cfg.ReconWebhookURL,
+		Secret:       cfg.WebhookSecret,
+		Retries:      cfg.WebhookRetries,
+		DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_recon_debug.jsonl"),
+		FindingsCap:  cfg.WebhookFindingsCap,
+		ReliableMode: cfg.WebhookReliableMode,
+		QueueTimeout: time.Duration(cfg.WebhookQueueBlockTimeoutMS) * time.Millisecond,
+		SpoolPath:    webhookSpoolPath(cfg.WebhookSpoolPath, "recon"),
+	}
 	rf.Start()
 	defer rf.Stop()
 	engOpt.Notifier = nf
@@ -373,37 +391,39 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 			return err
 		}
 
+		cancelled := false
 		switch job.Status {
 		case models.JobRejected:
 			nf.Send("job.rejected", job)
-			if jsonOut {
-				_ = printJobJSON(job)
-			} else {
-				fmt.Printf("\x1b[31m[✗] JOB REJECTED\x1b[0m %s\n", job.Error)
-			}
 		case models.JobCancelled:
 			nf.Send("job.cancelled", job)
 			if strings.EqualFold(job.Mode, "full") {
 				rf.Send("job.cancelled", job)
 			}
+			cancelled = true
+		case models.JobFailed:
+			nf.Send("job.failed", job)
+		default:
+			nf.Send("job.completed", job)
+		}
+
+		applyWebhookDeliveryMetrics(job, nf, rf)
+		if job.WebhookDroppedEvents > 0 {
+			log.Printf("[webhook] %d non-critical events were dropped due to queue saturation", job.WebhookDroppedEvents)
+		}
+		if job.WebhookSpooledEvents > 0 {
+			log.Printf("[webhook] %d events were durably spooled due to queue backpressure", job.WebhookSpooledEvents)
+		}
+		if err := persistJobReport(job); err != nil {
+			log.Printf("[report] failed to persist webhook metrics to job report: %v", err)
+		}
+		if cancelled {
 			if jsonOut {
 				_ = printJobJSON(job)
 			} else {
 				fmt.Printf("\x1b[31m[!] JOB INTERRUPTED\x1b[0m\n")
 			}
 			return nil
-		case models.JobFailed:
-			nf.Send("job.failed", job)
-			if jsonOut {
-				_ = printJobJSON(job)
-			} else {
-				fmt.Printf("\x1b[31m[✗] JOB FAILED\x1b[0m %s\n", job.Error)
-			}
-		default:
-			if dropped := nf.DroppedEvents(); dropped > 0 {
-				log.Printf("[webhook] %d non-critical events were dropped due to queue saturation", dropped)
-			}
-			nf.Send("job.completed", job)
 		}
 
 		if jsonOut {
@@ -535,6 +555,46 @@ func printJobJSON(job *models.Job) error {
 		return err
 	}
 	fmt.Println(string(b))
+	return nil
+}
+
+func applyWebhookDeliveryMetrics(job *models.Job, hooks ...*notify.Webhook) {
+	if job == nil {
+		return
+	}
+	var dropped int64
+	var spooled int64
+	for _, h := range hooks {
+		if h == nil {
+			continue
+		}
+		dropped += h.DroppedEvents()
+		spooled += h.SpooledEvents()
+	}
+	job.WebhookDroppedEvents = dropped
+	job.WebhookSpooledEvents = spooled
+}
+
+func persistJobReport(job *models.Job) error {
+	if job == nil || strings.TrimSpace(job.ReportPath) == "" {
+		return nil
+	}
+	payload := map[string]any{
+		"schema_version": models.SchemaVersion,
+		"job":            job,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := job.ReportPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, job.ReportPath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return nil
 }
 
@@ -899,6 +959,7 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s│%s nuclei=%s  rps=%d  module_timeout=%s\n", cyan, reset, cfg.NucleiBin, cfg.RateLimitRPS, moduleTimeoutLabel)
 	fmt.Printf("%s│%s recon_timeout=%s  nuclei_timeout=%s  recon_retries=%d\n", cyan, reset, reconTimeoutLabel, nucleiTimeoutLabel, cfg.ReconRetries)
 	fmt.Printf("%s│%s webhooks(recon/exploit)=%s/%s retries=%d\n", cyan, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
+	fmt.Printf("%s│%s webhook_reliable=%t queue_timeout_ms=%d spool=%s\n", cyan, reset, cfg.WebhookReliableMode, cfg.WebhookQueueBlockTimeoutMS, emptyAs(cfg.WebhookSpoolPath, "auto/off"))
 	fmt.Printf("%s│%s artifacts=%s  reports=%s\n", cyan, reset, cfg.ArtifactsRoot, emptyAs(cfg.ReportFormats, "json,md,bbmd,bbpdf,html"))
 	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", cyan, reset)
 	if cfg.ProofMode {
@@ -919,6 +980,18 @@ func emptyAs(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func webhookSpoolPath(raw, kind string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return ""
+	}
+	ext := filepath.Ext(base)
+	if ext == "" {
+		return base + "." + kind + ".jsonl"
+	}
+	return strings.TrimSuffix(base, ext) + "." + kind + ext
 }
 
 func renderStage(stage string) string {
