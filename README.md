@@ -198,6 +198,8 @@ Common files:
 
 If `BREACHPILOT_PREVIOUS_REPORT` is set, the report also includes a diff against the earlier run.
 
+`bbmd` and `bbpdf` outputs are always enforced so bug bounty markdown/PDF packs and per-finding PDFs are generated every run.
+
 ## Notes
 - Use `recon/summary.json` as the input for `file` mode, not files under `recon/reports/`.
 - `proof_mode` should be used only on owned or explicitly approved targets.

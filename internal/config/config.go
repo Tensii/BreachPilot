@@ -88,7 +88,7 @@ func Load() Config {
 		exploitWH = legacyWH
 	}
 
-	return Config{
+	cfg := Config{
 		WebhookURL:                     legacyWH,
 		ReconWebhookURL:                reconWH,
 		ExploitWebhookURL:              exploitWH,
@@ -151,6 +151,8 @@ func Load() Config {
 		BrowserCaptureMaxRoutesPerPage: getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", 10),
 		BrowserCapturePath:             getEnv("BREACHPILOT_BROWSER_PATH", ""),
 	}
+	cfg.ReportFormats = normalizeReportFormats(cfg.ReportFormats)
+	return cfg
 }
 
 func getEnv(k, fallback string) string {
@@ -302,10 +304,7 @@ func (c Config) RedactedSummary() string {
 	if prevReport == "" {
 		prevReport = "<empty>"
 	}
-	reportFormats := strings.TrimSpace(c.ReportFormats)
-	if reportFormats == "" {
-		reportFormats = "json,md,bbmd,bbpdf,html"
-	}
+	reportFormats := normalizeReportFormats(c.ReportFormats)
 	ctxCount := 0
 	if strings.TrimSpace(c.AuthUserCookie) != "" || strings.TrimSpace(c.AuthUserHeaders) != "" {
 		ctxCount++
@@ -315,6 +314,48 @@ func (c Config) RedactedSummary() string {
 	}
 	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d webhookReliableMode=%t webhookQueueBlockTimeoutMs=%d webhookSpoolPath=%s nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
 		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.WebhookReliableMode, c.WebhookQueueBlockTimeoutMS, redact(c.WebhookSpoolPath), c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
+}
+
+func normalizeReportFormats(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "json,md,bbmd,bbpdf,html"
+	}
+
+	formats := map[string]bool{}
+	add := func(token string) {
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case "json", "md", "bbmd", "bbpdf", "html", "sarif":
+			formats[strings.ToLower(strings.TrimSpace(token))] = true
+		case "bugbounty":
+			formats["bbmd"] = true
+		case "pdf":
+			formats["bbpdf"] = true
+		}
+	}
+
+	for _, token := range strings.Split(raw, ",") {
+		add(token)
+	}
+
+	if len(formats) == 0 {
+		formats["json"] = true
+		formats["md"] = true
+		formats["html"] = true
+	}
+
+	// Always emit bug bounty markdown + per-finding PDFs.
+	formats["bbmd"] = true
+	formats["bbpdf"] = true
+
+	order := []string{"json", "md", "bbmd", "bbpdf", "html", "sarif"}
+	out := make([]string, 0, len(order))
+	for _, name := range order {
+		if formats[name] {
+			out = append(out, name)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func loadEnvFile(path string) error {

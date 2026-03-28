@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -194,5 +195,22 @@ func TestValidateWebhookReliableModeRequiresPositiveQueueTimeout(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error when reliable mode is enabled with zero queue timeout")
+	}
+}
+
+func TestNormalizeReportFormatsAlwaysIncludesPDF(t *testing.T) {
+	got := normalizeReportFormats("json,md,html")
+	if !strings.Contains(got, "bbmd") || !strings.Contains(got, "bbpdf") {
+		t.Fatalf("expected bbmd and bbpdf in normalized formats, got %q", got)
+	}
+}
+
+func TestLoadReportFormatsAutoEnforcesPDF(t *testing.T) {
+	_ = os.Setenv("BREACHPILOT_REPORT_FORMATS", "json,md,html")
+	defer os.Unsetenv("BREACHPILOT_REPORT_FORMATS")
+
+	cfg := Load()
+	if !strings.Contains(cfg.ReportFormats, "bbmd") || !strings.Contains(cfg.ReportFormats, "bbpdf") {
+		t.Fatalf("expected report formats to include bbmd/bbpdf, got %q", cfg.ReportFormats)
 	}
 }
