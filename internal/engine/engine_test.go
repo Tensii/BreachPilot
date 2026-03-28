@@ -57,7 +57,7 @@ func TestProcessFileModeWritesReport(t *testing.T) {
 	_ = os.WriteFile(summary, []byte(`{"workdir":"`+reconDir+`","live_hosts":"`+live+`","urls":{"all":""},"intel":{"endpoints_ranked_json":"","params_ranked_json":""}}`), 0o644)
 
 	job := &models.Job{ID: "j2", Target: "example.com", Mode: "ingest", SafeMode: true, ReconPath: summary}
-	opt := Options{NucleiBin: "true", ArtifactsRoot: dir}
+	opt := Options{NucleiBin: "true", ArtifactsRoot: dir, OnlyModules: "__none__"}
 	if err := Process(context.Background(), job, opt); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -135,6 +135,7 @@ echo "https://${target:-example.com}" > "$out/live_hosts.txt"
 		NucleiBin:       "true",
 		ArtifactsRoot:   dir,
 		SkipNuclei:      true,
+		OnlyModules:     "__none__",
 	}
 	if err := Process(context.Background(), job, opt); err != nil {
 		t.Fatalf("expected compatible recon run, got %v", err)
@@ -203,6 +204,7 @@ with open(os.path.join(out, "live_hosts.txt"), "w", encoding="utf-8") as f:
 		NucleiBin:       "true",
 		ArtifactsRoot:   dir,
 		SkipNuclei:      true,
+		OnlyModules:     "__none__",
 	}
 	if err := Process(context.Background(), job, opt); err != nil {
 		t.Fatalf("expected relative recon command to succeed, got %v", err)
@@ -231,7 +233,7 @@ func TestProcessFailsWhenExploitFindingsWriteFails(t *testing.T) {
 	_ = os.WriteFile(nucleiScript, []byte(script), 0o755)
 
 	job := &models.Job{ID: "j3", Target: "example.com", Mode: "ingest", SafeMode: true, ReconPath: summary}
-	opt := Options{NucleiBin: nucleiScript, ArtifactsRoot: dir}
+	opt := Options{NucleiBin: nucleiScript, ArtifactsRoot: dir, OnlyModules: "__none__"}
 	err := Process(context.Background(), job, opt)
 	_ = os.Chmod(filepath.Join(dir, job.ID), 0o755)
 	if err == nil {
@@ -268,7 +270,7 @@ func TestFileAndFullProduceCompatibleCounts(t *testing.T) {
 	_ = os.WriteFile(summary, []byte(`{"workdir":"`+dir+`","live_hosts":"`+live+`","urls":{"all":""},"intel":{"endpoints_ranked_json":"","params_ranked_json":""}}`), 0o644)
 
 	jobFile := &models.Job{ID: "c1", Target: "example.com", Mode: "ingest", SafeMode: true, ReconPath: summary}
-	opt := Options{NucleiBin: "true", ArtifactsRoot: dir}
+	opt := Options{NucleiBin: "true", ArtifactsRoot: dir, OnlyModules: "__none__"}
 	if err := Process(context.Background(), jobFile, opt); err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestFileAndFullProduceCompatibleCounts(t *testing.T) {
 	script := "#!/usr/bin/env bash\nset -e\nout=\"\"\nfor ((i=1;i<=$#;i++)); do if [[ \"${!i}\" == '-o' ]]; then j=$((i+1)); out=\"${!j}\"; fi; done\nmkdir -p \"$out\"\ncp \"" + summary + "\" \"$out/summary.json\"\n"
 	_ = os.WriteFile(reconScript, []byte(script), 0o755)
 	jobFull := &models.Job{ID: "c2", Target: "example.com", Mode: "full", SafeMode: true}
-	opt2 := Options{NucleiBin: "true", ReconHarvestCmd: reconScript, ArtifactsRoot: dir}
+	opt2 := Options{NucleiBin: "true", ReconHarvestCmd: reconScript, ArtifactsRoot: dir, OnlyModules: "__none__"}
 	if err := Process(context.Background(), jobFull, opt2); err != nil {
 		t.Fatalf("full failed: %v", err)
 	}

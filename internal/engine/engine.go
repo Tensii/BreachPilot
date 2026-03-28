@@ -483,7 +483,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		return err
 	}
 	job.FindingsCount = count
-	notify("exploit.completed")
+	notify("exploit.nuclei.completed")
 
 	// --- exploit module phase ---
 	exploitModules := filterModules(selectedModuleInstances(opt), opt.OnlyModules, opt.SkipModules)
@@ -1217,6 +1217,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		setJobError(job, ErrExecution, fmt.Sprintf("write job report: %v", err))
 		return err
 	}
+	notify("exploit.completed")
 	_ = writeArtifactManifest(job, opt.ArtifactsRoot)
 	_ = writePerformanceBaseline(job, opt.ArtifactsRoot)
 	return nil

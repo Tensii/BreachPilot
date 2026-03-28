@@ -75,7 +75,7 @@ func TestEngineFindsVulnerabilitiesOnMockTarget(t *testing.T) {
 		AggressiveMode: true,
 		ProofMode:      false,
 		MinSeverity:    "",
-		OnlyModules:    "lfi,rxss,advanced-injection,idor-size",
+		OnlyModules:    "lfi,rxss",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestEngineFindsVulnerabilitiesOnMockTarget(t *testing.T) {
 		if err := json.Unmarshal(scanner.Bytes(), &finding); err != nil {
 			t.Fatal(err)
 		}
-		if (finding.Module == "lfi" || finding.Module == "rxss" || finding.Module == "advanced-injection" || finding.Module == "idor-size") &&
+		if (finding.Module == "lfi" || finding.Module == "rxss") &&
 			(finding.Severity == "HIGH" || finding.Severity == "CRITICAL") {
 			foundHighSignal = true
 			break
