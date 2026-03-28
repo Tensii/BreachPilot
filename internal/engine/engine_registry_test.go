@@ -138,7 +138,7 @@ func TestCorrelateProofModulesUsesScoutFindings(t *testing.T) {
 		{Module: "session-abuse", Validation: "verified"},
 		{Module: "privilege-path", Validation: "verified"},
 	})
-	planned, skipped, preview := correlateProofModules(mods, scoutSignals, models.ReconSummary{}, Options{})
+	planned, skipped, preview := correlateProofModules(mods, scoutSignals, models.ReconSummary{}, Options{}, nil)
 	if len(preview) == 0 {
 		t.Fatal("expected correlation planner preview")
 	}
@@ -166,7 +166,7 @@ func TestCorrelateProofModulesFallsBackToReconSignals(t *testing.T) {
 	rs.Intel.ParamsRankedJSON = params
 
 	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "ssrf-prober,advanced-injection,jwt-access"}), "ssrf-prober,advanced-injection,jwt-access", "")
-	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{}, nil)
 	if len(skipped) != 0 {
 		t.Fatalf("expected recon-driven planning without skips, got %d", len(skipped))
 	}
@@ -191,7 +191,7 @@ func TestCorrelateProofModulesSkipsWeakReconSignals(t *testing.T) {
 	rs.Intel.ParamsRankedJSON = params
 
 	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "advanced-injection,jwt-access"}), "advanced-injection,jwt-access", "")
-	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{}, nil)
 	if len(planned) != 1 || planned[0].Name() != "jwt-access" {
 		t.Fatalf("expected only jwt-access planned from auth URL fallback, got %v", moduleNames(planned))
 	}
@@ -220,7 +220,7 @@ func TestCorrelateProofModulesUsesSavedBrowserWorkflowSignals(t *testing.T) {
 
 	rs := models.ReconSummary{Workdir: dir}
 	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "advanced-injection,ssrf-prober,state-change"}), "advanced-injection,ssrf-prober,state-change", "")
-	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{}, nil)
 	if len(skipped) != 0 {
 		t.Fatalf("expected browser workflow signals to avoid correlation skips, got %d", len(skipped))
 	}
@@ -240,7 +240,7 @@ func TestCorrelationPlannerAllowsInjectionOnURLCorpus(t *testing.T) {
 	rs.URLs.All = urls
 
 	mods := filterModules(selectedModuleInstances(Options{OnlyModules: "lfi,rxss,advanced-injection"}), "lfi,rxss,advanced-injection", "")
-	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{})
+	planned, skipped, _ := correlateProofModules(mods, correlationSignals{modules: map[string]int{}}, rs, Options{}, nil)
 	if len(planned) != 3 {
 		t.Fatalf("expected lfi, rxss, and advanced-injection planned, got %d", len(planned))
 	}

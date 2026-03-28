@@ -691,12 +691,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		}
 	}
 	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
+	enrichURLCorpusFromSharedState(&rs, sharedState)
 	scoutSignals := buildCorrelationSignals(scoutFindings)
 	mergedSignals := mergeCorrelationSignals(persistedSignals, scoutSignals)
 	_ = saveCorrelationSignalsArtifact(artDir, mergedSignals)
-	correlatedProofModules, correlationSkipped, correlationPreview := correlateProofModules(proofModules, mergedSignals, rs, opt)
-	job.PlanPreview = append(job.PlanPreview, correlationPreview...)
 	precisionPriors := loadModulePrecisionPriors(opt.PreviousReportPath)
+	correlatedProofModules, correlationSkipped, correlationPreview := correlateProofModules(proofModules, mergedSignals, rs, opt, precisionPriors)
+	job.PlanPreview = append(job.PlanPreview, correlationPreview...)
 	correlatedProofModules = prioritizeProofModules(correlatedProofModules, mergedSignals, rs, precisionPriors)
 	correlatedProofModules, authQualitySkipped, authQualityPreview := filterModulesByAuthContextQuality(correlatedProofModules, authObserved)
 	job.PlanPreview = append(job.PlanPreview, authQualityPreview...)
@@ -727,9 +728,25 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		}
 	}
 	_ = applyObservedAuthFromSharedState(&exploitOpt, sharedState)
+
+	// Keep a live-updated signal set that grows as proof stages complete.
+	liveSignals := mergedSignals // start from merged scout signals
+
+	// Track modules that were correlation-skipped so we can re-evaluate them.
+	reEvalPool := make([]exploit.Module, 0, len(correlationSkipped))
+	for _, t := range correlationSkipped {
+		// Recover the module instance from the registered list.
+		if m := findRegisteredModule(t.Module); m != nil {
+			reEvalPool = append(reEvalPool, m)
+		}
+	}
+
 	proofFindings := make([]models.ExploitFinding, 0, 64)
 	proofTelemetry := make([]models.ExploitModuleTelemetry, 0, len(correlatedProofModules))
-	for idx, stage := range proofStages {
+	executedProof := map[string]struct{}{}
+
+	for idx := 0; idx < len(proofStages); idx++ {
+		stage := proofStages[idx]
 		if len(stage) == 0 {
 			continue
 		}
@@ -743,7 +760,54 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		stageFindings, stageTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, stage)
 		proofFindings = append(proofFindings, stageFindings...)
 		proofTelemetry = append(proofTelemetry, stageTelemetry...)
+		for _, m := range stage {
+			executedProof[strings.ToLower(strings.TrimSpace(m.Name()))] = struct{}{}
+		}
+
+		// Live re-correlation: grow signals with new proof findings and re-check
+		// previously skipped modules.
+		if len(stageFindings) > 0 && len(reEvalPool) > 0 && ctx.Err() == nil {
+			newSignals := buildCorrelationSignals(stageFindings)
+			liveSignals = mergeCorrelationSignals(liveSignals, newSignals)
+			_ = saveCorrelationSignalsArtifact(artDir, liveSignals)
+
+			var stillSkipped []exploit.Module
+			var nowReady []exploit.Module
+			for _, m := range reEvalPool {
+				if m == nil {
+					continue
+				}
+				name := strings.ToLower(strings.TrimSpace(m.Name()))
+				if _, done := executedProof[name]; done {
+					continue
+				}
+				ready, reason := moduleReadyByCorrelation(name, liveSignals, rs, opt, precisionPriors)
+				if ready {
+					nowReady = append(nowReady, m)
+					emit(models.RuntimeEvent{
+						Kind:    "module",
+						Stage:   "exploit.module",
+						Status:  "planned",
+						Message: fmt.Sprintf("exploit.module.wave2.live-unlock %s: %s", m.Name(), reason),
+						Target:  job.Target,
+					})
+				} else {
+					stillSkipped = append(stillSkipped, m)
+				}
+			}
+			reEvalPool = stillSkipped
+			if len(nowReady) > 0 {
+				// Prioritize and append as a new stage.
+				nowReady = prioritizeProofModules(nowReady, liveSignals, rs, precisionPriors)
+				proofStages = append(proofStages, nowReady)
+			}
+		}
 	}
+	// Persist final live signals so operators can audit module selection decisions.
+	finalProofSignals := buildCorrelationSignals(proofFindings)
+	finalMerged := mergeCorrelationSignals(liveSignals, finalProofSignals)
+	_ = saveCorrelationSignalsArtifact(artDir, finalMerged)
+
 	exploitFindings := append(scoutFindings, proofFindings...)
 	telemetry := append(scoutTelemetry, proofTelemetry...)
 	job.ModuleTelemetry = append(append(append(telemetry, plannerSkipped...), correlationSkipped...), authQualitySkipped...)
@@ -1040,6 +1104,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	exploitFindings = exploit.AutoReplayConfirmedFindingsWithContext(ctx, exploitFindings, exploitOpt)
 	exploitFindings = applyAuthContextMatrix(exploitFindings, exploitOpt)
 	exploitFindings = exploit.ApplyHybridQualityGates(exploitFindings)
+	exploitFindings = exploit.PromoteConfidenceBandsOnMultiChannel(exploitFindings)
 	leadFindings := exploit.AnnotateConfidenceBands(exploit.SignalOnlyFindings(exploitFindings))
 	reliableFindings, reliabilityFiltered := exploit.FilterReliableFindings(exploitFindings)
 	exploitFindings = reliableFindings
@@ -2932,6 +2997,18 @@ func registeredAllModuleInstances() []exploit.Module {
 	return all
 }
 
+// findRegisteredModule returns the module instance with the given name
+// (case-insensitive) from the full registered list, or nil if not found.
+func findRegisteredModule(name string) exploit.Module {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, m := range registeredAllModuleInstances() {
+		if strings.ToLower(strings.TrimSpace(m.Name())) == name {
+			return m
+		}
+	}
+	return nil
+}
+
 func selectedModuleInstances(opt Options) []exploit.Module {
 	includeContext := opt.ValidationOnly || strings.EqualFold(strings.TrimSpace(opt.ScanProfile), "deep")
 	if strings.TrimSpace(opt.OnlyModules) != "" {
@@ -3310,7 +3387,7 @@ type correlationSignals struct {
 	scopeOverlap map[string]int
 }
 
-func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary, opt Options) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
+func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs models.ReconSummary, opt Options, priors map[string]float64) ([]exploit.Module, []models.ExploitModuleTelemetry, []string) {
 	if len(mods) == 0 {
 		return nil, nil, nil
 	}
@@ -3320,7 +3397,7 @@ func correlateProofModules(mods []exploit.Module, signals correlationSignals, rs
 	preview = append(preview, fmt.Sprintf("Correlation planner evaluating %d proof module(s) from scout findings/signals", len(mods)))
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, m := range mods {
-		ready, reason := moduleReadyByCorrelation(strings.ToLower(strings.TrimSpace(m.Name())), signals, rs, opt)
+		ready, reason := moduleReadyByCorrelation(strings.ToLower(strings.TrimSpace(m.Name())), signals, rs, opt, priors)
 		if ready {
 			planned = append(planned, m)
 			preview = append(preview, fmt.Sprintf("Correlation selected %s: %s", m.Name(), reason))
@@ -3388,6 +3465,22 @@ func buildCorrelationSignals(findings []models.ExploitFinding) correlationSignal
 			}
 		}
 	}
+	// Chain-confirmed: when two modules both achieved strength >= 4 on the same
+	// scope, mark them as chain-confirmed (strength 7) in the overlap map.
+	for a, aStrength := range s.modules {
+		if aStrength < 4 {
+			continue
+		}
+		for b, bStrength := range s.modules {
+			if a >= b || bStrength < 4 {
+				continue
+			}
+			if s.scopeOverlap[a+"|"+b] > 0 {
+				s.scopeOverlap[a+"|"+b] = 7
+				s.scopeOverlap[b+"|"+a] = 7
+			}
+		}
+	}
 	return s
 }
 
@@ -3439,6 +3532,20 @@ func (s correlationSignals) hasScopeOverlap(a, b string) bool {
 	return false
 }
 
+// chainStrength returns 7 if both modules have strength >= 4 on shared scope,
+// otherwise returns the max individual strength.
+func (s correlationSignals) chainStrength(a, b string) int {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if v := s.scopeOverlap[a+"|"+b]; v == 7 {
+		return 7
+	}
+	if s.strength(a) > s.strength(b) {
+		return s.strength(a)
+	}
+	return s.strength(b)
+}
+
 func findingCorrelationStrength(f models.ExploitFinding) int {
 	strength := validationStrength(f.Validation)
 	sev := strings.ToUpper(strings.TrimSpace(f.Severity))
@@ -3446,11 +3553,13 @@ func findingCorrelationStrength(f models.ExploitFinding) int {
 		sev = band
 	}
 	switch sev {
-	case "CRITICAL", "HIGH":
-		strength++
+	case "CRITICAL":
+		strength += 2
+	case "HIGH":
+		strength += 1
 	}
-	if strength > 5 {
-		strength = 5
+	if strength > 8 {
+		strength = 8
 	}
 	return strength
 }
@@ -3555,16 +3664,56 @@ func loadCorrelationSignalsArtifact(artDir string) correlationSignals {
 	return signals
 }
 
-func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options) (bool, string) {
+// precisionThresholdPass returns (true, reason) if the module has a stored
+// precision prior above 0.70 AND has at least one signal of any strength,
+// meaning historical accuracy justifies a lower bar.
+func precisionThresholdPass(name string, priors map[string]float64, signals correlationSignals) (bool, string) {
+	if len(priors) == 0 {
+		return false, ""
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	p, ok := priors[name]
+	if !ok || p < 0.70 {
+		return false, ""
+	}
+	if signals.hasModule(name) || signals.strength(name) > 0 {
+		return true, fmt.Sprintf("precision prior %.2f >= 0.70 with any signal — threshold relaxed", p)
+	}
+	return false, ""
+}
+
+func moduleReadyByCorrelation(name string, signals correlationSignals, rs models.ReconSummary, opt Options, priors ...map[string]float64) (bool, string) {
 	wf := loadBrowserWorkflowSignals(rs)
 	urlCorpus := reconURLCorpusPath(rs)
 	hasScopedSignals := len(signals.scopeByKey) > 0
+	ss := opt.SharedState
 	techWAF := opt.SharedState != nil && opt.SharedState.IsSet("tech.waf_detected")
 	techGraphQL := opt.SharedState != nil && (opt.SharedState.IsSet("tech.graphql") || rs.Tech.GraphQLDetected)
 	techWordPress := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.cms", "wordpress")
 	techSpring := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.framework", "spring")
 	techLaravel := opt.SharedState != nil && opt.SharedState.HasPrefix("tech.framework", "laravel")
 	techNode := opt.SharedState != nil && opt.SharedState.IsSet("tech.lang.node.js")
+	hasObjectID := ss != nil && len(ss.GetAll("object.id.")) > 0
+	hasUserID := ss != nil && func() bool {
+		_, ok := ss.Get("user.id")
+		return ok
+	}()
+	hasSwagger := ss != nil && func() bool {
+		v, ok := ss.Get("swagger.url")
+		return ok && v != ""
+	}()
+	hasCSRF := ss != nil && func() bool {
+		v, ok := ss.Get("csrf.token")
+		return ok && v != ""
+	}()
+	hasDiscoveredEndpoints := ss != nil && len(ss.GetAll("discovered.endpoint.")) > 0
+	var precPriors map[string]float64
+	if len(priors) > 0 {
+		precPriors = priors[0]
+	}
+	if ok, reason := precisionThresholdPass(name, precPriors, signals); ok {
+		return true, reason
+	}
 	switch name {
 	case "graphql-abuse":
 		if techGraphQL {
@@ -3586,6 +3735,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if strings.TrimSpace(rs.Intel.CORSJSON) != "" {
 			return true, "CORS intel available without scout confirmation"
 		}
+		if hasCSRF {
+			return true, "SharedState: CSRF token captured — auth bypass probe"
+		}
 		return false, "needs strong redirect/session/CORS lead from scouts"
 	case "idor-playbook":
 		globalStrong := signals.hasModuleAtLeast("privilege-path", 2) || signals.hasModuleAtLeast("session-abuse", 2) || signals.hasModuleAtLeast("graphql-abuse", 2) || signals.hasModuleAtLeast("js-endpoints", 1)
@@ -3594,6 +3746,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 			(signals.hasModuleAtLeast("graphql-abuse", 2) && signals.hasScopeOverlap("graphql-abuse", "js-endpoints"))
 		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("authorization/object-access scout lead available (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
+		}
+		if hasObjectID && hasUserID {
+			return true, "SharedState: object ID + user ID captured — direct IDOR playbook"
 		}
 		return false, "needs strong privilege/session/graphql/object lead from scouts"
 	case "state-change":
@@ -3609,6 +3764,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		}
 		if wf.WriteSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d write-like step(s)", wf.WriteSteps)
+		}
+		if hasObjectID && hasUserID {
+			return true, "SharedState: object ID + user ID captured — state-change probe"
 		}
 		return false, "needs state-change lead from scouts or URL corpus"
 	case "upload-abuse":
@@ -3644,6 +3802,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if hasURLs && reconCorpusMatchCount(urlCorpus, []string{"api/", "auth/", "token", "session", "login", "authorize", "oauth"}) >= 1 {
 			return true, "URL corpus has auth/API endpoint(s) — direct JWT probe"
 		}
+		if hasSwagger {
+			return true, "SharedState: Swagger/OpenAPI spec captured — JWT scope probe"
+		}
 		return false, "needs token/auth lead from scouts or URL corpus"
 	case "ssrf-prober":
 		if signals.hasModuleAtLeast("open-redirect", 2) {
@@ -3660,10 +3821,16 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if wf.SSRFLikeSteps > 0 {
 			return true, fmt.Sprintf("browser workflow retained %d SSRF-style forwarding step(s)", wf.SSRFLikeSteps)
 		}
+		if hasDiscoveredEndpoints {
+			return true, "SharedState: new endpoints discovered — SSRF pivot probe"
+		}
 		return false, "needs SSRF-style forwarding lead"
 	case "crlf-injection":
 		if signals.hasModuleAtLeast("open-redirect", 1) || signals.hasModuleAtLeast("http-method-tampering", 1) {
 			return true, fmt.Sprintf("header/redirect manipulation lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "open-redirect", "http-method-tampering"))
+		}
+		if signals.hasScopeOverlap("hostheader", "open-redirect") {
+			return true, fmt.Sprintf("co-located hostheader+redirect (chain=%d) — CRLF probe", signals.chainStrength("hostheader", "open-redirect"))
 		}
 		return false, "needs redirect or header manipulation scout lead"
 	case "advanced-injection", "rsql-injection":
@@ -3688,25 +3855,75 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 		if paramCount := reconCorpusMatchCount(urlCorpus, []string{"id=", "q=", "search=", "filter=", "query=", "page=", "user=", "name=", "type=", "category=", "sort=", "order=", "key=", "token=", "data=", "input=", "value=", "param="}); paramCount >= 1 {
 			return true, fmt.Sprintf("URL corpus has %d parameterised endpoint(s) — direct injection probe", paramCount)
 		}
+		if hasSwagger {
+			return true, "SharedState: Swagger/OpenAPI spec URL captured — schema-guided injection"
+		}
+		if hasDiscoveredEndpoints {
+			return true, "SharedState: new endpoints discovered at runtime — injection probe"
+		}
 		return false, "needs query/injection lead from scouts or ranked params"
 	case "lfi":
-		return true, "no correlation constraint"
+		// Run if URL corpus has path-parameter patterns, or there is any file/path
+		// signal from info-disclosure or exposed-files scouts.
+		if signals.hasModuleAtLeast("info-disclosure", 1) || signals.hasModuleAtLeast("exposed-files", 1) {
+			return true, fmt.Sprintf("file-exposure scout lead (strength=%d)", maxCorrelationStrength(signals, "info-disclosure", "exposed-files"))
+		}
+		if paramCount := reconCorpusMatchCount(urlCorpus, []string{"file=", "page=", "path=", "template=", "include=", "view=", "doc=", "read=", "load="}); paramCount >= 1 {
+			return true, fmt.Sprintf("LFI-pattern parameter detected in URL corpus (%d)", paramCount)
+		}
+		if hasDiscoveredEndpoints {
+			return true, "SharedState: new endpoints — LFI probe"
+		}
+		return false, "no LFI-oriented parameter or file-exposure signal"
 	case "hostheader":
-		return true, "no correlation constraint"
+		// Run if the target has password-reset / account flows, or any redirect signal.
+		if signals.hasModuleAtLeast("open-redirect", 1) {
+			return true, "redirect lead available — host header injection probe"
+		}
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"reset", "forgot", "password", "account", "verify", "confirm", "magic"}); matches >= 1 {
+			return true, fmt.Sprintf("account-flow URL detected (%d match(es)) — host header injection", matches)
+		}
+		return false, "no redirect or account-flow signal for host header"
 	case "hpp":
-		return true, "no correlation constraint"
+		// Run if the URL corpus has any parameterised endpoints.
+		if paramCount := reconCorpusMatchCount(urlCorpus, []string{"?", "&"}); paramCount >= 2 {
+			return true, fmt.Sprintf("parameterised URLs in corpus (%d) — HPP probe", paramCount)
+		}
+		if signals.hasModuleAtLeast("mutation-engine", 1) || signals.hasModuleAtLeast("http-method-tampering", 1) {
+			return true, "parameter mutation lead available"
+		}
+		return false, "no parameterised URL or mutation signal"
 	case "xxeinjection":
-		return true, "no correlation constraint"
+		// Run only if there is a clear XML/SOAP surface or an upload-capable endpoint.
+		if matches := reconCorpusMatchCount(urlCorpus, []string{"xml", "soap", "wsdl", "import", "upload", ".xml", "rss", "feed", "sitemap"}); matches >= 1 {
+			return true, fmt.Sprintf("XML/upload surface detected (%d match(es)) — XXE probe", matches)
+		}
+		if signals.hasModuleAtLeast("upload-abuse", 1) || signals.hasModuleAtLeast("advanced-injection", 1) {
+			return true, "upload or injection lead — XXE probe"
+		}
+		if hasSwagger {
+			return true, "Swagger spec captured — XXE probe on schema-defined upload endpoints"
+		}
+		return false, "no XML/upload surface or injection lead for XXE"
 	case "cmdinject":
 		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("nuclei-triage", 1) {
 			return true, fmt.Sprintf("injection scout lead available (strength=%d)", maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage"))
+		}
+		if signals.hasScopeOverlap("advanced-injection", "rxss") {
+			return true, fmt.Sprintf("co-located injection+XSS signals (chain strength=%d) — cmd inject probe", signals.chainStrength("advanced-injection", "rxss"))
 		}
 		if strings.TrimSpace(urlCorpus) != "" {
 			return true, "URL corpus available for command injection probe"
 		}
 		return false, "needs URL corpus or injection scout lead"
 	case "rxss":
-		return strings.TrimSpace(urlCorpus) != "", "URL corpus available for XSS probe"
+		if strings.TrimSpace(urlCorpus) != "" {
+			return true, "URL corpus available for XSS probe"
+		}
+		if signals.hasScopeOverlap("open-redirect", "http-method-tampering") {
+			return true, fmt.Sprintf("co-located redirect+method signals — reflected XSS scope expanded (chain=%d)", signals.chainStrength("open-redirect", "http-method-tampering"))
+		}
+		return false, "no URL corpus or co-located signal for XSS"
 	case "businesslogic":
 		if signals.hasModuleAtLeast("advanced-injection", 1) || signals.hasModuleAtLeast("rxss", 1) {
 			return true, "injection signal confirms input processing"
@@ -3721,6 +3938,9 @@ func moduleReadyByCorrelation(name string, signals correlationSignals, rs models
 			(signals.hasModuleAtLeast("session-abuse", 2) && signals.hasScopeOverlap("session-abuse", "graphql-abuse"))
 		if scopedStrong || (!hasScopedSignals && globalStrong) {
 			return true, fmt.Sprintf("object-access lead available from scouts (strength=%d)", maxCorrelationStrength(signals, "privilege-path", "session-abuse", "graphql-abuse", "js-endpoints"))
+		}
+		if hasObjectID {
+			return true, "SharedState: object ID captured — size-comparison IDOR probe"
 		}
 		return false, "needs object-access lead from scouts"
 	case "saml-probe":
@@ -3808,18 +4028,33 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 	case "lfi":
 		score += maxCorrelationStrength(signals, "info-disclosure", "exposed-files") * 40
 		score += reconCorpusMatchCount(urlCorpus, []string{"file=", "page=", "path=", "template=", "include="}) * 10
+		if signals.hasScopeOverlap("info-disclosure", "exposed-files") {
+			score += 40
+		}
 	case "rxss":
 		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 25
 		score += reconCorpusMatchCount(urlCorpus, []string{"q=", "search=", "query=", "message=", "name=", "comment="}) * 8
+		if signals.hasScopeOverlap("open-redirect", "http-method-tampering") {
+			score += 40
+		}
 	case "cmdinject":
 		score += maxCorrelationStrength(signals, "advanced-injection", "nuclei-triage") * 50
 		score += reconCorpusMatchCount(urlCorpus, []string{"cmd=", "exec=", "command=", "ping=", "host=", "ip="}) * 15
+		if signals.hasScopeOverlap("advanced-injection", "rxss") {
+			score += 40
+		}
 	case "hostheader":
 		score += maxCorrelationStrength(signals, "open-redirect", "cors-poc") * 20
 		score += reconCorpusMatchCount(urlCorpus, []string{"reset", "forgot", "password", "account"}) * 10
+		if signals.hasScopeOverlap("open-redirect", "session-abuse") {
+			score += 40
+		}
 	case "hpp":
 		score += maxCorrelationStrength(signals, "mutation-engine", "http-method-tampering") * 20
 		score += reconCorpusMatchCount(urlCorpus, []string{"?"}) * 2
+		if signals.hasScopeOverlap("mutation-engine", "http-method-tampering") {
+			score += 40
+		}
 	case "xxeinjection":
 		score += maxCorrelationStrength(signals, "advanced-injection", "info-disclosure") * 30
 		score += reconCorpusMatchCount(urlCorpus, []string{"xml", "soap", "wsdl", "upload", "import"}) * 12
@@ -3832,6 +4067,9 @@ func correlationPriorityScore(name string, signals correlationSignals, rs models
 		score += reconCorpusMatchCount(rs.Intel.EndpointsRankedJSON, []string{"render", "proxy", "fetch", "url", "preview", "image"}) * 5
 	case "crlf-injection":
 		score += maxCorrelationStrength(signals, "open-redirect", "http-method-tampering") * 30
+		if signals.hasScopeOverlap("hostheader", "open-redirect") {
+			score += 40
+		}
 	case "advanced-injection", "rsql-injection":
 		score += maxCorrelationStrength(signals, "graphql-abuse", "js-endpoints", "nuclei-triage") * 30
 		score += reconCorpusMatchCount(rs.Intel.ParamsRankedJSON, []string{"id", "query", "search", "filter", "where", "sort"}) * 5
@@ -4430,6 +4668,36 @@ func enrichReconSummaryFromSharedState(artDir string, rs *models.ReconSummary, s
 	}
 	rs.URLs.All = targetPath
 	return wrote || len(existing) > 0
+}
+
+// enrichURLCorpusFromSharedState appends newly discovered endpoints (written
+// by scouts under the "discovered.endpoint." prefix) into the recon URL corpus
+// file. This ensures proof modules query the full, live-updated endpoint set.
+func enrichURLCorpusFromSharedState(rs *models.ReconSummary, ss *exploit.SharedState) {
+	if ss == nil || rs == nil {
+		return
+	}
+	discovered := ss.GetAll("discovered.endpoint.")
+	if len(discovered) == 0 {
+		return
+	}
+	corpusPath := strings.TrimSpace(rs.URLs.All)
+	if corpusPath == "" {
+		return
+	}
+	f, err := os.OpenFile(corpusPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	for _, ep := range discovered {
+		ep = strings.TrimSpace(ep)
+		if ep != "" {
+			_, _ = fmt.Fprintln(w, ep)
+		}
+	}
+	_ = w.Flush()
 }
 
 // RegisteredModules returns the names of all exploit modules in registration order.

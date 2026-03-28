@@ -620,6 +620,238 @@ func TestFilterModulesByAuthContextQualitySkipsDualAuthModulesOnWeakContext(t *t
 	}
 }
 
+func TestStrengthCeilingRaised(t *testing.T) {
+	weaponizedCritical := models.ExploitFinding{
+		Validation: "weaponized",
+		Severity:   "CRITICAL",
+	}
+	if got := findingCorrelationStrength(weaponizedCritical); got != 6 {
+		t.Fatalf("expected weaponized+CRITICAL strength=6, got %d", got)
+	}
+
+	confirmedHigh := models.ExploitFinding{
+		Validation: "confirmed",
+		Severity:   "HIGH",
+	}
+	if got := findingCorrelationStrength(confirmedHigh); got != 4 {
+		t.Fatalf("expected confirmed+HIGH strength=4, got %d", got)
+	}
+}
+
+func TestChainConfirmedBonus(t *testing.T) {
+	findings := []models.ExploitFinding{
+		{
+			Module:     "open-redirect",
+			Validation: "confirmed",
+			Severity:   "HIGH",
+			Target:     "https://example.com/account/reset",
+		},
+		{
+			Module:     "http-method-tampering",
+			Validation: "confirmed",
+			Severity:   "HIGH",
+			Target:     "https://example.com/account/reset",
+		},
+	}
+	signals := buildCorrelationSignals(findings)
+	if got := signals.scopeOverlap["open-redirect|http-method-tampering"]; got != 7 {
+		t.Fatalf("expected chain-confirmed overlap strength=7, got %d", got)
+	}
+	if got := signals.chainStrength("open-redirect", "http-method-tampering"); got != 7 {
+		t.Fatalf("expected chainStrength=7, got %d", got)
+	}
+}
+
+func TestSharedStateUnlocksIDOR(t *testing.T) {
+	ss := exploit.NewSharedState()
+	ss.Set("object.id.0", "12345")
+	ss.Set("user.id", "42")
+
+	ready, reason := moduleReadyByCorrelation("idor-playbook", correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}, models.ReconSummary{}, Options{SharedState: ss})
+	if !ready {
+		t.Fatalf("expected idor-playbook to unlock from shared state, reason=%q", reason)
+	}
+	if !strings.Contains(reason, "SharedState") {
+		t.Fatalf("expected SharedState reason, got %q", reason)
+	}
+}
+
+func TestTightenedNoConstraintModules(t *testing.T) {
+	emptySignals := correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
+	rs := models.ReconSummary{}
+
+	for _, module := range []string{"lfi", "hostheader", "hpp", "xxeinjection"} {
+		ready, reason := moduleReadyByCorrelation(module, emptySignals, rs, Options{})
+		if ready {
+			t.Fatalf("expected %s to be skipped with empty signals/corpus, reason=%q", module, reason)
+		}
+	}
+
+	dir := t.TempDir()
+	corpus := filepath.Join(dir, "urls.txt")
+	if err := os.WriteFile(corpus, []byte("https://example.com/view?page=home\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs.URLs.All = corpus
+
+	ready, reason := moduleReadyByCorrelation("lfi", emptySignals, rs, Options{})
+	if !ready {
+		t.Fatalf("expected lfi to pass with file-style param in corpus, reason=%q", reason)
+	}
+}
+
+func TestLFIPassesWithFileParam(t *testing.T) {
+	dir := t.TempDir()
+	corpus := filepath.Join(dir, "urls.txt")
+	if err := os.WriteFile(corpus, []byte("https://example.com/read?file=/etc/passwd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := models.ReconSummary{}
+	rs.URLs.All = corpus
+	signals := correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
+	ready, reason := moduleReadyByCorrelation("lfi", signals, rs, Options{})
+	if !ready {
+		t.Fatalf("expected lfi to pass when corpus has file= param, reason=%q", reason)
+	}
+}
+
+func TestScopeOverlapBoostsCmdInject(t *testing.T) {
+	signals := correlationSignals{
+		modules: map[string]int{
+			"rxss": 2,
+		},
+		scopeByKey: map[string]struct{}{},
+		scopeOverlap: map[string]int{
+			"advanced-injection|rxss": 7,
+			"rxss|advanced-injection": 7,
+		},
+	}
+	ready, reason := moduleReadyByCorrelation("cmdinject", signals, models.ReconSummary{}, Options{})
+	if !ready {
+		t.Fatalf("expected cmdinject to pass from scope overlap, reason=%q", reason)
+	}
+	if !strings.Contains(strings.ToLower(reason), "co-located") {
+		t.Fatalf("expected co-located overlap reason, got %q", reason)
+	}
+}
+
+func TestPrecisionPriorLowersThreshold(t *testing.T) {
+	signals := correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
+
+	ready, _ := moduleReadyByCorrelation("auth-bypass", signals, models.ReconSummary{}, Options{})
+	if ready {
+		t.Fatalf("expected auth-bypass to fail with no signals and no priors")
+	}
+
+	signals.modules["auth-bypass"] = 1
+	priors := map[string]float64{"auth-bypass": 0.75}
+	ready, reason := moduleReadyByCorrelation("auth-bypass", signals, models.ReconSummary{}, Options{}, priors)
+	if !ready {
+		t.Fatalf("expected auth-bypass to pass with high precision prior and any signal, reason=%q", reason)
+	}
+	if !strings.Contains(strings.ToLower(reason), "precision prior") {
+		t.Fatalf("expected precision-prior reason, got %q", reason)
+	}
+}
+
+func TestEndpointPivotWritesCorpus(t *testing.T) {
+	dir := t.TempDir()
+	corpus := filepath.Join(dir, "urls.txt")
+	if err := os.WriteFile(corpus, []byte("https://example.com/existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rs := models.ReconSummary{}
+	rs.URLs.All = corpus
+
+	ss := exploit.NewSharedState()
+	ss.Set("discovered.endpoint.a1", "https://example.com/new-a")
+	ss.Set("discovered.endpoint.b2", "https://example.com/new-b")
+
+	enrichURLCorpusFromSharedState(&rs, ss)
+
+	b, err := os.ReadFile(corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if !strings.Contains(text, "https://example.com/new-a") || !strings.Contains(text, "https://example.com/new-b") {
+		t.Fatalf("expected discovered endpoints to be appended to corpus, got:\n%s", text)
+	}
+}
+
+func TestLiveReCorrelation(t *testing.T) {
+	// Initial merged signals have no redirect/header leads, so CRLF is skipped.
+	liveSignals := correlationSignals{
+		modules:      map[string]int{},
+		scopeByKey:   map[string]struct{}{},
+		scopeOverlap: map[string]int{},
+	}
+	reEvalPool := []exploit.Module{findRegisteredModule("crlf-injection")}
+	if reEvalPool[0] == nil {
+		t.Fatal("expected registered crlf-injection module instance")
+	}
+	rs := models.ReconSummary{}
+	precisionPriors := map[string]float64{}
+	proofStages := [][]exploit.Module{{testModule{name: "stage1-placeholder"}}}
+	executedProof := map[string]struct{}{}
+
+	// First proof stage emits a strong open-redirect finding.
+	scoutFinding := models.ExploitFinding{
+		Module:     "open-redirect",
+		Validation: "confirmed",
+		Severity:   "HIGH",
+		Target:     "https://example.com/account/reset",
+	}
+	stageFindings := []models.ExploitFinding{scoutFinding}
+	newSignals := buildCorrelationSignals(stageFindings)
+	liveSignals = mergeCorrelationSignals(liveSignals, newSignals)
+
+	var stillSkipped []exploit.Module
+	var nowReady []exploit.Module
+	for _, m := range reEvalPool {
+		name := strings.ToLower(strings.TrimSpace(m.Name()))
+		if _, done := executedProof[name]; done {
+			continue
+		}
+		ready, _ := moduleReadyByCorrelation(name, liveSignals, rs, Options{}, precisionPriors)
+		if ready {
+			nowReady = append(nowReady, m)
+		} else {
+			stillSkipped = append(stillSkipped, m)
+		}
+	}
+	reEvalPool = stillSkipped
+	if len(reEvalPool) != 0 {
+		t.Fatalf("expected no modules left in re-eval pool, got %d", len(reEvalPool))
+	}
+	if len(nowReady) == 0 {
+		t.Fatal("expected crlf-injection to unlock after stage1 signals")
+	}
+	nowReady = prioritizeProofModules(nowReady, liveSignals, rs, precisionPriors)
+	proofStages = append(proofStages, nowReady)
+
+	last := proofStages[len(proofStages)-1]
+	if len(last) != 1 || last[0].Name() != "crlf-injection" {
+		t.Fatalf("expected crlf-injection appended as new proof stage, got %v", moduleNames(last))
+	}
+}
+
 type testModule struct{ name string }
 
 func (m testModule) Name() string { return m.name }
