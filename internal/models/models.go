@@ -151,6 +151,8 @@ type ExploitModuleTelemetry struct {
 	Skipped       bool   `json:"skipped"`
 	SkippedReason string `json:"skipped_reason,omitempty"`
 	Canceled      bool   `json:"canceled"`
+	WAFBlocks     int    `json:"waf_blocks,omitempty"`
+	WAFBypasses   int    `json:"waf_bypasses,omitempty"`
 }
 
 type RuntimeEvent struct {
