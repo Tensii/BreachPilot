@@ -202,10 +202,13 @@ func main() {
 		<-c
 		fmt.Println("\n[!] Interrupt received, safely stopping... Waiting for active tasks and webhooks to finish.")
 		cancel()
-		// We purposefully do not call os.Exit(1) here.
-		// Canceling the context will cause the engine to unroll safely and return models.JobCancelled.
-		// The main routine will then hit the switch job.Status case to send the job.cancelled webhook,
-		// and the application will naturally exit cleanly.
+		
+		// If another interrupt is received, forcefully terminate immediately.
+		go func() {
+			<-c
+			fmt.Println("\n[!] Second interrupt received, forcing immediate exit!")
+			os.Exit(130)
+		}()
 	}()
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
