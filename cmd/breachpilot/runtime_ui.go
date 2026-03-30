@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"breachpilot/internal/models"
@@ -16,6 +17,7 @@ type moduleRuntimeState struct {
 }
 
 type cliRuntimeTracker struct {
+	mu               sync.Mutex
 	out              io.Writer
 	startedAt        time.Time
 	currentStage     string
@@ -48,6 +50,9 @@ func (t *cliRuntimeTracker) Handle(ev models.RuntimeEvent) {
 	if t == nil || t.out == nil {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	switch ev.Kind {
 	case "stage":
 		t.handleStage(ev)
