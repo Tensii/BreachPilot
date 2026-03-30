@@ -31,6 +31,7 @@ import (
 	advancedinjection "breachpilot/internal/exploit/modules/advancedinjection"
 	apisurface "breachpilot/internal/exploit/modules/apisurface"
 	authbypass "breachpilot/internal/exploit/modules/authbypass"
+	authpolicy "breachpilot/internal/exploit/modules/authpolicy"
 	autoregister "breachpilot/internal/exploit/modules/autoregister"
 	businesslogic "breachpilot/internal/exploit/modules/businesslogic"
 	bypasspoc "breachpilot/internal/exploit/modules/bypasspoc"
@@ -38,6 +39,7 @@ import (
 	cookiesecurity "breachpilot/internal/exploit/modules/cookiesecurity"
 	cors "breachpilot/internal/exploit/modules/cors"
 	crlfinjection "breachpilot/internal/exploit/modules/crlfinjection"
+	cryptoaudit "breachpilot/internal/exploit/modules/cryptoaudit"
 	cspaudit "breachpilot/internal/exploit/modules/cspaudit"
 	deserialization "breachpilot/internal/exploit/modules/deserialization"
 	dnscheck "breachpilot/internal/exploit/modules/dnscheck"
@@ -55,6 +57,7 @@ import (
 	infodisclosure "breachpilot/internal/exploit/modules/infodisclosure"
 	jsendpoints "breachpilot/internal/exploit/modules/jsendpoints"
 	jwtaccess "breachpilot/internal/exploit/modules/jwtaccess"
+	ldapinject "breachpilot/internal/exploit/modules/ldapinject"
 	lfi "breachpilot/internal/exploit/modules/lfi"
 	massassign "breachpilot/internal/exploit/modules/massassign"
 	mutationengine "breachpilot/internal/exploit/modules/mutationengine"
@@ -63,6 +66,7 @@ import (
 	portservice "breachpilot/internal/exploit/modules/portservice"
 	privpath "breachpilot/internal/exploit/modules/privpath"
 	racecondition "breachpilot/internal/exploit/modules/racecondition"
+	ratelimit "breachpilot/internal/exploit/modules/ratelimit"
 	rsqlinjection "breachpilot/internal/exploit/modules/rsqlinjection"
 	rxss "breachpilot/internal/exploit/modules/rxss"
 	samlprobe "breachpilot/internal/exploit/modules/samlprobe"
@@ -71,6 +75,7 @@ import (
 	sessionabuse "breachpilot/internal/exploit/modules/sessionabuse"
 	smuggling "breachpilot/internal/exploit/modules/smuggling"
 	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
+	sstiprober "breachpilot/internal/exploit/modules/sstiprober"
 	statechange "breachpilot/internal/exploit/modules/statechange"
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
@@ -134,6 +139,7 @@ type Options struct {
 	WebhookFindingsMinSeverity     string
 	ModuleTimeoutSec               int
 	ModuleRetries                  int
+	SafeMode                       bool
 	AggressiveMode                 bool
 	BoundlessMode                  bool
 	ProofMode                      bool
@@ -2921,6 +2927,11 @@ func registeredModuleInfos() []ModuleInfo {
 		{"rsql-injection", "Detects RSQL/FIQL-style injection in parameters", true, "exploit-core"},
 		{"idor-size", "Response size-based IDOR detection", true, "exploit-core"},
 		{"idor_engine", "Dual-user automated IDOR detection engine", true, "exploit-core"},
+		{"sstiprober", "Detects Server-Side Template Injection via math expressions", true, "exploit-core"},
+		{"ldapinject", "Detects LDAP injection in queries via boolean and error markers", true, "exploit-core"},
+		{"ratelimit", "Detects lack of rate-limits or bypassable limits on auth surfaces", true, "exploit-core"},
+		{"authpolicy", "Validates password policies and discovers username enumeration", true, "exploit-core"},
+		{"cryptoaudit", "Reviews sensitive data transmission and crypto/HTTP downgrade issues", true, "context"},
 	}
 }
 
@@ -2973,6 +2984,10 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		domxss.New(),
 		smuggling.New(),
 		deserialization.New(),
+		sstiprober.New(),
+		ldapinject.New(),
+		ratelimit.New(),
+		authpolicy.New(),
 	}
 }
 
@@ -2987,6 +3002,7 @@ func registeredContextModuleInstances() []exploit.Module {
 		dnscheck.New(),
 		cspaudit.New(),
 		httpresponse.New(),
+		cryptoaudit.New(),
 	}
 }
 
@@ -3211,6 +3227,17 @@ func moduleReadyForExecution(name string, rs models.ReconSummary, opt Options) (
 			return true, "SSO hints in live host inventory"
 		}
 		return false, "requires SSO hints or URL corpus"
+	case "sstiprober", "ldapinject":
+		return opt.AggressiveMode && (hasURLs || hasRankedEndpoints), "requires aggressive mode and URL or endpoint corpus"
+	case "ratelimit":
+		if opt.SafeMode {
+			return false, "skipped in safe mode"
+		}
+		return hasURLs || hasRankedEndpoints, "URL or endpoint corpus available"
+	case "authpolicy":
+		return hasURLs || hasRankedEndpoints, "URL or endpoint corpus available"
+	case "cryptoaudit":
+		return hasURLs || hasLiveHosts, "URL or host corpus available"
 	default:
 		return true, "no planner constraint"
 	}

@@ -250,6 +250,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		WebhookFindingsMinSeverity:     cfg.WebhookFindingsMinSeverity,
 		ModuleTimeoutSec:               cfg.ModuleTimeoutSec,
 		ModuleRetries:                  cfg.ModuleRetries,
+		SafeMode:                       !cfg.AggressiveMode,
 		AggressiveMode:                 cfg.AggressiveMode,
 		BoundlessMode:                  cfg.BoundlessMode,
 		ProofMode:                      cfg.ProofMode,
