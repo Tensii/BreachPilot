@@ -29,17 +29,44 @@ import (
 )
 
 func main() {
+	config.BootstrapEnvironment()
 	cfg := config.Load()
-	if err := cfg.Validate(); err != nil {
-		log.Fatal(err)
-	}
+	
 	args := os.Args[1:]
+	firstArg := ""
+	if len(args) > 0 {
+		firstArg = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+
+	// For standard scan commands, ensure dependencies are present.
+	// Skip for help, setup, and doctor commands which handle their own validation or are used for fixes.
+	isStandardCommand := len(args) > 0 && 
+		firstArg != "setup" && 
+		firstArg != "doctor" && 
+		firstArg != "browser-check" && 
+		firstArg != "help" && 
+		firstArg != "--help" && 
+		firstArg != "-h"
+
+	if isStandardCommand && !cfg.SkipNuclei {
+		if err := config.EnsureDependencies(cfg.NucleiBin, cfg.ReconHarvestCmd); err != nil {
+			log.Printf("[!] Bootstrap failed: %v", err)
+			log.Fatal("Fatal: core dependencies missing. Run 'breachpilot setup' or install tools manually.")
+		}
+	}
+
+	if err := cfg.Validate(); err != nil {
+		// Only fatal-fail if it's not a setup command (setup should try to fix things)
+		if firstArg != "setup" && firstArg != "doctor" {
+			log.Fatal(err)
+		}
+	}
+
 	if len(args) == 0 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	firstArg := strings.ToLower(strings.TrimSpace(args[0]))
 	if firstArg == "help" || firstArg == "--help" || firstArg == "-h" {
 		printUsage()
 		return
@@ -796,6 +823,27 @@ func loadManifest(manifestPath string) (struct {
 
 func runSetup(opt engine.Options) error {
 	fmt.Println("\x1b[36m[SETUP] initializing breachpilot runtime checks...\x1b[0m")
+	
+	// Attempt to fix missing dependencies first.
+	if err := config.EnsureDependencies(opt.NucleiBin, opt.ReconHarvestCmd); err != nil {
+		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m auto-bootstrap encountered issues: %v\n", err)
+	}
+
+	// Make tools globally accessible in /usr/local/bin if possible.
+	fmt.Println("[*] Ensuring tools are globally accessible in /usr/local/bin...")
+	home, _ := os.UserHomeDir()
+	goBin := filepath.Join(home, "go", "bin")
+	if files, err := os.ReadDir(goBin); err == nil {
+		for _, f := range files {
+			if !f.IsDir() {
+				src := filepath.Join(goBin, f.Name())
+				dst := filepath.Join("/usr/local/bin", f.Name())
+				// Try to symlink. This might fail if not root, but EnsureDependencies already helps.
+				_ = exec.Command("sudo", "ln", "-sf", src, dst).Run()
+			}
+		}
+	}
+
 	checks := []struct {
 		name string
 		cmd  []string
@@ -830,6 +878,8 @@ func runSetup(opt engine.Options) error {
 		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m browser not ready: %s\n", status)
 	}
 	fmt.Println("\x1b[36m[SETUP] done. system armed.\x1b[0m")
+	fmt.Println("[*] Tip: Ensure ~/.local/bin is in your shell's PATH for future use:")
+	fmt.Println("    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc")
 	return nil
 }
 
