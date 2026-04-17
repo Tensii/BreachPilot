@@ -136,46 +136,41 @@ Behavior summary:
 - CLI options such as `aggressive` and `boundless` apply only to the current command.
 - CLI options can enable a mode for one run even if the env default is `false`.
 
-## Profiles
-- `quick`: fast surface scan
-- `standard`: balanced default
-- `exploit`: proof-oriented exploit modules only
-- `deep`: broader, slower run
+## ⚙️ Configuration & Environment
 
-`BREACHPILOT_ONLY_MODULES` and `BREACHPILOT_SKIP_MODULES` override the selected profile.
+BreachPilot uses environment variables for configuration. It automatically loads `./breachpilot.env`, which can be overridden via `BREACHPILOT_CONFIG=/path/to/file`.
 
-## Important Environment Variables
-- `BREACHPILOT_SCAN_PROFILE`
-- `BREACHPILOT_AGGRESSIVE`
-- `BREACHPILOT_BOUNDLESS`
-- `BREACHPILOT_PROOF_MODE`
-- `BREACHPILOT_PROOF_TARGET_ALLOWLIST`
-- `BREACHPILOT_ONLY_MODULES`
-- `BREACHPILOT_SKIP_MODULES`
-- `BREACHPILOT_VALIDATION_ONLY`
-- `BREACHPILOT_MIN_SEVERITY`
-- `BREACHPILOT_REPORT_FORMATS`
-- `BREACHPILOT_PREVIOUS_REPORT`
-- `BREACHPILOT_RATE_LIMIT_RPS`
-- `BREACHPILOT_MODULE_TIMEOUT_SEC`
-- `BREACHPILOT_MODULE_RETRIES`
-- `BREACHPILOT_AUTH_USER_COOKIE`
-- `BREACHPILOT_AUTH_ADMIN_COOKIE`
+### Scan Profiles & Behavior
+- `BREACHPILOT_SCAN_PROFILE`: Choose `quick`, `standard`, `exploit`, or `deep`.
+- `BREACHPILOT_AGGRESSIVE`: Enable intrusive checks.
+- `BREACHPILOT_BOUNDLESS`: Remove timeouts for extensive scans.
+- `BREACHPILOT_PROOF_MODE`: Enable active exploitation and PoC generation (use only on owned targets!).
+
+### Filtering & Thresholds
+- `BREACHPILOT_ONLY_MODULES`: Comma-separated list of exact modules to run.
+- `BREACHPILOT_SKIP_MODULES`: Comma-separated list of modules to exclude.
+- `BREACHPILOT_MIN_SEVERITY`: Minimum severity to report (e.g., `HIGH`).
+- `BREACHPILOT_VALIDATION_ONLY`: Only run modules on previously found targets.
+
+### Authentication Context
+Providing context massively improves authenticated modules (e.g. IDOR, session abuse, auth-bypass):
+- `BREACHPILOT_AUTH_USER_COOKIE` / `BREACHPILOT_AUTH_ADMIN_COOKIE`
+- `BREACHPILOT_AUTH_USER_HEADERS` / `BREACHPILOT_AUTH_ADMIN_HEADERS`
 - `BREACHPILOT_AUTH_ANON_HEADERS`
-- `BREACHPILOT_AUTH_USER_HEADERS`
-- `BREACHPILOT_AUTH_ADMIN_HEADERS`
-- `BREACHPILOT_BROWSER_CAPTURE`
-- `BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES`
-- `BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS`
-- `BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS`
-- `BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS`
-- `BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE`
 
-Webhook support is available through:
-- `BREACHPILOT_WEBHOOK_RECON`
-- `BREACHPILOT_WEBHOOK_EXPLOIT`
-- `BREACHPILOT_WEBHOOK`
-- `BREACHPILOT_WEBHOOK_SECRET`
+### Headless Browser Capture
+- `BREACHPILOT_BROWSER_CAPTURE`: Set to `true` to enable screenshot evidence capture.
+- `BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES`: Limit the number of pages to capture per run.
+- `BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS`: Number of scrolls to capture full-page data.
+
+## 🔔 Webhooks & Notifications
+
+BreachPilot supports native rich-formatting for **Discord** and **Slack**. It automatically detects their webhook URLs and builds formatted embed cards with colors, tags, and severity levels. For other services, it sends a generic JSON payload.
+
+- `BREACHPILOT_WEBHOOK`: Default webhook for all notifications.
+- `BREACHPILOT_WEBHOOK_RECON`: (Optional) Separate webhook specifically for recon events.
+- `BREACHPILOT_WEBHOOK_EXPLOIT`: (Optional) Separate webhook specifically for exploit findings.
+- `BREACHPILOT_WEBHOOK_SECRET`: Used to sign payloads for generic webhooks.
 
 ## Outputs
 Each run writes artifacts under `artifacts/<target>/<run-id>/`.
