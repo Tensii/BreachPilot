@@ -69,13 +69,16 @@ func TestEngineFindsVulnerabilitiesOnMockTarget(t *testing.T) {
 		Target:    "from-summary",
 	}
 	err = Process(ctx, job, Options{
-		NucleiBin:      "true",
-		ArtifactsRoot:  tempDir,
-		SkipNuclei:     true,
-		AggressiveMode: true,
-		ProofMode:      false,
-		MinSeverity:    "",
-		OnlyModules:    "lfi,rxss",
+		NucleiBin:            "true",
+		ArtifactsRoot:        tempDir,
+		SkipNuclei:           true,
+		AggressiveMode:       true,
+		ProofMode:            false,
+		MinSeverity:          "",
+		OnlyModules:          "lfi,rxss",
+		OOBHTTPListenAddr:    "127.0.0.1:0",
+		OOBHTTPPublicBaseURL: "http://127.0.0.1",
+		OOBSweepWaitSec:      1,
 	})
 	if err != nil {
 		t.Fatal(err)

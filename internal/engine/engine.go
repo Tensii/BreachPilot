@@ -147,6 +147,7 @@ type Options struct {
 	OOBHTTPListenAddr              string
 	OOBHTTPPublicBaseURL           string
 	OOBPollWaitSec                 int
+	OOBSweepWaitSec                int
 	AuthUserCookie                 string
 	AuthAdminCookie                string
 	AuthAnonHeaders                string
@@ -649,6 +650,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		SharedState:                    sharedState,
 		WAFProfile:                     wafProfileRef,
 		OOBProvider:                    oobProvider,
+		OOBSweepWaitSec:                opt.OOBSweepWaitSec,
 	}
 
 	scoutFindings := make([]models.ExploitFinding, 0, 64)
