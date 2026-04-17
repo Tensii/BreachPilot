@@ -31,6 +31,15 @@ breachpilot file path/to/summary.json
 breachpilot resume artifacts/example.com/1/.breachpilot.state
 ```
 
+## 🔔 Webhooks & Notifications
+
+BreachPilot supports native rich-formatting for **Discord** and **Slack**. It automatically detects their webhook URLs and builds formatted embed cards with colors, tags, and severity levels. For other services, it sends a generic JSON payload.
+
+- `BREACHPILOT_WEBHOOK`: Default webhook for all notifications.
+- `BREACHPILOT_WEBHOOK_RECON`: (Optional) Separate webhook specifically for recon events.
+- `BREACHPILOT_WEBHOOK_EXPLOIT`: (Optional) Separate webhook specifically for exploit findings.
+- `BREACHPILOT_WEBHOOK_SECRET`: Used to sign payloads for generic webhooks.
+
 ## 📋 Commands
 
 - `breachpilot setup`: Performs initial dependency checks and basic tool installation.
@@ -163,14 +172,6 @@ Providing context massively improves authenticated modules (e.g. IDOR, session a
 - `BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES`: Limit the number of pages to capture per run.
 - `BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS`: Number of scrolls to capture full-page data.
 
-## 🔔 Webhooks & Notifications
-
-BreachPilot supports native rich-formatting for **Discord** and **Slack**. It automatically detects their webhook URLs and builds formatted embed cards with colors, tags, and severity levels. For other services, it sends a generic JSON payload.
-
-- `BREACHPILOT_WEBHOOK`: Default webhook for all notifications.
-- `BREACHPILOT_WEBHOOK_RECON`: (Optional) Separate webhook specifically for recon events.
-- `BREACHPILOT_WEBHOOK_EXPLOIT`: (Optional) Separate webhook specifically for exploit findings.
-- `BREACHPILOT_WEBHOOK_SECRET`: Used to sign payloads for generic webhooks.
 
 ## Outputs
 Each run writes artifacts under `artifacts/<target>/<run-id>/`.

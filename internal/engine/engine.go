@@ -506,7 +506,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	sharedState := exploit.NewSharedState()
 	opt.SharedState = sharedState
 	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
-	httpRuntime := httppolicy.NewRuntime(httppolicy.Config{
+	httpRuntime := httppolicy.NewRuntime(ctx, httppolicy.Config{
 		RateLimitRPS:            opt.RateLimitRPS,
 		MaxInFlight:             httpMaxInFlight,
 		Jitter:                  time.Duration(opt.HTTPJitterMS) * time.Millisecond,
