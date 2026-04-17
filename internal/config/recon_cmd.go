@@ -22,6 +22,7 @@ func ResolveReconHarvestCmd(configured string) string {
 		return configured
 	}
 	candidates := []string{
+		"python3 /usr/local/share/breachpilot/tools/reconharvest/reconHarvest.py",
 		"python3 ./tools/reconharvest/reconHarvest.py",
 		"python3 tools/reconharvest/reconHarvest.py",
 		"python3 ./reconHarvest.py",
@@ -42,7 +43,7 @@ func ProbeReconHarvestCapabilities(raw string) (ReconHarvestCapabilities, error)
 		return ReconHarvestCapabilities{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, argv[0], append(append([]string{}, argv[1:]...), "--help")...)

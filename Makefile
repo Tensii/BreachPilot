@@ -8,6 +8,23 @@ COVERAGE_THRESHOLD=50
 build:
 	go build -o $(BINARY) ./cmd/breachpilot
 
+install: build
+	@printf "\033[36m[*] Installing %s to /usr/local/bin...\033[0m\n" $(BINARY)
+	sudo install -m 755 $(BINARY) /usr/local/bin/$(BINARY)
+	@printf "\033[36m[*] Installing tools to /usr/local/share/breachpilot...\033[0m\n"
+	sudo mkdir -p /usr/local/share/breachpilot
+	sudo cp -rf --remove-destination tools /usr/local/share/breachpilot/
+	@printf "\033[32m[✓] Installed successfully.\033[0m\n\n"
+	@printf "\033[36m[*] Running initial setup and dependency check...\033[0m\n"
+	@/usr/local/bin/$(BINARY) setup
+
+uninstall:
+	@printf "\033[31m[-] Removing %s from /usr/local/bin...\033[0m\n" $(BINARY)
+	sudo rm -f /usr/local/bin/$(BINARY)
+	@printf "\033[31m[-] Removing tools from /usr/local/share/breachpilot...\033[0m\n"
+	sudo rm -rf /usr/local/share/breachpilot
+	@printf "\033[32m[✓] Uninstalled successfully.\033[0m\n\n"
+
 test:
 	go test ./...
 

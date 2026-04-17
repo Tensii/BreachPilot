@@ -32,6 +32,22 @@ func main() {
 	config.BootstrapEnvironment()
 	cfg := config.Load()
 	
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Println("\n[!] Interrupt received, safely stopping...")
+		cancel()
+		
+		go func() {
+			<-c
+			fmt.Println("\n[!] Second interrupt received, forcing immediate exit!")
+			os.Exit(130)
+		}()
+	}()
+
 	args := os.Args[1:]
 	firstArg := ""
 	if len(args) > 0 {
@@ -73,9 +89,8 @@ func main() {
 	}
 
 	if len(args) == 1 && args[0] == "setup" {
-		printStartupBanner(cfg)
 		engOpt := buildEngineOptions(cfg)
-		if err := runSetup(engOpt); err != nil {
+		if err := runSetup(ctx, engOpt); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -104,9 +119,15 @@ func main() {
 		return
 	}
 	if len(args) == 1 && args[0] == "doctor" {
-		printStartupBanner(cfg)
 		engOpt := buildEngineOptions(cfg)
-		if err := runDoctor(cfg, engOpt); err != nil {
+		if err := runDoctor(ctx, cfg, engOpt); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(args) == 1 && args[0] == "update-tools" {
+		engOpt := buildEngineOptions(cfg)
+		if err := runUpdateTools(ctx, engOpt); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -222,21 +243,6 @@ func main() {
 	defer rf.Stop()
 	engOpt.Notifier = nf
 
-	ctx, cancel := context.WithCancel(context.Background())
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		fmt.Println("\n[!] Interrupt received, safely stopping... Waiting for active tasks and webhooks to finish.")
-		cancel()
-		
-		// If another interrupt is received, forcefully terminate immediately.
-		go func() {
-			<-c
-			fmt.Println("\n[!] Second interrupt received, forcing immediate exit!")
-			os.Exit(130)
-		}()
-	}()
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
 		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, jsonOut); err != nil {
@@ -629,7 +635,7 @@ func persistJobReport(job *models.Job) error {
 	return nil
 }
 
-func runDoctor(cfg config.Config, opt engine.Options) error {
+func runDoctor(ctx context.Context, cfg config.Config, opt engine.Options) error {
 	fmt.Println("[doctor] running checks...")
 	ok := true
 	check := func(name string, err error) {
@@ -641,15 +647,17 @@ func runDoctor(cfg config.Config, opt engine.Options) error {
 		}
 	}
 
-	_, e1 := exec.LookPath("python3")
+	_, e1 := exec.CommandContext(ctx, "python3", "--version").Output()
 	check("python3 in PATH", e1)
-	_, e2 := exec.LookPath(opt.NucleiBin)
+	_, e2 := exec.CommandContext(ctx, opt.NucleiBin, "-version").Output()
 	check("nuclei in PATH", e2)
 	if strings.TrimSpace(opt.ReconHarvestCmd) == "" {
 		check("recon command configured", fmt.Errorf("BREACHPILOT_RECONHARVEST_CMD is empty"))
 	} else {
-		check("recon command executable", probeCommand(opt.ReconHarvestCmd, "--help"))
-		check("recon command compatible", checkReconCommandCompatibility(opt.ReconHarvestCmd))
+		resolved := config.ResolveReconHarvestCmd(opt.ReconHarvestCmd)
+		check("recon command executable", probeCommand(resolved, "--help"))
+		check("recon command compatible", checkReconCommandCompatibility(resolved))
+		fmt.Printf("[doctor] INFO recon cmd resolved to: %s\n", resolved)
 	}
 	check("artifacts writable", ensureWritableDir(opt.ArtifactsRoot))
 	check("recon webhook reachable", checkWebhookReachable(cfg.ReconWebhookURL))
@@ -659,6 +667,26 @@ func runDoctor(cfg config.Config, opt engine.Options) error {
 		return fmt.Errorf("doctor failed: fix issues above")
 	}
 	fmt.Println("[doctor] all checks passed")
+	return nil
+}
+
+func runUpdateTools(ctx context.Context, opt engine.Options) error {
+	fmt.Println("\x1b[36m[UPDATE] forcing update of all reconHarvest tools...\x1b[0m")
+	reconCmd := strings.TrimSpace(opt.ReconHarvestCmd)
+	if reconCmd == "" {
+		return fmt.Errorf("[update] recon command is empty")
+	}
+	args, err := config.SplitReconHarvestCommand(opt.ReconHarvestCmd)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, args[0], append(args[1:], "--update-tools")...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("[update] failed: %w", err)
+	}
+	fmt.Println("\x1b[32m[UPDATE ✓]\x1b[0m tools updated successfully")
 	return nil
 }
 
@@ -821,27 +849,12 @@ func loadManifest(manifestPath string) (struct {
 	return m, nil
 }
 
-func runSetup(opt engine.Options) error {
+func runSetup(ctx context.Context, opt engine.Options) error {
 	fmt.Println("\x1b[36m[SETUP] initializing breachpilot runtime checks...\x1b[0m")
 	
 	// Attempt to fix missing dependencies first.
-	if err := config.EnsureDependencies(opt.NucleiBin, opt.ReconHarvestCmd); err != nil {
+	if err := config.EnsureDependenciesWithContext(ctx, opt.NucleiBin, opt.ReconHarvestCmd); err != nil {
 		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m auto-bootstrap encountered issues: %v\n", err)
-	}
-
-	// Make tools globally accessible in /usr/local/bin if possible.
-	fmt.Println("[*] Ensuring tools are globally accessible in /usr/local/bin...")
-	home, _ := os.UserHomeDir()
-	goBin := filepath.Join(home, "go", "bin")
-	if files, err := os.ReadDir(goBin); err == nil {
-		for _, f := range files {
-			if !f.IsDir() {
-				src := filepath.Join(goBin, f.Name())
-				dst := filepath.Join("/usr/local/bin", f.Name())
-				// Try to symlink. This might fail if not root, but EnsureDependencies already helps.
-				_ = exec.Command("sudo", "ln", "-sf", src, dst).Run()
-			}
-		}
 	}
 
 	checks := []struct {
@@ -878,8 +891,6 @@ func runSetup(opt engine.Options) error {
 		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m browser not ready: %s\n", status)
 	}
 	fmt.Println("\x1b[36m[SETUP] done. system armed.\x1b[0m")
-	fmt.Println("[*] Tip: Ensure ~/.local/bin is in your shell's PATH for future use:")
-	fmt.Println("    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc")
 	return nil
 }
 
@@ -903,7 +914,7 @@ func probeCommand(raw string, extraArgs ...string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	args := append(append([]string{}, argv[1:]...), extraArgs...)
@@ -1076,6 +1087,7 @@ func renderStage(stage string) string {
 func printUsage() {
 	fmt.Println(`Usage:
 	  breachpilot setup
+	  breachpilot update-tools
 		  breachpilot full <target> [json] [aggressive] [boundless]
 		  breachpilot -l <targets.txt> full [json] [aggressive] [boundless]
 		  breachpilot file <summary.json> [json] [aggressive] [boundless]

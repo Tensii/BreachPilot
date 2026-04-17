@@ -1,48 +1,42 @@
 # BreachPilot
 
-BreachPilot is a CLI-first recon-to-exploit orchestrator.
+BreachPilot is a recon-to-exploit orchestrator. It automates the transition from surface discovery to targeted vulnerability verification, filtering out hardening noise to focus on real exploit candidates.
 
-It can:
-- run the full flow from recon to exploit
-- consume an existing `recon/summary.json`
-- score and filter findings into JSON, Markdown, HTML, and SARIF reports
-- focus on exploit-oriented modules instead of broad hardening noise
+## 🚀 Installation & Setup
 
-ReconHarvest is vendored under `tools/reconharvest/` for portable full-mode runs.
-
-## Quick Start
 ```bash
-# preflight checks
-./breachpilot setup
+# 1. Build and install globally to /usr/local/bin (requires sudo)
+make install
 
-# full run: recon + exploit
-./breachpilot full example.com
+# 2. (Optional) Force update all recon dependencies
+breachpilot update-tools
 
-# exploit from an existing recon summary
-./breachpilot file /absolute/path/to/recon/summary.json
-
-# resume an interrupted job
-./breachpilot resume artifacts/example.com/1/.breachpilot.state
-
-# per-run aggressive + boundless execution
-./breachpilot full example.com aggressive boundless
-
-# machine-readable output
-./breachpilot full example.com json
-
-# list available exploit modules
-./breachpilot list-modules
-
-# environment and dependency check
-./breachpilot doctor
+# 3. Verify everything is ready
+breachpilot doctor
 ```
 
-## Build
+## 🛠 Quick Start
+
 ```bash
-make build
-make vet
-make test
+# Run the full flow: Recon -> Nuclei -> Exploit Modules
+breachpilot full example.com
+
+# Run with Aggressive mode (enables OOB/more intrusive checks)
+breachpilot full example.com aggressive
+
+# Run from an existing recon summary (skips recon phase)
+breachpilot file path/to/summary.json
+
+# Resume an interrupted job
+breachpilot resume artifacts/example.com/1/.breachpilot.state
 ```
+
+## 📋 Commands
+
+- `breachpilot setup`: Performs initial dependency checks and basic tool installation.
+- `breachpilot update-tools`: Reinstalls/updates all underlying recon binaries (e.g. subfinder, naabu).
+- `breachpilot list-modules`: Shows all available exploit modules.
+- `breachpilot doctor`: Checks environment health and tool accessibility.
 
 ## Local Config
 Use:

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,38 +53,27 @@ func BootstrapEnvironment() {
 // EnsureDependencies checks if nuclei is in PATH. If not, it attempts to run 
 // the reconharvest bootstrap (usually by calling it with a non-destructive flag).
 func EnsureDependencies(nucleiBin string, reconCmd string) error {
-	if nucleiBin == "" {
-		nucleiBin = "nuclei"
-	}
-	
-	// If it's already in PATH, we're good.
-	if _, err := exec.LookPath(nucleiBin); err == nil {
-		return nil
-	}
+	return EnsureDependenciesWithContext(context.Background(), nucleiBin, reconCmd)
+}
 
-	fmt.Printf("[*] Core dependency %q not found in PATH.\n", nucleiBin)
-	fmt.Printf("[*] Attempting automatic bootstrap via reconharvest.py...\n")
+func EnsureDependenciesWithContext(ctx context.Context, nucleiBin string, reconCmd string) error {
+	fmt.Printf("[*] Verifying all external dependencies via reconHarvest...\n")
 
 	// Trigger reconharvest setup. reconharvest.py's main() bootstrap runs 
-	// before its argument parser if it detects missing core tools.
-	// We run it with --help so it doesn't do anything destructive.
+	// before its argument parser if it detects missing core tools, and it
+	// validates the entire suite of required binaries.
 	args, err := SplitReconHarvestCommand(ResolveReconHarvestCmd(reconCmd))
 	if err != nil {
 		return fmt.Errorf("failed to resolve recon command for bootstrap: %w", err)
 	}
 
-	cmd := exec.Command(args[0], append(args[1:], "--doctor")...)
+	cmd := exec.CommandContext(ctx, args[0], append(args[1:], "--doctor")...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("auto-bootstrap failed: %w (try running 'breachpilot setup' or installing manually)", err)
+		return fmt.Errorf("auto-bootstrap failed: %w (try running 'breachpilot update-tools' or installing manually)", err)
 	}
 
-	// Re-check after bootstrap.
-	if _, err := exec.LookPath(nucleiBin); err != nil {
-		return fmt.Errorf("dependency %q still missing after bootstrap: %w", nucleiBin, err)
-	}
-
-	fmt.Printf("[+] Dependency %q successfully installed and verified.\n", nucleiBin)
+	fmt.Printf("[+] All dependencies successfully verified.\n")
 	return nil
 }
