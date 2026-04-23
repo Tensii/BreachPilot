@@ -6100,9 +6100,6 @@ def main():
     if (not args.resume) and args.resume_from_stage:
         raise SystemExit("[!] --resume-from-stage can only be used with --resume.")
 
-    if args.doctor:
-        raise SystemExit(run_doctor())
-
     ensure_default_config(args.config)
     cfg = load_json_config(args.config)
     if args.parallel is None:
@@ -6138,16 +6135,20 @@ def main():
         log("[*] --update-tools: forcing reinstall of all tools")
     missing_core = detect_missing_core_tools_for_bootstrap()
     bootstrap_started_at = 0.0
-    if missing_core:
-        bootstrap_started_at = time.monotonic()
-        preview = ", ".join(missing_core[:8])
-        extra = "" if len(missing_core) <= 8 else ", ..."
-        log(f"[*] First-run tool bootstrap detected: missing core tools ({preview}{extra})")
-        log("[*] Installing recon toolchain now. This can take several minutes on a fresh machine.")
-    install_required_tools(tool_versions, skip_secrets=args.skip_secrets, force_update=args.update_tools)
-    if missing_core and bootstrap_started_at > 0:
-        elapsed = time.monotonic() - bootstrap_started_at
-        log(f"[+] First-run tool bootstrap completed in {elapsed:.1f}s")
+    if missing_core or args.update_tools:
+        if missing_core:
+            bootstrap_started_at = time.monotonic()
+            preview = ", ".join(missing_core[:8])
+            extra = "" if len(missing_core) <= 8 else ", ..."
+            log(f"[*] First-run tool bootstrap detected: missing core tools ({preview}{extra})")
+            log("[*] Installing recon toolchain now. This can take several minutes on a fresh machine.")
+        install_required_tools(tool_versions, skip_secrets=args.skip_secrets, force_update=args.update_tools)
+        if missing_core and bootstrap_started_at > 0:
+            elapsed = time.monotonic() - bootstrap_started_at
+            log(f"[+] First-run tool bootstrap completed in {elapsed:.1f}s")
+
+    if args.doctor:
+        raise SystemExit(run_doctor())
 
     if args.resume:
         workdir = Path(args.resume)

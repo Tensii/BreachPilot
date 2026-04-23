@@ -409,8 +409,15 @@ def install_puredns(force: bool = False) -> None:
     if not command_exists("massdns"):
         root = Path.home() / ".local/share/massdns"
         if not (root / ".git").exists():
+            shutil.rmtree(root, ignore_errors=True)
             run(["git", "clone", "--depth", "1", "https://github.com/blechschmidt/massdns.git", str(root)], check=False)
-        run(["make", "-C", str(root)], check=False)
+        else:
+            run(["git", "-C", str(root), "pull", "--ff-only"], check=False, quiet=True)
+        
+        env = os.environ.copy()
+        env.pop("MAKEFLAGS", None)
+        env.pop("MAKELEVEL", None)
+        subprocess.run(["make", "-C", str(root)], env=env, stdout=subprocess.DEVNULL)
         bin_path = root / "bin/massdns"
         if bin_path.exists():
             dest = Path.home() / ".local/bin/massdns"
