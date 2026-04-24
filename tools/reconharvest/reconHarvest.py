@@ -547,7 +547,7 @@ class HackerDashboard:
             "nuclei_findings": 0, "hosts_401_403": 0, "legacy_hosts": 0,
             "throttled_hosts": 0, "skipped_hosts": 0,
             "resolved": 0, "subfinder_count": 0, "assetfinder_count": 0,
-            "probed_hosts": 0, "nuclei_findings_phase1": 0, "nuclei_findings_phase2": 0, "secrets_findings": 0, "takeover_findings": 0, "cors_findings": 0,
+            "probed_hosts": 0, "nuclei_findings_phase1": 0, "nuclei_findings_phase2": 0, "secrets_findings": 0, "takeover_findings": 0,
             "xss_findings": 0, "bypass_403_findings": 0, "graphql_findings": 0, "github_dork_hits": 0,
         }
         self.context = {
@@ -678,7 +678,7 @@ class HackerDashboard:
         triage.add_row("Nuclei P2", self._metric("nuclei_findings_phase2", "nuclei_phase2", "yellow"))
         triage.add_row("Takeover", self._metric("takeover_findings", "takeover", "yellow"))
         triage.add_row("Secrets Hits", self._metric("secrets_findings", "secrets", "yellow"))
-        triage.add_row("CORS", self._metric("cors_findings", "cors", "red"))
+
         triage.add_row("XSS", self._metric("xss_findings", "xss_scan", "red"))
         triage.add_row("403 Bypass", self._metric("bypass_403_findings", "bypass_403", "red"))
         triage.add_row("GraphQL Open", self._metric("graphql_findings", "graphql", "yellow"))
@@ -941,10 +941,10 @@ class ReconConfig:
     secrets_js_cap: int = 200
     secrets_sf_cap: int = 50
     secrets_download_delay: float = 0.15
-    cors_timeout: int = 8
+
     skip_secrets: bool = False
     skip_takeover: bool = False
-    skip_cors: bool = False
+
     naabu_ports: str = "80,443,8080,8443,8888,8008,9090,9443,3000,4000,5000,6000,7000,8000,9000,9200,9300,10000,27017,3306,5432,6379"
     naabu_rate: int = 1000
     naabu_timeout: int = 300
@@ -1028,7 +1028,7 @@ def validate_target(value: str) -> bool:
 # STAGE_ORDER drives --resume-from-stage state marker resets and includes internal discovery sub-phases.
 STAGE_ORDER = [
     "osint", "nuclei_templates", "subdomains", "dns_bruteforce",
-    "dnsx", "takeover", "httpx", "vhost_fuzz", "portscan", "screenshots", "cors",
+    "dnsx", "takeover", "httpx", "vhost_fuzz", "portscan", "screenshots",
     "discovery_dirsearch", "discovery_ffuf_dirs", "discovery_ffuf_files", "discovery",
     "bypass_403", "graphql", "urls", "param_discovery",
     "tech", "tech_host_mapping", "nuclei_phase1", "xss_scan", "secrets", "github_dork",
@@ -1038,7 +1038,7 @@ STAGE_ORDER = [
 # PIPELINE_STAGES is the user-facing dashboard pipeline order (top-level stages only).
 PIPELINE_STAGES = [
     "osint", "nuclei_templates", "subdomains", "dns_bruteforce", "dnsx", "takeover",
-    "httpx", "vhost_fuzz", "portscan", "screenshots", "cors", "discovery", "bypass_403", "graphql",
+    "httpx", "vhost_fuzz", "portscan", "screenshots", "discovery", "bypass_403", "graphql",
     "urls", "param_discovery", "tech", "tech_host_mapping", "nuclei_phase1", "xss_scan",
     "secrets", "github_dork", "nuclei_phase2", "endpoint_ranking",
 ]
@@ -1052,7 +1052,7 @@ assert all(
 
 
 class Runner:
-    def __init__(self, target: str, workdir: Path, parallel: int, config: ReconConfig | None = None, dashboard: NullDashboard | HackerDashboard | None = None, *, skip_nuclei: bool = False, skip_gau: bool = False, skip_secrets: bool = False, skip_takeover: bool = False, skip_cors: bool = False, force_update_templates: bool = False, nuclei_severity: str = "", nuclei_tags: str = ""):
+    def __init__(self, target: str, workdir: Path, parallel: int, config: ReconConfig | None = None, dashboard: NullDashboard | HackerDashboard | None = None, *, skip_nuclei: bool = False, skip_gau: bool = False, skip_secrets: bool = False, skip_takeover: bool = False, force_update_templates: bool = False, nuclei_severity: str = "", nuclei_tags: str = ""):
         self.target = normalize_target(target)
         self.workdir = workdir
         self.parallel = parallel
@@ -1062,7 +1062,7 @@ class Runner:
         self.skip_gau = skip_gau
         self.skip_secrets = bool(skip_secrets or self.config.skip_secrets)
         self.skip_takeover = bool(skip_takeover or self.config.skip_takeover)
-        self.skip_cors = bool(skip_cors or self.config.skip_cors)
+
         self.force_update_templates = bool(force_update_templates)
         self.nuclei_severity = nuclei_severity
         self.nuclei_tags = nuclei_tags
@@ -1357,7 +1357,7 @@ class Runner:
         self.write_md_report(reports / "secrets.md", f"Secrets — {self.target}", [_read(self.intel / "secrets_findings.md")])
         self.write_md_report(reports / "takeover.md", f"Takeover — {self.target}", [_read(self.workdir / "takeover_readable.md")])
         self.write_md_report(reports / "nuclei.md", f"Nuclei — {self.target}", [_read(self.workdir / "nuclei_readable.md"), _read(self.workdir / "nuclei_phase2_readable.md")])
-        self.write_md_report(reports / "vuln_surface.md", f"Vulnerability Surface — {self.target}", [_read(self.intel / "cors_findings.md"), _json_lines(self.intel / "bypass_403_findings.json", "403 Bypass"), _json_lines(self.intel / "xss_findings.json", "XSS"), _json_lines(self.intel / "graphql_findings.json", "GraphQL")])
+        self.write_md_report(reports / "vuln_surface.md", f"Vulnerability Surface — {self.target}", [_json_lines(self.intel / "bypass_403_findings.json", "403 Bypass"), _json_lines(self.intel / "xss_findings.json", "XSS"), _json_lines(self.intel / "graphql_findings.json", "GraphQL")])
 
         ranked_findings = self.prioritize_findings(self.dedup_findings(self.findings))
         findings_lines = []
@@ -1812,86 +1812,7 @@ class Runner:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def _fetch_cors_headers(self, url: str, origin: str) -> tuple[str, str] | None:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": _JS_USER_AGENTS[0],
-            "Origin": origin,
-        })
-        headers = None
-        for attempt in range(1, 3):
-            try:
-                with urllib.request.urlopen(req, timeout=self.config.cors_timeout) as r:
-                    headers = r.headers
-                break
-            except urllib.error.HTTPError as e:
-                headers = e.headers
-                break
-            except Exception:
-                if attempt == 2:
-                    return None
-                _backoff_sleep(0.4, attempt)
-        if headers is None:
-            return None
-        return (headers.get("Access-Control-Allow-Origin", ""), headers.get("Access-Control-Allow-Credentials", ""))
 
-    def _check_cors(self, host: str) -> dict | None:
-        url = host.rstrip("/")
-        evil_origin = "https://evil-cors-probe.com"
-        ctrl_origin = "https://control-cors-probe.com"
-
-        first = self._fetch_cors_headers(url, evil_origin)
-        if not first:
-            return None
-        acao, acac = first
-        if evil_origin not in acao:
-            return None
-
-        second = self._fetch_cors_headers(url, ctrl_origin)
-        ctrl_reflects = bool(second and ctrl_origin in (second[0] or ""))
-        if not ctrl_reflects:
-            return None
-
-        severity = "HIGH" if acac.lower() == "true" else "MEDIUM"
-        confidence = 95 if severity == "HIGH" else 85
-        return {"host": host, "acao": acao, "acac": acac, "severity": severity, "confidence": confidence}
-
-    def stage_cors(self):
-        if self.is_done("cors"):
-            return
-        if self.skip_cors:
-            self.record_stage_status("cors", "skipped", "skip-cors enabled")
-            self.mark_done("cors")
-            return
-        live_hosts = self.workdir / "live_hosts.txt"
-        out_json = self.intel / "cors_findings.json"
-        out_md = self.intel / "cors_findings.md"
-        hosts = [x.strip() for x in live_hosts.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if live_hosts.exists() else []
-        findings: list[dict] = []
-        if hosts:
-            with ThreadPoolExecutor(max_workers=min(20, len(hosts))) as ex:
-                futs = {ex.submit(self._check_cors, h): h for h in hosts}
-                for fut in as_completed(futs):
-                    if SHUTTING_DOWN:
-                        break
-                    try:
-                        row = fut.result()
-                    except Exception:
-                        row = None
-                    if row:
-                        findings.append(row)
-        findings = sorted(findings, key=lambda r: (0 if r.get("severity") == "HIGH" else 1, r.get("host") or ""))
-        self.write_json(out_json, findings)
-        md = ["# CORS Misconfiguration Findings\n\n", "| Severity | Host | ACAO | Credentials Allowed |\n", "|---|---|---|---|\n"]
-        for r in findings:
-            md.append(f"| {esc_md_pipe(r.get('severity',''))} | {esc_md_pipe(r.get('host',''))} | {esc_md_pipe(r.get('acao',''))} | {esc_md_pipe(r.get('acac',''))} |\n")
-        out_md.write_text("".join(md), encoding="utf-8")
-        self.record_stage_status("cors", "completed", f"findings={len(findings)}")
-        for f in findings:
-            self.add_finding("cors", f.get("severity", "MEDIUM"), f.get("host", ""), "CORS misconfiguration", evidence=f"ACAO={f.get('acao','')} ACAC={f.get('acac','')}", confidence=int(f.get("confidence") or 80), tags=["cors"])
-        if findings:
-            self._notify(f"CORS findings={len(findings)}", status="warning", stage="cors", severity="HIGH")
-        self.write_live_findings()
-        self.mark_done("cors")
 
     def stage_httpx(self):
         if self.is_done("httpx"):
@@ -4111,14 +4032,7 @@ class Runner:
             "urls_revalidated_json": self.intel / "urls_revalidated.json",
             "recon_inventory_json": self.intel / "recon_inventory.json",
         }
-        cors_count = 0
-        cors_json = self.intel / "cors_findings.json"
-        if cors_json.exists():
-            try:
-                c = json.loads(cors_json.read_text(encoding="utf-8", errors="ignore"))
-                cors_count = len(c) if isinstance(c, list) else 0
-            except Exception:
-                cors_count = 0
+
         takeover_count = 0
         if paths["takeover_summary"].exists():
             try:
@@ -4140,7 +4054,7 @@ class Runner:
             f"- URLs (archive-only): **{self._count_lines(paths['urls_archive'])}**\n",
             f"- Nuclei findings (phase1): **{self._count_lines(paths['nuclei_phase1'])}**\n",
             f"- Takeover findings: **{takeover_count}**\n",
-            f"- CORS findings: **{cors_count}**\n",
+
             f"- XSS findings: **{self._count_json_list(self.cache / 'xss_findings.json')}**\n",
             f"- 403 bypass findings: **{self._count_json_list(self.cache / 'bypass_403_findings.json')}**\n",
             f"- GraphQL introspection open: **{self._count_json_list(self.cache / 'graphql_findings.json')}**\n",
@@ -4229,8 +4143,7 @@ class Runner:
                 "endpoints_ranked_md": str(self.intel / "endpoints_ranked.md"),
                 "endpoints_ranked_json": str(self.intel / "endpoints_ranked.json"),
                 "secrets_summary": str(self.intel / "secrets_summary.json"),
-                "cors_findings_md": str(self.intel / "cors_findings.md"),
-                "cors_findings_json": str(self.intel / "cors_findings.json"),
+
                 "secrets_findings_md": str(self.intel / "secrets_findings.md"),
                 "secrets_findings_json": str(self.intel / "secrets_findings.json"),
                 "portscan_results_json": str(self.workdir / "portscan_results.json"),
@@ -4281,14 +4194,7 @@ class Runner:
                 takeover_findings = int(to.get("nuclei_findings") or 0) + int(to.get("subzy_findings") or 0)
             except Exception:
                 takeover_findings = 0
-        cors_findings = 0
-        cors_json = self.intel / "cors_findings.json"
-        if cors_json.exists():
-            try:
-                data = json.loads(cors_json.read_text(encoding="utf-8", errors="ignore"))
-                cors_findings = len(data) if isinstance(data, list) else 0
-            except Exception:
-                cors_findings = 0
+
         subfinder_count = self._count_lines(self.workdir / "subfinder.txt")
         assetfinder_count = self._count_lines(self.workdir / "assetfinder.txt")
         resolved_count = self._count_lines(self.workdir / "resolved_subdomains.txt")
@@ -4380,7 +4286,7 @@ class Runner:
             "nuclei_findings_phase1": nuclei_findings,
             "nuclei_findings_phase2": nuclei_findings_phase2,
             "takeover_findings": takeover_findings,
-            "cors_findings": cors_findings,
+
             "hosts_401_403": hosts_401_403,
             "legacy_hosts": legacy_hosts,
             "throttled_hosts": throttled_hosts,
@@ -5131,7 +5037,7 @@ class Runner:
     def write_live_findings(self) -> None:
         out = self.workdir / "findings.md"
         sections=[]
-        for title, fn in [("## CORS Findings\n", self.intel / "cors_findings.json"), ("## 403 Bypasses\n", self.intel / "bypass_403_findings.json"), ("## XSS Findings\n", self.intel / "xss_findings.json"), ("## GraphQL Introspection Open\n", self.intel / "graphql_findings.json")]:
+        for title, fn in [("## 403 Bypasses\n", self.intel / "bypass_403_findings.json"), ("## XSS Findings\n", self.intel / "xss_findings.json"), ("## GraphQL Introspection Open\n", self.intel / "graphql_findings.json")]:
             if not fn.exists():
                 continue
             try:
@@ -5164,7 +5070,7 @@ class Runner:
             stats.get("nuclei_findings", 0)
             + stats.get("nuclei_findings_phase2", 0)
             + stats.get("secrets_findings", 0)
-            + stats.get("cors_findings", 0)
+
             + stats.get("xss_findings", 0)
             + stats.get("bypass_403_findings", 0)
             + stats.get("graphql_findings", 0)
@@ -5437,7 +5343,7 @@ class Runner:
             event_type = "run_error"
         elif st == "info" and stage == "startup":
             event_type = "run_started"
-        elif st == "warning" and stage in {"cors", "xss_scan", "bypass_403", "graphql", "github_dork"}:
+        elif st == "warning" and stage in {"xss_scan", "bypass_403", "graphql", "github_dork"}:
             event_type = "finding_detected"
 
         description = message
@@ -5509,7 +5415,7 @@ class Runner:
             ("vhost_fuzz", self.stage_vhost_fuzz),
             ("portscan", self.stage_portscan),
             ("screenshots", self.stage_screenshots),
-            ("cors", self.stage_cors),
+
             ("discovery", self.stage_discovery),
             ("bypass_403", self.stage_bypass_403),
             ("graphql", self.stage_graphql),
@@ -5573,7 +5479,7 @@ class Runner:
             stats = self.collect_stats()
             self._notify(
                 f"Run interrupted | live_hosts={stats.get('live_hosts',0)} "
-                f"endpoints={stats.get('endpoints',0)} findings={stats.get('nuclei_findings',0)+stats.get('nuclei_findings_phase2',0)+stats.get('secrets_findings',0)+stats.get('cors_findings',0)+stats.get('xss_findings',0)+stats.get('bypass_403_findings',0)+stats.get('graphql_findings',0)+stats.get('github_dork_hits',0)} "
+                f"endpoints={stats.get('endpoints',0)} findings={stats.get('nuclei_findings',0)+stats.get('nuclei_findings_phase2',0)+stats.get('secrets_findings',0)+stats.get('xss_findings',0)+stats.get('bypass_403_findings',0)+stats.get('graphql_findings',0)+stats.get('github_dork_hits',0)} "
                 f"summary={self.reports / 'summary.md'}",
                 status="interrupted",
                 stage="pipeline",
@@ -5588,7 +5494,7 @@ class Runner:
         stats = self.collect_stats()
         self._notify(
             f"Run completed | live_hosts={stats.get('live_hosts',0)} "
-            f"endpoints={stats.get('endpoints',0)} findings={stats.get('nuclei_findings',0)+stats.get('nuclei_findings_phase2',0)+stats.get('secrets_findings',0)+stats.get('cors_findings',0)+stats.get('xss_findings',0)+stats.get('bypass_403_findings',0)+stats.get('graphql_findings',0)+stats.get('github_dork_hits',0)} "
+            f"endpoints={stats.get('endpoints',0)} findings={stats.get('nuclei_findings',0)+stats.get('nuclei_findings_phase2',0)+stats.get('secrets_findings',0)+stats.get('xss_findings',0)+stats.get('bypass_403_findings',0)+stats.get('graphql_findings',0)+stats.get('github_dork_hits',0)} "
             f"summary={self.reports / 'summary.md'}",
             status="completed",
             stage="pipeline",
@@ -5611,7 +5517,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-gau", action="store_true")
     p.add_argument("--skip-secrets", action="store_true")
     p.add_argument("--skip-takeover", action="store_true")
-    p.add_argument("--skip-cors", action="store_true")
+
     p.add_argument("--skip-screenshots", action="store_true")
     p.add_argument("--screenshots-threads", type=int)
     p.add_argument("--screenshots-timeout", type=int)
@@ -5682,7 +5588,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--secrets-js-cap", type=int)
     p.add_argument("--secrets-sf-cap", type=int)
     p.add_argument("--secrets-download-delay", type=float)
-    p.add_argument("--cors-timeout", type=int)
+
     p.add_argument("--katana-timeout", type=int)
     p.add_argument("--gospider-timeout", type=int)
     p.add_argument("--hakrawler-timeout", type=int)
@@ -5820,7 +5726,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "secrets_js_cap": args.secrets_js_cap,
         "secrets_sf_cap": args.secrets_sf_cap,
         "secrets_download_delay": args.secrets_download_delay,
-        "cors_timeout": args.cors_timeout,
+
         "katana_timeout": args.katana_timeout,
         "gospider_timeout": args.gospider_timeout,
         "hakrawler_timeout": args.hakrawler_timeout,
@@ -5837,7 +5743,7 @@ def build_recon_config(args: argparse.Namespace, cfg: dict) -> ReconConfig:
         "gf_bucket_cap": args.gf_bucket_cap,
         "skip_secrets": args.skip_secrets,
         "skip_takeover": args.skip_takeover,
-        "skip_cors": args.skip_cors,
+
         "skip_portscan": args.skip_portscan,
         "naabu_rate": args.naabu_rate,
         "naabu_timeout": args.naabu_timeout,
@@ -5963,7 +5869,7 @@ def _setup_runner(
         skip_gau=args.skip_gau,
         skip_secrets=args.skip_secrets,
         skip_takeover=args.skip_takeover,
-        skip_cors=args.skip_cors,
+
         force_update_templates=args.force_update_templates,
         nuclei_severity=args.nuclei_severity,
         nuclei_tags=args.nuclei_tags,
@@ -6115,8 +6021,7 @@ def main():
         args.skip_secrets = True
     if not args.skip_takeover and str(cfg.get("SKIP_TOOLS", "")).find("takeover") >= 0:
         args.skip_takeover = True
-    if not args.skip_cors and str(cfg.get("SKIP_TOOLS", "")).find("cors") >= 0:
-        args.skip_cors = True
+
     if not args.skip_portscan and str(cfg.get("SKIP_TOOLS", "")).find("portscan") >= 0:
         args.skip_portscan = True
 
