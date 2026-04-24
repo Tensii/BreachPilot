@@ -1393,6 +1393,10 @@ func runReconHarvest(ctx context.Context, job *models.Job, opt Options, plan rec
 		argv := append([]string{}, plan.baseArgv...)
 		resumeDir := findPartialReconWorkdir(plan.reconDir)
 		if resumeDir != "" {
+			// Ensure resumeDir is relative to cmd.Dir (plan.reconDir) so reconHarvest can find it.
+			if rel, err := filepath.Rel(plan.reconDir, resumeDir); err == nil {
+				resumeDir = rel
+			}
 			// Pass --resume <workdir> so reconHarvest picks up its existing state.
 			// Do NOT pass -o or the target positional arg; reconHarvest derives both
 			// from workspace_meta.json when --resume is used.
