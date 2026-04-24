@@ -507,11 +507,16 @@ class NullDashboard:
         self.stats: dict[str, int] = {}
     def start(self) -> None: ...
     def stop(self) -> None: ...
-    def stage_start(self, stage: str) -> None: ...
-    def stage_done(self, stage: str, duration: float) -> None: ...
-    def set_stats(self, stats: dict[str, int]) -> None: ...
+    def stage_start(self, stage: str) -> None:
+        log(f"[*] Stage: {stage} [STARTED]")
+    def stage_done(self, stage: str, duration: float) -> None:
+        log(f"[*] Stage: {stage} [DONE] in {duration:.1f}s")
+    def set_stats(self, stats: dict[str, int]) -> None:
+        self.stats.update(stats)
     def set_context(self, **kwargs) -> None: ...
-    def add_event(self, text: str) -> None: ...
+    def add_event(self, text: str) -> None:
+        log(f"[*] Event: {text}")
+
 
 
 class HackerDashboard:
@@ -843,6 +848,8 @@ def log(message: str) -> None:
         SHARED_CONSOLE.print(message, markup=False)
     else:
         print(message)
+        sys.stdout.flush()
+
 
 
 def is_valid_output_name(name: str) -> bool:

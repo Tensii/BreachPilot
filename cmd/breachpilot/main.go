@@ -54,22 +54,9 @@ func main() {
 		firstArg = strings.ToLower(strings.TrimSpace(args[0]))
 	}
 
-	// For standard scan commands, ensure dependencies are present.
-	// Skip for help, setup, and doctor commands which handle their own validation or are used for fixes.
-	isStandardCommand := len(args) > 0 && 
-		firstArg != "setup" && 
-		firstArg != "doctor" && 
-		firstArg != "browser-check" && 
-		firstArg != "help" && 
-		firstArg != "--help" && 
-		firstArg != "-h"
-
-	if isStandardCommand && !cfg.SkipNuclei {
-		if err := config.EnsureDependencies(cfg.NucleiBin, cfg.ReconHarvestCmd); err != nil {
-			log.Printf("[!] Bootstrap failed: %v", err)
-			log.Fatal("Fatal: core dependencies missing. Run 'breachpilot setup' or install tools manually.")
-		}
-	}
+	// Dependency verification is intentionally skipped for scan commands (full, file, resume).
+	// It only runs during: setup (via runSetup), doctor (via runDoctor), update-tools (via runUpdateTools).
+	// This prevents the full --doctor output from printing before every scan.
 
 	if err := cfg.Validate(); err != nil {
 		// Only fatal-fail if it's not a setup command (setup should try to fix things)
@@ -979,13 +966,6 @@ func printStartupBanner(cfg config.Config) {
 	bold := "\x1b[1m"
 	reset := "\x1b[0m"
 
-	redact := func(v string) string {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return "<empty>"
-		}
-		return "<set>"
-	}
 	minSev := strings.TrimSpace(cfg.MinSeverity)
 	if minSev == "" {
 		minSev = "none"
@@ -1003,14 +983,7 @@ func printStartupBanner(cfg config.Config) {
 	if len(modes) == 0 {
 		modes = append(modes, "standard")
 	}
-	reconTimeoutLabel := fmt.Sprintf("%ds", cfg.ReconTimeoutSec)
-	nucleiTimeoutLabel := fmt.Sprintf("%ds", cfg.NucleiTimeoutSec)
-	moduleTimeoutLabel := fmt.Sprintf("%ds", cfg.ModuleTimeoutSec)
-	if cfg.BoundlessMode {
-		reconTimeoutLabel = "off(boundless)"
-		nucleiTimeoutLabel = "off(boundless)"
-		moduleTimeoutLabel = "off(boundless)"
-	}
+
 
 	fmt.Println(magenta + "╔══════════════════════════════════════════════════════════════════════════╗" + reset)
 	fmt.Println(magenta + "║" + bold + "  BREACHPILOT // RED-TEAM TERMINAL                                  " + reset + magenta + "║" + reset)
@@ -1020,13 +993,8 @@ func printStartupBanner(cfg config.Config) {
 	fmt.Printf("%s│%s mode=%s  profile=%s  min_severity=%s\n", gray, reset, strings.Join(modes, ","), emptyAs(cfg.ScanProfile, "none"), minSev)
 	fmt.Printf("%s│%s skip_nuclei=%t  browser_capture=%t  only=%s  skip=%s\n", gray, reset, cfg.SkipNuclei, cfg.BrowserCaptureEnabled, emptyAs(cfg.OnlyModules, "none"), emptyAs(cfg.SkipModules, "none"))
 	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", gray, reset)
-	fmt.Printf("%s┌─ RUNTIME ───────────────────────────────────────────────────────────────┐%s\n", cyan, reset)
-	fmt.Printf("%s│%s nuclei=%s  rps=%d  module_timeout=%s\n", cyan, reset, cfg.NucleiBin, cfg.RateLimitRPS, moduleTimeoutLabel)
-	fmt.Printf("%s│%s recon_timeout=%s  nuclei_timeout=%s  recon_retries=%d\n", cyan, reset, reconTimeoutLabel, nucleiTimeoutLabel, cfg.ReconRetries)
-	fmt.Printf("%s│%s webhooks(recon/exploit)=%s/%s retries=%d\n", cyan, reset, redact(cfg.ReconWebhookURL), redact(cfg.ExploitWebhookURL), cfg.WebhookRetries)
-	fmt.Printf("%s│%s webhook_reliable=%t queue_timeout_ms=%d spool=%s\n", cyan, reset, cfg.WebhookReliableMode, cfg.WebhookQueueBlockTimeoutMS, emptyAs(cfg.WebhookSpoolPath, "auto/off"))
-	fmt.Printf("%s│%s artifacts=%s  reports=%s\n", cyan, reset, cfg.ArtifactsRoot, emptyAs(cfg.ReportFormats, "json,md,bbmd,bbpdf,html"))
-	fmt.Printf("%s└─────────────────────────────────────────────────────────────────────────┘%s\n", cyan, reset)
+	// Removed RUNTIME box to declutter startup output as requested.
+
 	if cfg.ProofMode {
 		liveAuth := (strings.TrimSpace(cfg.AuthUserCookie) != "" || strings.TrimSpace(cfg.AuthUserHeaders) != "") &&
 			(strings.TrimSpace(cfg.AuthAdminCookie) != "" || strings.TrimSpace(cfg.AuthAdminHeaders) != "")

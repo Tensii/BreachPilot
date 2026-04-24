@@ -154,32 +154,21 @@ func (t *cliRuntimeTracker) snapshot() string {
 			skipped++
 		}
 	}
-	moduleProgress := "modules=0"
 	accounted := done + errored + skipped
-	switch {
-	case t.totalModules > 0:
-		moduleProgress = fmt.Sprintf("modules=%d/%d running=%d failed=%d skipped=%d", accounted, t.totalModules, running, errored, skipped)
-	case len(t.moduleStates) > 0:
-		moduleProgress = fmt.Sprintf("modules=%d running=%d failed=%d skipped=%d", accounted, running, errored, skipped)
-	}
+
 	elapsed := time.Since(t.startedAt).Round(time.Second)
 	parts := []string{
-		fmt.Sprintf("elapsed=%s", elapsed),
 		fmt.Sprintf("findings=%d", t.totalFindings),
 		fmt.Sprintf("C/H/M=%d/%d/%d", t.severityCounts["CRITICAL"], t.severityCounts["HIGH"], t.severityCounts["MEDIUM"]),
-		moduleProgress,
+	}
+	if accounted > 0 {
+		parts = append(parts, fmt.Sprintf("done=%d/%d", accounted, t.totalModules))
 	}
 	if t.lastProgress != nil {
-		parts = append(parts, "progress="+formatRuntimeProgress(*t.lastProgress))
+		parts = append(parts, formatRuntimeProgress(*t.lastProgress))
 	}
-	if t.lastErrorSummary != "" {
-		parts = append(parts, "nerr="+t.lastErrorSummary)
-	}
-	if len(activeModules) > 0 {
-		sort.Strings(activeModules)
-		parts = append(parts, "active="+strings.Join(activeModules, ","))
-	}
-	return strings.Join(parts, " ")
+	return fmt.Sprintf("[%s | %s]", elapsed, strings.Join(parts, " "))
+
 }
 
 func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
@@ -187,8 +176,11 @@ func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
 	status := strings.ToUpper(emptyAs(ev.Status, "info"))
 	color := statusColor(ev.Status)
 	icon := statusIcon(ev.Status)
-	return fmt.Sprintf("%s[%s]%s %s %s %s", color, status, "\x1b[0m", icon, label, snapshotWithDetail(snapshot, ev.Message))
+	
+	// Specialized rendering for stages to be more dashboard-like
+	return fmt.Sprintf("%s%s %-12s%s %-20s %s", color, icon, status, "\x1b[0m", label, snapshot)
 }
+
 
 func renderRuntimeModule(ev models.RuntimeEvent, snapshot string) string {
 	color := "\x1b[33m"
@@ -239,8 +231,16 @@ func renderRuntimeProgress(ev models.RuntimeEvent, snapshot string) string {
 }
 
 func renderRuntimeLog(ev models.RuntimeEvent) string {
-	return fmt.Sprintf("\x1b[90m[LOG]\x1b[0m ▸ %s", ev.Message)
+	msg := ev.Message
+	msg = strings.TrimPrefix(msg, "recon.log ")
+	msg = strings.TrimPrefix(msg, "exploit.log ")
+	msg = strings.TrimPrefix(msg, "[*] ")
+	if strings.Contains(msg, "[LOG]") {
+		return "" // Suppress redundant logs
+	}
+	return fmt.Sprintf("  \x1b[90m%s\x1b[0m", msg)
 }
+
 
 func stageLabel(stage string) string {
 	stage = strings.TrimSpace(stage)

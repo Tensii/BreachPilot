@@ -73,7 +73,10 @@ func TestCLIRuntimeTrackerRendersProgressAndCounts(t *testing.T) {
 	if !strings.Contains(out, "C/H/M=1/0/0") {
 		t.Fatalf("expected severity counts in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "nerr=total=12 timeout=5 tls=3") {
-		t.Fatalf("expected nuclei error summary in snapshot, got:\n%s", out)
+	// The new UI format removed redundant labels like nerr= to stay clean.
+	// We check that the snapshot has the critical info instead.
+	if !strings.Contains(out, "findings=1") || !strings.Contains(out, "3s") {
+		t.Fatalf("expected clean snapshot in output, got:\n%s", out)
 	}
 }
+

@@ -2584,10 +2584,29 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		if line != "" {
 			msg := fmt.Sprintf("%s %s", w.stage, line)
 			progress := parseRuntimeLogProgress(w.stage, line)
+			isStage := false
+
+			// Detect stage transitions from reconHarvest output
+			if strings.Contains(line, "[*] Stage:") {
+				isStage = true
+				stageName := strings.TrimSpace(strings.TrimPrefix(strings.Split(line, "[STARTED]")[0], "[*] Stage:"))
+				stageName = strings.TrimSpace(strings.Split(stageName, "[DONE]")[0])
+				if w.eventCB != nil {
+					w.eventCB(models.RuntimeEvent{
+						Kind:      "stage",
+						Stage:     "recon." + strings.ToLower(stageName),
+						Status:    "running",
+						Message:   line,
+						Target:    w.target,
+						Timestamp: time.Now().UTC(),
+					})
+				}
+			}
+
 			if w.cb != nil {
 				w.cb(msg)
 			}
-			if w.eventCB != nil {
+			if w.eventCB != nil && !isStage {
 				w.eventCB(models.RuntimeEvent{
 					Kind:      "log",
 					Stage:     w.stage,
@@ -2598,7 +2617,9 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 					Progress:  progress,
 				})
 			}
+
 		}
+
 	}
 	return len(p), nil
 }
@@ -2613,10 +2634,28 @@ func (w *progressWriter) Flush() {
 	if line != "" {
 		msg := fmt.Sprintf("%s %s", w.stage, line)
 		progress := parseRuntimeLogProgress(w.stage, line)
+		isStage := false
+		// Detect stage transitions from reconHarvest output
+		if strings.Contains(line, "[*] Stage:") {
+			isStage = true
+			stageName := strings.TrimSpace(strings.TrimPrefix(strings.Split(line, "[STARTED]")[0], "[*] Stage:"))
+			stageName = strings.TrimSpace(strings.Split(stageName, "[DONE]")[0])
+			if w.eventCB != nil {
+				w.eventCB(models.RuntimeEvent{
+					Kind:      "stage",
+					Stage:     "recon." + strings.ToLower(stageName),
+					Status:    "running",
+					Message:   line,
+					Target:    w.target,
+					Timestamp: time.Now().UTC(),
+				})
+			}
+		}
+
 		if w.cb != nil {
 			w.cb(msg)
 		}
-		if w.eventCB != nil {
+		if w.eventCB != nil && !isStage {
 			w.eventCB(models.RuntimeEvent{
 				Kind:      "log",
 				Stage:     w.stage,
@@ -2628,6 +2667,8 @@ func (w *progressWriter) Flush() {
 			})
 		}
 	}
+
+
 }
 
 func runtimeStageProgress(label, unit string, completed, total int) *models.RuntimeProgress {
