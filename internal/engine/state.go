@@ -124,6 +124,14 @@ func (sm *StateManager) MarkNucleiCompleted() error {
 	return sm.saveLocked()
 }
 
+// SetNucleiResumeCfg saves the path to the nuclei resume.cfg file
+func (sm *StateManager) SetNucleiResumeCfg(cfgPath string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.NucleiResumeCfg = cfgPath
+	return sm.saveLocked()
+}
+
 // MarkModuleCompleted flags a specific custom module as finished.
 func (sm *StateManager) MarkModuleCompleted(moduleName string) error {
 	sm.mu.Lock()

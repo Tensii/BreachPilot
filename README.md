@@ -119,6 +119,27 @@ graph TD
     end
 ```
 
+### Project Structure
+```
+BreachPilot/
+├── cmd/breachpilot/     # CLI entry point & UI rendering
+├── internal/
+│   ├── config/          # ENV loading, recon command probing
+│   ├── engine/          # Core scan pipeline (recon → nuclei → modules → report)
+│   ├── exploit/         # Exploit module framework & 50+ modules
+│   ├── ingest/          # Recon summary parsing
+│   ├── models/          # Shared data types
+│   ├── notify/          # Webhook/Discord notifications
+│   ├── policy/          # Template safety policy
+│   ├── scope/           # Target validation
+│   ├── scoring/         # Risk scoring engine
+│   └── testutil/        # Test helpers
+├── tools/
+│   └── reconharvest/    # Vendored recon tool (Python)
+├── scripts/             # Setup & maintenance scripts
+└── examples/            # Trigger examples
+```
+
 ### Scan Lifecycle & State Machine
 
 BreachPilot manages its execution state using a persistent state machine defined in [internal/engine/state.go](file:///home/ubuntu/.openclaw/workspace/BreachPilot/internal/engine/state.go). This allows for job resumption and ensures each phase completes successfully before moving to the next.

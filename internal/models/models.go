@@ -39,6 +39,7 @@ type JobState struct {
 	LastUpdatedAt   string   `json:"last_updated_at"`
 	ReconCompleted  bool     `json:"recon_completed"`
 	NucleiCompleted bool     `json:"nuclei_completed"`
+	NucleiResumeCfg string   `json:"nuclei_resume_cfg,omitempty"`
 	ModulesFinished []string `json:"modules_finished"`
 }
 

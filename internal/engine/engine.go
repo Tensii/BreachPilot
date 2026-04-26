@@ -421,6 +421,78 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		notify("exploit.nuclei.skipped")
 	} else if sm.IsNucleiCompleted() && errOut == nil && stOut.Size() > 0 {
 		notify("exploit.nuclei.resumed")
+	} else if !sm.IsNucleiCompleted() && errOut == nil && stOut.Size() > 0 {
+		// Partial nuclei results exist from a previous interrupted run.
+		resumeCfg := sm.State().NucleiResumeCfg
+		if resumeCfg != "" && fileExists(resumeCfg) {
+			notify("exploit.nuclei.resumed")
+			exploitStart := time.Now()
+			nucleiCtx := ctx
+			cancelNuclei := func() {}
+			nucleiTimeoutSec := effectiveNucleiTimeoutSec(opt)
+			if nucleiTimeoutSec > 0 {
+				nucleiCtx, cancelNuclei = context.WithTimeout(ctx, time.Duration(nucleiTimeoutSec)*time.Second)
+			}
+			defer cancelNuclei()
+
+			// Use native nuclei resume
+			resumeArgs := []string{"-resume", resumeCfg}
+			cmd := exec.CommandContext(nucleiCtx, opt.NucleiBin, resumeArgs...)
+			logFile, err := os.OpenFile(outLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return err
+			}
+			defer logFile.Close()
+			errorTracker := newNucleiErrorTracker(job.Target, opt.Events)
+			stopErrorTracker := errorTracker.start(nucleiCtx, outErrors)
+			defer stopErrorTracker()
+			nucleiPW := &progressWriter{stage: "exploit.log", target: job.Target, cb: opt.Progress, eventCB: opt.Events}
+			mw := io.MultiWriter(logFile, nucleiPW)
+			cmd.Stdout = mw
+			cmd.Stderr = mw
+
+			nucleiErr := cmd.Run()
+			nucleiPW.Flush()
+			stopErrorTracker()
+
+			if nucleiErr != nil {
+				job.ExploitDurationSec += time.Since(exploitStart).Seconds()
+				if ctx.Err() == context.Canceled || nucleiCtx.Err() == context.DeadlineExceeded {
+					// Interrupted again, try to copy new resume.cfg
+					newCfg := copyNucleiResumeCfg(outLog, artDir)
+					if newCfg != "" {
+						_ = sm.SetNucleiResumeCfg(newCfg)
+					}
+					if ctx.Err() == context.Canceled {
+						job.Status = models.JobCancelled
+						job.FinishedAt = time.Now().UTC()
+						setJobError(job, "cancelled", "job cancelled")
+						_ = writeJobReport(job, opt.ArtifactsRoot)
+						return nil
+					}
+					job.Status = models.JobFailed
+					job.FinishedAt = time.Now().UTC()
+					setJobError(job, ErrTimeout, "nuclei timeout exceeded")
+					_ = writeJobReport(job, opt.ArtifactsRoot)
+					return nil
+				}
+				emit(models.RuntimeEvent{
+					Kind:    "stage",
+					Stage:   "exploit",
+					Status:  "warning",
+					Message: "exploit.warning nuclei exited non-zero with partial results; continuing",
+					Target:  job.Target,
+				})
+				setJobError(job, ErrExecution, fmt.Sprintf("nuclei exited non-zero; partial results accepted: %v", nucleiErr))
+			} else {
+				job.ExploitDurationSec += time.Since(exploitStart).Seconds()
+			}
+			_ = sm.MarkNucleiCompleted()
+		} else {
+			// No resume.cfg available, accept partial findings
+			notify("exploit.nuclei.partial-resume")
+			_ = sm.MarkNucleiCompleted()
+		}
 	} else {
 		notify("exploit.started")
 		exploitStart := time.Now()
@@ -451,6 +523,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		stopErrorTracker()
 		if nucleiErr != nil {
 			job.ExploitDurationSec = time.Since(exploitStart).Seconds()
+
+			// Extract and save resume.cfg path
+			cfgPath := copyNucleiResumeCfg(outLog, artDir)
+			if cfgPath != "" {
+				_ = sm.SetNucleiResumeCfg(cfgPath)
+			}
+
 			if ctx.Err() == context.Canceled {
 				job.Status = models.JobCancelled
 				job.FinishedAt = time.Now().UTC()
@@ -2671,7 +2750,6 @@ func (w *progressWriter) Flush() {
 			})
 		}
 	}
-
 
 }
 
