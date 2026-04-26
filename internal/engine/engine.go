@@ -125,6 +125,7 @@ type Options struct {
 	Progress                       func(string)
 	Events                         func(models.RuntimeEvent)
 	Notifier                       Notifier
+	InteractshNotifier             Notifier
 	PreviousReportPath             string
 	ReportFormats                  string
 	ScanProfile                    string
@@ -940,6 +941,27 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 					}
 					seenHit[key] = struct{}{}
 					collectedHits = append(collectedHits, hit)
+
+					// Real-time webhook push for interactsh interaction
+					if opt.InteractshNotifier != nil {
+						payload := map[string]any{
+							"job_id":           job.ID,
+							"target":           job.Target,
+							"correlation_meta": hit.CorrelationMeta,
+							"protocol":         hit.Protocol,
+							"source_ip":        hit.SourceIP,
+							"timestamp":        hit.Timestamp.UTC().Format(time.RFC3339Nano),
+							"q_type":           hit.QType,
+							"unique_id":        hit.UniqueID,
+							"full_id":          hit.FullId,
+							"raw_request":      hit.RawRequest,
+							"raw_response":     hit.RawResponse,
+						}
+						if len(hit.AsnInfo) > 0 {
+							payload["asn_info"] = hit.AsnInfo
+						}
+						opt.InteractshNotifier.SendGeneric("interactsh.interaction", payload)
+					}
 				}
 				_ = appendOOBHits(artDir, hits)
 			}
@@ -1028,6 +1050,16 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 				exploitFindings = append(exploitFindings, oobFinding)
 				rawExploitFindings = append(rawExploitFindings, oobFinding)
+
+				// Real-time webhook push for correlated interactsh finding
+				if opt.InteractshNotifier != nil {
+					opt.InteractshNotifier.SendGeneric("interactsh.finding", map[string]any{
+						"job_id":           job.ID,
+						"target":           job.Target,
+						"correlation_meta": hit.CorrelationMeta,
+						"finding":          oobFinding,
+					})
+				}
 			}
 		}
 	}
@@ -2293,7 +2325,14 @@ func appendOOBHits(artDir string, hits []oob.Hit) error {
 			"source_ip":        hit.SourceIP,
 			"correlation_meta": hit.CorrelationMeta,
 			"raw_request":      hit.RawRequest,
+			"raw_response":     hit.RawResponse,
+			"q_type":           hit.QType,
+			"unique_id":        hit.UniqueID,
+			"full_id":          hit.FullId,
 			"timestamp":        hit.Timestamp.UTC().Format(time.RFC3339Nano),
+		}
+		if len(hit.AsnInfo) > 0 {
+			record["asn_info"] = hit.AsnInfo
 		}
 		if err := enc.Encode(record); err != nil {
 			return err
@@ -5022,6 +5061,7 @@ func writeRuntimeConfigSnapshot(job *models.Job, opt Options) error {
 			"webhook_findings":                    opt.WebhookFindings,
 			"webhook_module_progress":             opt.WebhookModuleProgress,
 			"webhook_findings_min_severity":       opt.WebhookFindingsMinSeverity,
+			"webhook_interactsh":                  opt.InteractshNotifier != nil,
 			"has_auth_user_context":               strings.TrimSpace(opt.AuthUserCookie) != "" || strings.TrimSpace(opt.AuthUserHeaders) != "",
 			"has_auth_admin_context":              strings.TrimSpace(opt.AuthAdminCookie) != "" || strings.TrimSpace(opt.AuthAdminHeaders) != "",
 			"browser_capture":                     opt.BrowserCaptureEnabled,

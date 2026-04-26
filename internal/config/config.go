@@ -14,6 +14,7 @@ type Config struct {
 	WebhookURL                     string
 	ReconWebhookURL                string
 	ExploitWebhookURL              string
+	InteractshWebhookURL           string
 	WebhookSecret                  string
 	WebhookRetries                 int
 	WebhookReliableMode            bool
@@ -80,6 +81,7 @@ func Load() Config {
 
 	reconWH := os.Getenv("BREACHPILOT_WEBHOOK_RECON")
 	exploitWH := os.Getenv("BREACHPILOT_WEBHOOK_EXPLOIT")
+	interactshWH := os.Getenv("BREACHPILOT_WEBHOOK_INTERACTSH")
 	legacyWH := os.Getenv("BREACHPILOT_WEBHOOK")
 	if reconWH == "" {
 		reconWH = legacyWH
@@ -87,11 +89,15 @@ func Load() Config {
 	if exploitWH == "" {
 		exploitWH = legacyWH
 	}
+	if interactshWH == "" {
+		interactshWH = legacyWH
+	}
 
 	cfg := Config{
 		WebhookURL:                     legacyWH,
 		ReconWebhookURL:                reconWH,
 		ExploitWebhookURL:              exploitWH,
+		InteractshWebhookURL:           interactshWH,
 		WebhookSecret:                  os.Getenv("BREACHPILOT_WEBHOOK_SECRET"),
 		WebhookRetries:                 getEnvInt("BREACHPILOT_WEBHOOK_RETRIES", 3),
 		WebhookReliableMode:            getEnvBool("BREACHPILOT_WEBHOOK_RELIABLE_MODE", false),
@@ -312,8 +318,8 @@ func (c Config) RedactedSummary() string {
 	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s retries=%d webhookReliableMode=%t webhookQueueBlockTimeoutMs=%d webhookSpoolPath=%s nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), c.WebhookRetries, c.WebhookReliableMode, c.WebhookQueueBlockTimeoutMS, redact(c.WebhookSpoolPath), c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s interactshWebhook=%s retries=%d webhookReliableMode=%t webhookQueueBlockTimeoutMs=%d webhookSpoolPath=%s nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), redact(c.InteractshWebhookURL), c.WebhookRetries, c.WebhookReliableMode, c.WebhookQueueBlockTimeoutMS, redact(c.WebhookSpoolPath), c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
 }
 
 func normalizeReportFormats(raw string) string {

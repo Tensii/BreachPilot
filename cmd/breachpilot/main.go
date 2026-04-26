@@ -228,17 +228,32 @@ func main() {
 	}
 	rf.Start()
 	defer rf.Stop()
+	
+	isf := &notify.Webhook{
+		URL:          cfg.InteractshWebhookURL,
+		Secret:       cfg.WebhookSecret,
+		Retries:      cfg.WebhookRetries,
+		DebugLogPath: filepath.Join(cfg.ArtifactsRoot, "webhook_interactsh_debug.jsonl"),
+		FindingsCap:  cfg.WebhookFindingsCap,
+		ReliableMode: cfg.WebhookReliableMode,
+		QueueTimeout: time.Duration(cfg.WebhookQueueBlockTimeoutMS) * time.Millisecond,
+		SpoolPath:    webhookSpoolPath(cfg.WebhookSpoolPath, "interactsh"),
+	}
+	isf.Start()
+	defer isf.Stop()
+	
 	engOpt.Notifier = nf
+	engOpt.InteractshNotifier = isf
 
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
-		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, jsonOut); err != nil {
+		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, isf, jsonOut); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
-	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, jsonOut, listFile); err != nil {
+	if err := runCLIMode(ctx, filtered, engOpt, nf, rf, isf, jsonOut, listFile); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -301,7 +316,7 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 	}
 }
 
-func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool, listFile string) error {
+func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, isf *notify.Webhook, jsonOut bool, listFile string) error {
 	if len(args) == 0 && listFile == "" {
 		return fmt.Errorf("missing mode. Use: full <target> OR file <summary.json>")
 	}
@@ -337,10 +352,10 @@ func runCLIMode(ctx context.Context, args []string, opt engine.Options, nf *noti
 		targets = append(targets, strings.TrimSpace(args[1]))
 	}
 
-	return runJobsInBatch(ctx, mode, targets, opt, nf, rf, jsonOut)
+	return runJobsInBatch(ctx, mode, targets, opt, nf, rf, isf, jsonOut)
 }
 
-func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
+func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, isf *notify.Webhook, jsonOut bool) error {
 	for _, target := range targets {
 		select {
 		case <-ctx.Done():
@@ -431,7 +446,7 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 			nf.Send("job.completed", job)
 		}
 
-		applyWebhookDeliveryMetrics(job, nf, rf)
+		applyWebhookDeliveryMetrics(job, nf, rf, isf)
 		if job.WebhookDroppedEvents > 0 {
 			log.Printf("[webhook] %d non-critical events were dropped due to queue saturation", job.WebhookDroppedEvents)
 		}
@@ -649,6 +664,9 @@ func runDoctor(ctx context.Context, cfg config.Config, opt engine.Options) error
 	check("artifacts writable", ensureWritableDir(opt.ArtifactsRoot))
 	check("recon webhook reachable", checkWebhookReachable(cfg.ReconWebhookURL))
 	check("exploit webhook reachable", checkWebhookReachable(cfg.ExploitWebhookURL))
+	if strings.TrimSpace(cfg.InteractshWebhookURL) != "" {
+		check("interactsh webhook reachable", checkWebhookReachable(cfg.InteractshWebhookURL))
+	}
 
 	if !ok {
 		return fmt.Errorf("doctor failed: fix issues above")
@@ -1074,7 +1092,7 @@ func printUsage() {
 		`)
 }
 
-func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, jsonOut bool) error {
+func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, isf *notify.Webhook, jsonOut bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing state file path. Use: breachpilot resume <path/to/.breachpilot.state>")
 	}
