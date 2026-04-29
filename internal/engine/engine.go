@@ -79,6 +79,8 @@ import (
 	statechange "breachpilot/internal/exploit/modules/statechange"
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
+	tokenleakage "breachpilot/internal/exploit/modules/tokenleakage"
+	sqliprober "breachpilot/internal/exploit/modules/sqliprober"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	xxeinjection "breachpilot/internal/exploit/modules/xxeinjection"
 	oob "breachpilot/internal/exploit/oob"
@@ -3092,6 +3094,8 @@ func registeredModuleInfos() []ModuleInfo {
 		{"idor-size", "Response size-based IDOR detection", true, "exploit-core"},
 		{"idor_engine", "Dual-user automated IDOR detection engine", true, "exploit-core"},
 		{"sstiprober", "Detects Server-Side Template Injection via math expressions", true, "exploit-core"},
+		{"token-leakage", "Detects sensitive token leakage to third-parties (e.g. Bizible) and Host Header Injection on reset paths", true, "exploit-core"},
+		{"sqliprober", "Rigorous baseline, boolean, timing, and OOB SQLi testing with control groups", true, "exploit-core"},
 		{"ldapinject", "Detects LDAP injection in queries via boolean and error markers", true, "exploit-core"},
 		{"ratelimit", "Detects lack of rate-limits or bypassable limits on auth surfaces", true, "exploit-core"},
 		{"authpolicy", "Validates password policies and discovers username enumeration", true, "exploit-core"},
@@ -3149,6 +3153,8 @@ func registeredExploitCoreModuleInstances() []exploit.Module {
 		smuggling.New(),
 		deserialization.New(),
 		sstiprober.New(),
+		tokenleakage.New(),
+		sqliprober.New(),
 		ldapinject.New(),
 		ratelimit.New(),
 		authpolicy.New(),
