@@ -622,6 +622,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		IsDrupal:    sharedState.HasPrefix("tech.cms", "drupal"),
 		HasGraphQL:  sharedState.IsSet("tech.graphql"),
 		WAFDetected: sharedState.IsSet("tech.waf_detected"),
+		// SharedState satisfies discovery.SchemaStateReader (GetAll method).
+		// This feeds schema.endpoint.* keys into Collect() as high-priority candidates.
+		SharedState: sharedState,
 	}
 	wafProfile := waf.FromSharedState(sharedState)
 	var wafProfileRef *waf.Profile
@@ -782,6 +785,32 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	}
 	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
 	enrichURLCorpusFromSharedState(&rs, sharedState)
+
+	// --- Second-Pass Discovery Refresh ---
+	// If schemaprobe or OpenAPI discovery populated new high-value schema endpoints,
+	// we immediately re-run high-value injection modules to ensure they target the
+	// newly discovered API surface.
+	if len(sharedState.GetAll("schema.endpoint.")) > 0 {
+		var refreshModules []exploit.Module
+		for _, m := range scoutModules {
+			switch m.Name() {
+			case "advanced-injection", "sqli-prober", "xxe-injection", "cmd-inject", "ssrf-prober", "lfi", "rxss":
+				refreshModules = append(refreshModules, m)
+			}
+		}
+		if len(refreshModules) > 0 {
+			emit(models.RuntimeEvent{
+				Kind:    "module",
+				Stage:   "exploit.module.refresh",
+				Status:  "started",
+				Message: fmt.Sprintf("exploit.module.refresh triggered by schema discovery for: %s", strings.Join(moduleNames(refreshModules), ",")),
+				Target:  job.Target,
+			})
+			refreshFindings, refreshTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, refreshModules)
+			scoutFindings = append(scoutFindings, refreshFindings...)
+			scoutTelemetry = append(scoutTelemetry, refreshTelemetry...)
+		}
+	}
 	scoutSignals := buildCorrelationSignals(scoutFindings)
 	mergedSignals := mergeCorrelationSignals(persistedSignals, scoutSignals)
 	_ = saveCorrelationSignalsArtifact(artDir, mergedSignals)
