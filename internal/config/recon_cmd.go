@@ -22,9 +22,9 @@ func ResolveReconHarvestCmd(configured string) string {
 		return configured
 	}
 	candidates := []string{
-		"python3 /usr/local/share/breachpilot/tools/reconharvest/reconHarvest.py",
 		"python3 ./tools/reconharvest/reconHarvest.py",
 		"python3 tools/reconharvest/reconHarvest.py",
+		"python3 /usr/local/share/breachpilot/tools/reconharvest/reconHarvest.py",
 		"python3 ./reconHarvest.py",
 		"python3 reconHarvest.py",
 	}

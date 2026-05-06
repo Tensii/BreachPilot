@@ -1,0 +1,3 @@
+fastapi
+uvicorn
+# Add any other backend deps if needed

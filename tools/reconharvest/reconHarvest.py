@@ -551,7 +551,7 @@ class HackerDashboard:
             "subdomains": 0, "live_hosts": 0, "endpoints": 0, "params": 0,
             "nuclei_findings": 0, "hosts_401_403": 0, "legacy_hosts": 0,
             "throttled_hosts": 0, "skipped_hosts": 0,
-            "resolved": 0, "subfinder_count": 0, "assetfinder_count": 0,
+            "resolved": 0, "ports": 0, "subfinder_count": 0, "assetfinder_count": 0,
             "probed_hosts": 0, "nuclei_findings_phase1": 0, "nuclei_findings_phase2": 0, "secrets_findings": 0, "takeover_findings": 0,
             "xss_findings": 0, "bypass_403_findings": 0, "graphql_findings": 0, "github_dork_hits": 0,
         }
@@ -673,6 +673,7 @@ class HackerDashboard:
         triage.add_row("Subdomains", self._metric("subdomains", "subdomains", "green"))
         triage.add_row("Resolved", self._metric("resolved", "dnsx", "green"))
         triage.add_row("Live Hosts", self._metric("live_hosts", "httpx", "green"))
+        triage.add_row("Open Ports", self._metric("ports", "portscan", "green"))
         triage.add_row(Text(""), Text(""))
         triage.add_row(Text("URLs", style="bold"), Text(""))
         triage.add_row("Endpoints", self._metric("endpoints", "urls", "green"))
@@ -1444,6 +1445,7 @@ class Runner:
         attempts = 0
         last_rc = 0
         t0 = time.perf_counter()
+        self.send_log(f"Running: {label} ({display[:60]}...)", status="started")
         for attempt in range(retries + 1):
             if SHUTTING_DOWN:
                 last_rc = 130
@@ -1519,6 +1521,9 @@ class Runner:
             if self.config.stop_on_error:
                 raise RuntimeError(f"{label} failed with return code {result.returncode}")
             self.record_failure("nonfatal", label, RuntimeError(f"return code {result.returncode}"), tool="run_tool")
+        
+        status = "completed" if result.returncode == 0 else "error"
+        self.send_log(f"Finished: {label} | status={status} | duration={result.duration_seconds}s", status=status)
         return result
 
     def reuse_previous_artifacts(self) -> int:
@@ -4205,6 +4210,25 @@ class Runner:
         subfinder_count = self._count_lines(self.workdir / "subfinder.txt")
         assetfinder_count = self._count_lines(self.workdir / "assetfinder.txt")
         resolved_count = self._count_lines(self.workdir / "resolved_subdomains.txt")
+        
+        ports_count = 0
+        jpath_ports = self.workdir / "portscan_results.json"
+        if jpath_ports.exists():
+            try:
+                # Count unique host:port pairs
+                unique_ports = set()
+                for ln in jpath_ports.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    try:
+                        o = json.loads(ln.strip())
+                        h = o.get("host") or o.get("ip")
+                        p = o.get("port")
+                        if h and p:
+                            unique_ports.add(f"{h}:{p}")
+                    except: continue
+                ports_count = len(unique_ports)
+                self.stats["ports"] = ports_count
+            except: pass
+
         hosts_401_403 = 0
         buckets = {"2xx": 0, "3xx": 0, "401": 0, "403": 0, "other": 0}
 
@@ -4278,11 +4302,14 @@ class Runner:
             except Exception as e:
                 log(f"[!] Failed to read secrets_summary.json for stats: {e}")
 
+        sevs = self._count_severities()
+
         return {
             "subdomains": self._count_lines(self.workdir / "all_subdomains.txt"),
             "subfinder_count": subfinder_count,
             "assetfinder_count": assetfinder_count,
             "resolved": resolved_count,
+            "ports": ports_count or self.stats.get("ports", 0),
             "probed_hosts": sum(buckets.values()),
             "live_hosts": self._count_lines(self.workdir / "live_hosts.txt"),
             "endpoints": self._count_lines(self.urls / "urls_all.txt"),
@@ -4293,6 +4320,11 @@ class Runner:
             "nuclei_findings_phase1": nuclei_findings,
             "nuclei_findings_phase2": nuclei_findings_phase2,
             "takeover_findings": takeover_findings,
+
+            "critical_findings": sevs["critical"],
+            "high_findings": sevs["high"],
+            "medium_findings": sevs["medium"],
+            "low_findings": sevs["low"],
 
             "hosts_401_403": hosts_401_403,
             "legacy_hosts": legacy_hosts,
@@ -4309,6 +4341,30 @@ class Runner:
             "graphql_findings": self._count_json_list(self.intel / "graphql_findings.json"),
             "github_dork_hits": self._count_json_list(self.intel / "github_dork_findings.json"),
         }
+
+    def _count_severities(self) -> dict[str, int]:
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        nuclei_res = self.workdir / "nuclei_results.json"
+        # Also check other potential result files
+        paths = [
+            nuclei_res,
+            self.workdir / "nuclei_phase2.json",
+            self.workdir / "nuclei_phase2.txt" # some tools output txt
+        ]
+        for p in paths:
+            if p.exists():
+                try:
+                    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        try:
+                            # Nuclei JSON output
+                            if line.strip().startswith("{"):
+                                obj = json.loads(line)
+                                sev = (obj.get("info", {}).get("severity") or "").lower()
+                                if sev in counts: counts[sev] += 1
+                                elif sev == "info": counts["low"] += 1
+                        except: continue
+                except: pass
+        return counts
 
 
     def stage_dns_bruteforce(self) -> None:
@@ -4913,15 +4969,32 @@ class Runner:
             log(f"[*] vhost_fuzz: baseline_size={baseline_size}, using -fs filter")
 
         self.run_tool("ffuf vhost fuzz", cmd, timeout=self.config.vhost_timeout, stdout_path=out_log, stderr_path=out_log, allow_failure=True)
-        count = 0
+        
+        found_vhosts = set()
         if out_json.exists():
             try:
                 data = json.loads(out_json.read_text(encoding="utf-8", errors="ignore"))
-                count = len(data.get("results", []))
+                results = data.get("results", [])
+                
+                # Check for wildcard behavior: if almost everything matched, it's a false positive
+                if len(results) > 200:
+                    log(f"[!] vhost_fuzz: {len(results)} matches found. This looks like a wildcard. Skipping ingestion.")
+                    self.record_stage_status("vhost_fuzz", "completed", f"wildcard detected ({len(results)} matches), skipping ingestion")
+                    self.mark_done("vhost_fuzz")
+                    return
+
+                for r in results:
+                    vhost = r.get("input", {}).get("FUZZ")
+                    if vhost:
+                        found_vhosts.add(f"http://{vhost}.{self.target}")
             except Exception:
                 pass
-        self.record_stage_status("vhost_fuzz", "completed", f"vhosts_found={count} target_ip={main_ip}", metrics={
-            "vhosts_found": count,
+
+        if found_vhosts:
+            log(f"[*] vhost_fuzz: Found {len(found_vhosts)} vhosts. Skipping ingestion as requested.")
+
+        self.record_stage_status("vhost_fuzz", "completed", f"vhosts_found={len(found_vhosts)} target_ip={main_ip}", metrics={
+            "vhosts_found": len(found_vhosts),
             "target_ip": main_ip,
         })
         self.mark_done("vhost_fuzz")
@@ -5088,6 +5161,7 @@ class Runner:
             {"name": "Subdomains", "value": str(stats.get("subdomains", 0)), "inline": True},
             {"name": "Resolved", "value": str(stats.get("resolved", 0)), "inline": True},
             {"name": "Live Hosts", "value": str(stats.get("live_hosts", 0)), "inline": True},
+            {"name": "Open Ports", "value": str(stats.get("ports", 0)), "inline": True},
             {"name": "Endpoints", "value": str(stats.get("endpoints", 0)), "inline": True},
             {"name": "Findings", "value": str(findings_total), "inline": True},
         ]
@@ -5188,11 +5262,39 @@ class Runner:
         b["text"] = self._truncate(str(b.get("text") or ""), 2000)
         return b
 
-    def _notify_urls(self, st: str, sev: str) -> list[str]:
-        base = os.environ.get("RECONHARVEST_WEBHOOK", "").strip()
-        if not base:
-            return []
-        return [base]
+    def _notify_urls(self, st: str, sev: str, stage: str = "", is_exploit: bool = False) -> list[str]:
+        urls = set()
+        
+        # Always include the primary recon/dashboard stream
+        for k in ["BREACHPILOT_WEBHOOK_RECON", "RECONHARVEST_WEBHOOK", "BREACHPILOT_WEBHOOK"]:
+            val = os.environ.get(k, "").strip()
+            if val:
+                for u in val.split(","):
+                    if u.strip(): urls.add(u.strip())
+
+        # Exploit/Finding specific stream (if applicable)
+        if is_exploit or sev in {"HIGH", "CRITICAL"}:
+            for k in ["BREACHPILOT_WEBHOOK_EXPLOIT", "BREACHPILOT_WEBHOOK"]:
+                val = os.environ.get(k, "").strip()
+                if val:
+                    for u in val.split(","):
+                        if u.strip(): urls.add(u.strip())
+
+        # Interactsh/OOB specific stream (if applicable)
+        if "interactsh" in str(stage).lower() or "oob" in str(stage).lower():
+            for k in ["BREACHPILOT_WEBHOOK_INTERACTSH", "BREACHPILOT_WEBHOOK"]:
+                val = os.environ.get(k, "").strip()
+                if val:
+                    for u in val.split(","):
+                        if u.strip(): urls.add(u.strip())
+        
+        # Legacy/Universal Discord fallback
+        discord = os.environ.get("DISCORD_WEBHOOK", "").strip()
+        if discord:
+            for u in discord.split(","):
+                if u.strip(): urls.add(u.strip())
+            
+        return sorted(list(urls))
 
     def _ensure_webhook_worker(self) -> None:
         if self._webhook_worker and self._webhook_worker.is_alive():
@@ -5280,6 +5382,18 @@ class Runner:
         if self._webhook_consecutive_failures >= 5:
             self._webhook_circuit_open_until = time.monotonic() + 120.0
 
+    def send_log(self, msg: str, status: str = "info") -> None:
+        event = {
+            "event": "log_update",
+            "payload": {
+                "msg": msg,
+                "status": status,
+                "target": getattr(self, 'target', 'unknown')
+            },
+            "ts": now_utc_iso()
+        }
+        self._queue_webhook_event(event)
+
     def _queue_webhook_event(self, event: dict) -> None:
         self._ensure_webhook_worker()
         with self._webhook_lock:
@@ -5306,12 +5420,18 @@ class Runner:
     def _notify(self, message: str, *, status: str = "info", stage: str = "", severity: str = "INFO", log_file: str = "") -> None:
         st = (status or "info").lower()
         sev = (severity or "INFO").upper()
-        urls = self._notify_urls(st, sev)
+        
+        is_exploit = (stage in {"nuclei", "takeover", "xss_scan", "bypass_403", "graphql", "github_dork"}) or (sev in {"HIGH", "CRITICAL"})
+        urls = self._notify_urls(st, sev, stage=stage, is_exploit=is_exploit)
         if not urls:
             return
 
         color_map = {"completed": 0x2ECC71, "info": 0x3498DB, "warning": 0xF1C40F, "error": 0xE74C3C, "interrupted": 0xE67E22}
         emoji_map = {"completed": "✅", "info": "ℹ️", "warning": "⚠️", "error": "❌", "interrupted": "🟠"}
+        if is_exploit:
+            color_map["warning"] = 0xFF4757 # More red for exploits
+            emoji_map["warning"] = "🚨"
+        
         color = color_map.get(st, 0x3498DB)
         emoji = emoji_map.get(st, "ℹ️")
 
@@ -5319,8 +5439,6 @@ class Runner:
         now_m = time.monotonic()
         if sev not in {"HIGH", "CRITICAL"}:
             if fingerprint == self._last_webhook_fingerprint and (now_m - self._last_webhook_at) < 30:
-                return
-            if st == "completed" and (now_m - self._last_webhook_at) < 2:
                 return
 
         mention = "@here " if (sev in {"HIGH", "CRITICAL"} or st in {"warning", "error"}) else ""
@@ -5344,6 +5462,53 @@ class Runner:
             })
         if log_file:
             fields.append({"name": "Log", "value": str(Path(log_file).resolve()), "inline": False})
+
+        # Extra data for specialized stages
+        httpx_preview = []
+        if stage == "httpx":
+            jpath = self.workdir / "httpx_results.json"
+            if jpath.exists():
+                try:
+                    # Increase limit to 100 for better visibility
+                    for ln in jpath.read_text(encoding="utf-8", errors="ignore").splitlines()[:100]:
+                        obj = json.loads(ln.strip())
+                        url = obj.get("url")
+                        sc = obj.get("status_code")
+                        # Include full tech list
+                        tech_list = obj.get("tech") or []
+                        tech = ", ".join(tech_list)
+                        if url:
+                            httpx_preview.append({"url": url, "status": sc, "tech": tech})
+                except Exception: pass
+
+        port_preview = [] # Will now store {host: "...", ports: [...], tech: "..."}
+        if stage == "portscan" or stage == "tech":
+            jpath = self.workdir / "portscan_results.json"
+            if jpath.exists():
+                try:
+                    host_map = {}
+                    for ln in jpath.read_text(encoding="utf-8", errors="ignore").splitlines()[:500]:
+                        obj = json.loads(ln.strip())
+                        host = obj.get("host") or obj.get("ip")
+                        port = obj.get("port")
+                        if host and port:
+                            if host not in host_map:
+                                host_map[host] = {"host": host, "ports": [], "tech": ""}
+                            host_map[host]["ports"].append(port)
+                    
+                    # Try to add tech from httpx cache if available
+                    for h, data in host_map.items():
+                        # Sort ports
+                        data["ports"] = sorted(list(set(data["ports"])))
+                        # Check cache for tech (check both http and https versions of the host)
+                        for proto in ["https://", "http://"]:
+                            cached = self._httpx_cache.get(f"{proto}{h}")
+                            if cached and cached.get("tech"):
+                                data["tech"] = cached["tech"]
+                                break
+                    
+                    port_preview = list(host_map.values())
+                except Exception: pass
 
         event_type = "stage_completed" if st == "completed" and stage and stage != "pipeline" else "run_completed"
         if st in {"warning", "error", "interrupted"}:
@@ -5398,6 +5563,8 @@ class Runner:
             "stats": self.collect_stats(),
             "subdomains_path": str((self.workdir / "all_subdomains.txt").resolve()),
             "subdomains_preview": subdomain_preview,
+            "httpx_preview": httpx_preview,
+            "port_preview": port_preview,
             "stage_status": self._latest_stage_status.get(stage) if stage else None,
             "workdir": str(self.workdir.resolve()),
             "timestamp": now_utc_iso(),

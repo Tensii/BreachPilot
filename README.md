@@ -33,12 +33,19 @@ breachpilot resume artifacts/example.com/1/.breachpilot.state
 
 ## 🔔 Webhooks & Notifications
 
-BreachPilot supports native rich-formatting for **Discord** and **Slack**. It automatically detects their webhook URLs and builds formatted embed cards with colors, tags, and severity levels. For other services, it sends a generic JSON payload.
+BreachPilot supports two types of webhooks:
 
-- `BREACHPILOT_WEBHOOK`: Default webhook for all notifications.
-- `BREACHPILOT_WEBHOOK_RECON`: (Optional) Separate webhook specifically for recon events.
-- `BREACHPILOT_WEBHOOK_EXPLOIT`: (Optional) Separate webhook specifically for exploit findings.
-- `BREACHPILOT_WEBHOOK_SECRET`: Used to sign payloads for generic webhooks.
+### 1. External Notifications (Discord/Slack)
+Used for rich, mobile-friendly alerts. You can use separate channels to avoid noise:
+- `BREACHPILOT_WEBHOOK_RECON`: (or `RECONHARVEST_WEBHOOK`) Specialized for recon discovery.
+- `BREACHPILOT_WEBHOOK_EXPLOIT`: Specialized for exploit findings and critical vulnerabilities.
+- `BREACHPILOT_WEBHOOK_INTERACTSH`: Dedicated channel for OOB/Interactsh callback data.
+
+### 2. Internal Monitoring (BreachConsole)
+Used to feed the real-time dashboard:
+- `BREACHPILOT_WEBHOOK`: Universal stream to your local dashboard (`http://localhost:8080/api/webhooks/breachpilot`).
+
+**Note**: You can provide multiple URLs separated by commas to stream to both Discord and BreachConsole simultaneously.
 
 ## 📋 Commands
 
@@ -166,9 +173,32 @@ Behavior summary:
 - CLI options such as `aggressive` and `boundless` apply only to the current command.
 - CLI options can enable a mode for one run even if the env default is `false`.
 
-## ⚙️ Configuration & Environment
+## 📺 Real-Time Monitoring: BreachConsole
 
-BreachPilot uses environment variables for configuration. It automatically loads `./breachpilot.env`, which can be overridden via `BREACHPILOT_CONFIG=/path/to/file`.
+BreachPilot includes a high-performance web dashboard called **BreachConsole** for real-time visualization of your scans.
+
+### Features
+- **Live Pipeline Stepper**: Track the exact progress of your recon and exploit phases.
+- **Categorized Event Stream**: Recon findings and Exploit vulnerabilities are automatically sorted into dedicated tabs.
+- **Interactive Stats**: Real-time counters for subdomains, live hosts, ports, and findings.
+- **Multi-Channel Delivery**: Simultaneously stream to the console and multiple Discord/Slack webhooks.
+
+### Starting the Console
+To start both the backend and the frontend, simply run:
+```bash
+make dashboard
+```
+- **Dashboard UI**: `http://localhost:3000`
+- **Webhook Ingest**: `http://localhost:8080/api/webhooks/breachpilot`
+
+### Configuration
+To see your data in the console, ensure your `breachpilot.env` includes:
+```env
+BREACHPILOT_WEBHOOK=http://localhost:8080/api/webhooks/breachpilot
+```
+
+## ⚙️ Configuration & Environment
+... [rest of file]
 
 ### Scan Profiles & Behavior
 - `BREACHPILOT_SCAN_PROFILE`: Choose `quick`, `standard`, `exploit`, or `deep`.

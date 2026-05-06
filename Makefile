@@ -1,9 +1,10 @@
+SHELL := /bin/bash
 BINARY=breachpilot
 CRITICAL_PKGS=./internal/engine ./internal/exploit ./internal/exploit/httppolicy ./internal/notify
 FLAKE_PKGS=./cmd/breachpilot ./internal/config ./internal/notify ./internal/exploit/httppolicy
 COVERAGE_THRESHOLD=50
 
-.PHONY: build test test-race test-race-critical test-flake coverage-critical vet ci run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit
+.PHONY: build test test-race test-race-critical test-flake coverage-critical vet ci run setup sync-reconharvest sync-reconharvest-latest sync-reconharvest-commit dashboard
 
 build:
 	go build -o $(BINARY) ./cmd/breachpilot
@@ -49,7 +50,15 @@ run:
 	go run ./cmd/breachpilot
 
 setup:
-	go run ./cmd/breachpilot setup
+	@printf "\033[36m[*] Setting up Python virtual environment...\033[0m\n"
+	@python3 -m venv .venv || (printf "\033[31m[!] Failed to create venv. Is python3-venv installed?\033[0m\n" && exit 1)
+	@.venv/bin/pip install --upgrade pip
+	@.venv/bin/pip install -r requirements.txt
+	@printf "\033[36m[*] Installing Frontend dependencies (npm)...\033[0m\n"
+	@cd breachconsole/frontend && npm install
+	@printf "\033[36m[*] Running Go tool setup...\033[0m\n"
+	@go run ./cmd/breachpilot setup
+	@printf "\033[32m[✓] Full setup complete.\033[0m\n"
 
 sync-reconharvest:
 	./tools/sync_reconharvest.sh
@@ -61,3 +70,6 @@ sync-reconharvest-commit:
 	./tools/sync_reconharvest.sh
 	git add tools/reconharvest/reconHarvest.py tools/reconharvest/installers.py
 	git commit -m "chore(sync): update vendored reconHarvest from source repo" || true
+
+dashboard:
+	@./scripts/start_dashboard.sh

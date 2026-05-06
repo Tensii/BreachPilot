@@ -73,9 +73,9 @@ func copyNucleiResumeCfg(logPath, artDir string) string {
 
 // fileExists checks if a file exists and is not a directory
 func fileExists(filename string) bool {
-info, err := os.Stat(filename)
-if os.IsNotExist(err) {
-return false
-}
-return !info.IsDir()
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
 }

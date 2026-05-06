@@ -1,13 +1,38 @@
 # Build artifacts
 /breachpilot
 /main
+/dist/
+/build/
 
-# Python cache
+# Python cache and environment
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+bin/
+lib/
+include/
 
-# Runtime outputs
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime outputs and logs
 artifacts/
+*.log
+.breachpilot.state
+recon/
 
 # Local configuration with secrets
 breachpilot.env
+.env
+.env.local
+
+# OS specific
+.DS_Store
+Thumbs.db

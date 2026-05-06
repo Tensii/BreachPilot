@@ -79,4 +79,3 @@ func TestCLIRuntimeTrackerRendersProgressAndCounts(t *testing.T) {
 		t.Fatalf("expected clean snapshot in output, got:\n%s", out)
 	}
 }
-

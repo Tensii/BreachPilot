@@ -74,13 +74,13 @@ import (
 	secretsvalidator "breachpilot/internal/exploit/modules/secretsvalidator"
 	sessionabuse "breachpilot/internal/exploit/modules/sessionabuse"
 	smuggling "breachpilot/internal/exploit/modules/smuggling"
+	sqliprober "breachpilot/internal/exploit/modules/sqliprober"
 	ssrfprober "breachpilot/internal/exploit/modules/ssrfprober"
 	sstiprober "breachpilot/internal/exploit/modules/sstiprober"
 	statechange "breachpilot/internal/exploit/modules/statechange"
 	subt "breachpilot/internal/exploit/modules/subt"
 	tlsaudit "breachpilot/internal/exploit/modules/tlsaudit"
 	tokenleakage "breachpilot/internal/exploit/modules/tokenleakage"
-	sqliprober "breachpilot/internal/exploit/modules/sqliprober"
 	uploadabuse "breachpilot/internal/exploit/modules/uploadabuse"
 	xxeinjection "breachpilot/internal/exploit/modules/xxeinjection"
 	oob "breachpilot/internal/exploit/oob"
@@ -127,6 +127,7 @@ type Options struct {
 	Progress                       func(string)
 	Events                         func(models.RuntimeEvent)
 	Notifier                       Notifier
+	ReconNotifier                  Notifier
 	InteractshNotifier             Notifier
 	PreviousReportPath             string
 	ReportFormats                  string

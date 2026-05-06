@@ -176,11 +176,10 @@ func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
 	status := strings.ToUpper(emptyAs(ev.Status, "info"))
 	color := statusColor(ev.Status)
 	icon := statusIcon(ev.Status)
-	
+
 	// Specialized rendering for stages to be more dashboard-like
 	return fmt.Sprintf("%s%s %-12s%s %-20s %s", color, icon, status, "\x1b[0m", label, snapshot)
 }
-
 
 func renderRuntimeModule(ev models.RuntimeEvent, snapshot string) string {
 	color := "\x1b[33m"
@@ -240,7 +239,6 @@ func renderRuntimeLog(ev models.RuntimeEvent) string {
 	}
 	return fmt.Sprintf("  \x1b[90m%s\x1b[0m", msg)
 }
-
 
 func stageLabel(stage string) string {
 	stage = strings.TrimSpace(stage)

@@ -79,19 +79,10 @@ func Load() Config {
 	configPath := getEnv("BREACHPILOT_CONFIG", "./breachpilot.env")
 	_ = loadEnvFile(configPath)
 
-	reconWH := os.Getenv("BREACHPILOT_WEBHOOK_RECON")
-	exploitWH := os.Getenv("BREACHPILOT_WEBHOOK_EXPLOIT")
-	interactshWH := os.Getenv("BREACHPILOT_WEBHOOK_INTERACTSH")
+	reconWH := mergeEnvURLs("BREACHPILOT_WEBHOOK_RECON", "RECONHARVEST_WEBHOOK", "BREACHPILOT_WEBHOOK")
+	exploitWH := mergeEnvURLs("BREACHPILOT_WEBHOOK_EXPLOIT", "BREACHPILOT_WEBHOOK")
+	interactshWH := mergeEnvURLs("BREACHPILOT_WEBHOOK_INTERACTSH", "BREACHPILOT_WEBHOOK")
 	legacyWH := os.Getenv("BREACHPILOT_WEBHOOK")
-	if reconWH == "" {
-		reconWH = legacyWH
-	}
-	if exploitWH == "" {
-		exploitWH = legacyWH
-	}
-	if interactshWH == "" {
-		interactshWH = legacyWH
-	}
 
 	cfg := Config{
 		WebhookURL:                     legacyWH,
@@ -391,4 +382,23 @@ func loadEnvFile(path string) error {
 		}
 	}
 	return s.Err()
+}
+
+func mergeEnvURLs(keys ...string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, k := range keys {
+		val := os.Getenv(k)
+		if val == "" {
+			continue
+		}
+		for _, part := range strings.Split(val, ",") {
+			u := strings.TrimSpace(part)
+			if u != "" && !seen[u] {
+				seen[u] = true
+				out = append(out, u)
+			}
+		}
+	}
+	return strings.Join(out, ",")
 }

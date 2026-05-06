@@ -31,7 +31,7 @@ import (
 func main() {
 	config.BootstrapEnvironment()
 	cfg := config.Load()
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := make(chan os.Signal, 1)
@@ -40,7 +40,7 @@ func main() {
 		<-c
 		fmt.Println("\n[!] Interrupt received, safely stopping...")
 		cancel()
-		
+
 		go func() {
 			<-c
 			fmt.Println("\n[!] Second interrupt received, forcing immediate exit!")
@@ -228,7 +228,7 @@ func main() {
 	}
 	rf.Start()
 	defer rf.Stop()
-	
+
 	isf := &notify.Webhook{
 		URL:          cfg.InteractshWebhookURL,
 		Secret:       cfg.WebhookSecret,
@@ -241,10 +241,10 @@ func main() {
 	}
 	isf.Start()
 	defer isf.Stop()
-	
-	engOpt.Notifier = nf
-	engOpt.InteractshNotifier = isf
 
+	engOpt.Notifier = nf
+	engOpt.ReconNotifier = rf
+	engOpt.InteractshNotifier = isf
 
 	if len(filtered) > 0 && filtered[0] == "resume" {
 		if err := resumeJob(ctx, filtered[1:], engOpt, nf, rf, isf, jsonOut); err != nil {
@@ -411,9 +411,12 @@ func runJobsInBatch(ctx context.Context, mode string, targets []string, opt engi
 
 		cliOpt := opt
 		cliOpt.Progress = nil
-		cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
+		cliOpt.Events = buildCLIEventHandler(job, opt, nf, rf, isf, jsonOut)
 
 		nf.Send("job.started", job)
+		if strings.EqualFold(job.Mode, "full") {
+			rf.Send("job.started", job)
+		}
 
 		if len(targets) > 1 && !jsonOut {
 			fmt.Printf("\x1b[34m[BATCH] Processing target: %s (%s)\x1b[0m\n", target, jobID)
@@ -550,7 +553,7 @@ func formatCLISummary(job *models.Job, mode string) []string {
 	return lines
 }
 
-func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhook, jsonOut bool) func(models.RuntimeEvent) {
+func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhook, rf *notify.Webhook, isf *notify.Webhook, jsonOut bool) func(models.RuntimeEvent) {
 	var tracker *cliRuntimeTracker
 	if !jsonOut {
 		tracker = newCLIRuntimeTracker(os.Stdout)
@@ -559,13 +562,23 @@ func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhoo
 		if tracker != nil {
 			tracker.Handle(ev)
 		}
-		if ev.Kind == "stage" && ev.Stage == "exploit" && ev.Status == "started" {
-			nf.SendGeneric("exploit.started", map[string]any{
+
+		// Route events to the correct notifier based on stage/kind
+		targetNotifier := nf
+		if strings.HasPrefix(ev.Stage, "recon") {
+			targetNotifier = rf
+		} else if strings.Contains(ev.Stage, "oob") || strings.Contains(ev.Stage, "interactsh") {
+			targetNotifier = isf
+		}
+
+		if ev.Kind == "stage" && (ev.Stage == "exploit" || ev.Stage == "recon") && ev.Status == "started" {
+			targetNotifier.SendGeneric(ev.Stage+".started", map[string]any{
 				"job_id": job.ID,
 				"target": job.Target,
 				"mode":   job.Mode,
 			})
 		}
+
 		if opt.WebhookModuleProgress && ev.Kind == "module" {
 			payload := map[string]any{
 				"job_id": job.ID,
@@ -583,7 +596,7 @@ func buildCLIEventHandler(job *models.Job, opt engine.Options, nf *notify.Webhoo
 			if ev.Progress != nil {
 				payload["progress"] = ev.Progress
 			}
-			nf.SendGeneric("exploit.module.progress", payload)
+			targetNotifier.SendGeneric("exploit.module.progress", payload)
 		}
 	}
 }
@@ -856,7 +869,7 @@ func loadManifest(manifestPath string) (struct {
 
 func runSetup(ctx context.Context, opt engine.Options) error {
 	fmt.Println("\x1b[36m[SETUP] initializing breachpilot runtime checks...\x1b[0m")
-	
+
 	// Attempt to fix missing dependencies first.
 	if err := config.EnsureDependenciesWithContext(ctx, opt.NucleiBin, opt.ReconHarvestCmd); err != nil {
 		fmt.Printf("\x1b[33m[SETUP !]\x1b[0m auto-bootstrap encountered issues: %v\n", err)
@@ -1001,7 +1014,6 @@ func printStartupBanner(cfg config.Config) {
 	if len(modes) == 0 {
 		modes = append(modes, "standard")
 	}
-
 
 	fmt.Println(magenta + "╔══════════════════════════════════════════════════════════════════════════╗" + reset)
 	fmt.Println(magenta + "║" + bold + "  BREACHPILOT // RED-TEAM TERMINAL                                  " + reset + magenta + "║" + reset)
@@ -1148,7 +1160,7 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	cliOpt := opt
 	cliOpt.ArtifactsRoot = filepath.Dir(filepath.Dir(jobDir))
 	cliOpt.Progress = nil
-	cliOpt.Events = buildCLIEventHandler(job, opt, nf, jsonOut)
+	cliOpt.Events = buildCLIEventHandler(job, opt, nf, rf, isf, jsonOut)
 
 	nf.Send("job.started", job)
 	if err := engine.Process(ctx, job, cliOpt); err != nil {

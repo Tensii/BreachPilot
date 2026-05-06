@@ -348,6 +348,17 @@ func (w *Webhook) spoolEvent(ev webhookEvent) bool {
 }
 
 func (w *Webhook) postJSON(body map[string]any) {
+	urls := strings.Split(w.URL, ",")
+	for _, rawURL := range urls {
+		targetURL := strings.TrimSpace(rawURL)
+		if targetURL == "" {
+			continue
+		}
+		w.sendToURL(targetURL, body)
+	}
+}
+
+func (w *Webhook) sendToURL(targetURL string, body map[string]any) {
 	// Sign over the canonical body before any provider reshaping.
 	canonicalBytes, _ := json.Marshal(body)
 	var sig string
@@ -357,7 +368,7 @@ func (w *Webhook) postJSON(body map[string]any) {
 
 	payload := body
 	for _, p := range defaultProviders {
-		if p.Matches(w.URL) {
+		if p.Matches(targetURL) {
 			payload = p.Format(body)
 			break
 		}
@@ -365,9 +376,9 @@ func (w *Webhook) postJSON(body map[string]any) {
 	b, _ := json.Marshal(payload)
 
 	for attempt := 1; attempt <= w.Retries; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, w.URL, bytes.NewReader(b))
+		req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(b))
 		if err != nil {
-			w.logDelivery("request_error", body, attempt, 0, err.Error(), "")
+			w.logDelivery("request_error", targetURL, body, attempt, 0, err.Error(), "")
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -379,7 +390,7 @@ func (w *Webhook) postJSON(body map[string]any) {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
-			w.logDelivery("ok", body, attempt, resp.StatusCode, "", "")
+			w.logDelivery("ok", targetURL, body, attempt, resp.StatusCode, "", "")
 			return
 		}
 		status := 0
@@ -390,7 +401,7 @@ func (w *Webhook) postJSON(body map[string]any) {
 		if err != nil {
 			errMsg = err.Error()
 		}
-		w.logDelivery("retry", body, attempt, status, errMsg, "")
+		w.logDelivery("retry", targetURL, body, attempt, status, errMsg, "")
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -403,10 +414,10 @@ func (w *Webhook) postJSON(body map[string]any) {
 			return
 		}
 	}
-	w.logDelivery("failed", body, w.Retries, 0, "max retries exceeded", "")
+	w.logDelivery("failed", targetURL, body, w.Retries, 0, "max retries exceeded", "")
 }
 
-func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, status int, errMsg string, respBody string) {
+func (w *Webhook) logDelivery(state string, targetURL string, body map[string]any, attempt int, status int, errMsg string, respBody string) {
 	w.logMu.Lock()
 	defer w.logMu.Unlock()
 	if w.logFile == nil {
@@ -419,7 +430,7 @@ func (w *Webhook) logDelivery(state string, body map[string]any, attempt int, st
 		"attempt": attempt,
 		"status":  status,
 		"error":   redactSensitive(errMsg),
-		"url":     redactURL(w.URL),
+		"url":     redactURL(targetURL),
 		"resp":    redactSensitive(respBody),
 	}
 	b, _ := json.Marshal(entry)

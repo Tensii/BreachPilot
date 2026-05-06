@@ -50,7 +50,7 @@ func BootstrapEnvironment() {
 	}
 }
 
-// EnsureDependencies checks if nuclei is in PATH. If not, it attempts to run 
+// EnsureDependencies checks if nuclei is in PATH. If not, it attempts to run
 // the reconharvest bootstrap (usually by calling it with a non-destructive flag).
 func EnsureDependencies(nucleiBin string, reconCmd string) error {
 	return EnsureDependenciesWithContext(context.Background(), nucleiBin, reconCmd)
@@ -59,7 +59,7 @@ func EnsureDependencies(nucleiBin string, reconCmd string) error {
 func EnsureDependenciesWithContext(ctx context.Context, nucleiBin string, reconCmd string) error {
 	fmt.Printf("[*] Verifying all external dependencies via reconHarvest...\n")
 
-	// Trigger reconharvest setup. reconharvest.py's main() bootstrap runs 
+	// Trigger reconharvest setup. reconharvest.py's main() bootstrap runs
 	// before its argument parser if it detects missing core tools, and it
 	// validates the entire suite of required binaries.
 	args, err := SplitReconHarvestCommand(ResolveReconHarvestCmd(reconCmd))
