@@ -13,8 +13,12 @@ elif [ -f ".venv/bin/activate" ]; then
     . .venv/bin/activate
 fi
 
-echo "[*] Starting Backend on port 8080..."
+echo "[*] Cleaning up previous processes..."
+fuser -k 8080/tcp 1337/tcp >/dev/null 2>&1 || true
+pkill -f vite || true
 pkill -f "uvicorn main:app" || true
+
+echo "[*] Starting Backend on port 8080..."
 # Start backend in background
 uvicorn main:app --host 0.0.0.0 --port 8080 --http h11 --ws wsproto --loop asyncio > backend.log 2>&1 &
 BACKEND_PID=$!

@@ -105,6 +105,20 @@ const App: React.FC = () => {
     return ['All Targets', ...Array.from(targets).sort()];
   }, [events]);
 
+  // Identify targets that have received events in the last 60 seconds
+  const activeTargets = useMemo(() => {
+    const active = new Set<string>();
+    const now = new Date().getTime();
+    events.slice(0, 50).forEach(e => {
+      const ts = new Date(e.ts).getTime();
+      const target = e.payload?.target || e.job?.target;
+      if (target && (now - ts) < 60000) {
+        active.add(target);
+      }
+    });
+    return active;
+  }, [events]);
+
   const targetEvents = useMemo(() => {
     if (selectedTarget === 'All Targets') return events;
     return events.filter(e => (e.payload?.target || e.job?.target) === selectedTarget);
@@ -230,11 +244,24 @@ const App: React.FC = () => {
     const pool = activeTab === 'recon' ? reconEvents : activeTab === 'exploits' ? exploitEvents : targetEvents;
     if (!searchTerm) return pool;
     const term = searchTerm.toLowerCase();
-    return pool.filter(e => 
-      String(e.event).toLowerCase().includes(term) || 
-      JSON.stringify(e.payload).toLowerCase().includes(term) ||
-      String(e.payload?.target).toLowerCase().includes(term)
-    );
+    
+    return pool.filter(e => {
+      const target = String(e.payload?.target || e.job?.target || '').toLowerCase();
+      const stage = String(e.payload?.stage || e.payload?.event?.stage || e.event || '').toLowerCase();
+      const msg = String(e.payload?.msg || e.payload?.detail || '').toLowerCase();
+      
+      // Specifically check findings/tech/ports without stringifying the whole history blob
+      const tech = String(e.payload?.tech || '').toLowerCase();
+      const ports = String(e.payload?.ports || '').toLowerCase();
+      const findings = String(e.payload?.findings || '').toLowerCase();
+      
+      return target.includes(term) || 
+             stage.includes(term) || 
+             msg.includes(term) ||
+             tech.includes(term) ||
+             ports.includes(term) ||
+             findings.includes(term);
+    });
   }, [activeTab, targetEvents, reconEvents, exploitEvents, searchTerm]);
 
   const getRelevantStats = (ev: Event) => {
@@ -298,9 +325,10 @@ const App: React.FC = () => {
           {allTargets.map(t => (
             <button 
               key={t}
-              className={`target-chip ${selectedTarget === t ? 'active' : ''}`}
+              className={`target-chip ${selectedTarget === t ? 'active' : ''} ${t !== 'All Targets' && activeTargets.has(t) ? 'has-heartbeat' : ''}`}
               onClick={() => setSelectedTarget(t)}
             >
+              {t !== 'All Targets' && activeTargets.has(t) && <span className="pulse-dot" />}
               {t}
             </button>
           ))}
@@ -344,7 +372,8 @@ const App: React.FC = () => {
               className="clear-btn"
               onClick={async () => {
                 try {
-                  await fetch('http://localhost:8080/api/clear', { method: 'POST' });
+                  const host = window.location.hostname;
+                  await fetch(`http://${host}:8080/api/clear`, { method: 'POST' });
                   setEvents([]);
                 } catch (err) {
                   setEvents([]);

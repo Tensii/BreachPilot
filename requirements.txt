@@ -1,3 +1,10 @@
 fastapi
-uvicorn
-# Add any other backend deps if needed
+uvicorn[standard]
+rich
+requests
+aiohttp
+beautifulsoup4
+websockets
+python-dotenv
+asyncio
+psutil
