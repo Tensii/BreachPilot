@@ -908,12 +908,12 @@ def safe_name_for_host(host: str) -> str:
 
 @dataclass(frozen=True)
 class ReconConfig:
-    ffuf_threads: int = 40
+    ffuf_threads: int = 50
     ffuf_timeout: int = 5
     ffuf_rate: int = 50
     ffuf_maxtime_job: int = 45
     ffuf_delay: str = "0.03-0.12"
-    dirsearch_threads: int = 40
+    dirsearch_threads: int = 50
     dirsearch_timeout: int = 5
     dirsearch_delay: float = 0.05
     httpx_threads: int = 200
@@ -924,7 +924,7 @@ class ReconConfig:
     dnsx_timeout: int = 180
     httpx_stage_timeout: int = 300
     host_workers: int = 20
-    ffuf_workers: int = 8
+    ffuf_workers: int = 10
     dirsearch_workers: int = 10
     url_workers: int = 10
     katana_timeout: int = 300
@@ -1145,26 +1145,50 @@ class Runner:
         self.secretfinder_py = str(Path.home() / ".local/share/secretfinder/SecretFinder.py")
         self._hydrate_httpx_cache()
 
-        base = Path("/usr/share/seclists/Discovery/Web-Content")
-        self.ffuf_dir_wordlist = base / "raft-medium-directories.txt"
-        self.ffuf_file_wordlist = base / "raft-medium-files.txt"
-        self.dirsearch_wordlist = base / "directory-list-2.3-medium.txt"
-        common = base / "common.txt"
-        if not self.ffuf_dir_wordlist.exists():
-            self.ffuf_dir_wordlist = common
-        if not self.ffuf_file_wordlist.exists():
-            self.ffuf_file_wordlist = common
-        if not self.dirsearch_wordlist.exists():
-            self.dirsearch_wordlist = common
+        # Wordlist resolution: Prioritize OneListForAll (curated) over generic SecLists
+        script_dir = Path(__file__).resolve().parent
+        olfa_local = script_dir.parent / "onelistforall" / "onelistforallmicro.txt"
+        olfa_global = Path("/usr/share/onelistforall/onelistforallmicro.txt")
+        olfa_install = Path("/usr/local/share/breachpilot/tools/onelistforall/onelistforallmicro.txt")
+        
+        base_seclists = Path("/usr/share/seclists/Discovery/Web-Content")
+        common_seclists = base_seclists / "common.txt"
+        
+        # Determine the best discovery list
+        if olfa_local.exists():
+            discovery_list = olfa_local
+        elif olfa_global.exists():
+            discovery_list = olfa_global
+        elif olfa_install.exists():
+            discovery_list = olfa_install
+        elif common_seclists.exists():
+            discovery_list = common_seclists
+        else:
+            discovery_list = None
+
+        self.ffuf_dir_wordlist = base_seclists / "raft-medium-directories.txt"
+        self.ffuf_file_wordlist = base_seclists / "raft-medium-files.txt"
+        self.dirsearch_wordlist = base_seclists / "directory-list-2.3-medium.txt"
+
+        # Apply discovery_list (OneListForAll or Common) as primary default for speed
+        if discovery_list:
+            self.dirsearch_wordlist = discovery_list
+            if not self.ffuf_dir_wordlist.exists():
+                self.ffuf_dir_wordlist = discovery_list
+            if not self.ffuf_file_wordlist.exists():
+                self.ffuf_file_wordlist = discovery_list
+
+        # Final sanity checks and minimal fallbacks
         missing = [p for p in (self.ffuf_dir_wordlist, self.ffuf_file_wordlist, self.dirsearch_wordlist) if not p.exists()]
         if missing:
             fallback = self.workdir / "minimal_wordlist.txt"
             if not fallback.exists():
-                fallback.write_text("admin\nlogin\napi\nbackup\nupload\ndownload\nconfig\n", encoding="utf-8")
-            self.ffuf_dir_wordlist = fallback
-            self.ffuf_file_wordlist = fallback
-            self.dirsearch_wordlist = fallback
-            self.record_stage_status("wordlists", "fallback", f"missing_seclists={len(missing)} using={fallback}")
+                fallback.write_text("admin\nlogin\napi\nbackup\nupload\ndownload\nconfig\n.env\n.git/config\n", encoding="utf-8")
+            
+            if not self.ffuf_dir_wordlist.exists(): self.ffuf_dir_wordlist = fallback
+            if not self.ffuf_file_wordlist.exists(): self.ffuf_file_wordlist = fallback
+            if not self.dirsearch_wordlist.exists(): self.dirsearch_wordlist = fallback
+            self.record_stage_status("wordlists", "partial_fallback", f"missing_optimized={len(missing)} using_fallback={fallback}")
 
     def is_done(self, name: str) -> bool:
         return (self.state / f"{name}.done").exists()
@@ -6144,6 +6168,12 @@ def run_doctor() -> int:
         log("[+] libpcap-dev installed" if cp.returncode == 0 else "[!] libpcap-dev not installed (naabu build dependency)")
     _check_bin("massdns", critical=False)
 
+    # wordlists
+    olfa = Path("/usr/share/onelistforall/onelistforallmicro.txt")
+    seclists = Path("/usr/share/seclists/Discovery/Web-Content")
+    log("[+] OneListForAll: OK" if olfa.exists() else "[!] OneListForAll: MISSING")
+    log("[+] SecLists: OK" if seclists.exists() else "[!] SecLists: MISSING")
+
     # optional envs
     for ev in ["GITHUB_TOKEN", "RECONHARVEST_WEBHOOK"]:
         log(f"[+] {ev} set" if os.environ.get(ev, "").strip() else f"[!] {ev} not set")
@@ -6161,6 +6191,12 @@ def detect_missing_core_tools_for_bootstrap() -> list[str]:
     for b in core_bins:
         if not resolve_tool(b):
             missing.append(b)
+    
+    # Check for critical wordlists
+    olfa = Path("/usr/share/onelistforall/onelistforallmicro.txt")
+    if not olfa.exists():
+        missing.append("onelistforall")
+        
     return missing
 
 

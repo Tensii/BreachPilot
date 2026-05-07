@@ -128,6 +128,22 @@ def ensure_pipx() -> None:
     if not command_exists("pipx"):
         raise RuntimeError("pipx still not found after install.")
 
+def ensure_onelistforall() -> None:
+    base = Path("/usr/share/onelistforall")
+    micro = base / "onelistforallmicro.txt"
+    if micro.is_file():
+        return
+    log("[*] OneListForAll curated wordlists not found. Installing system-wide...")
+    pref = sudo_prefix()
+    with tempfile.TemporaryDirectory() as td:
+        run(["git", "clone", "--depth", "1", "https://github.com/six2dez/OneListForAll", td], check=True)
+        run(f"{pref}rm -rf {base}", check=False)
+        run(f"{pref}mkdir -p /usr/share", check=True)
+        run(f"{pref}mv \"{td}\" {base}", check=True)
+        run(f"{pref}rm -rf {base}/.git", check=True)
+    if not micro.is_file():
+        raise RuntimeError("OneListForAll is required and could not be installed.")
+
 def ensure_seclists() -> None:
     base = Path("/usr/share/seclists")
     web_content = base / "Discovery/Web-Content"
@@ -588,6 +604,7 @@ def install_required_tools(versions, skip_secrets: bool = False, force_update: b
             current_path = f"{_d}:{current_path}"
     os.environ["PATH"] = current_path
 
+    ensure_onelistforall()
     ensure_seclists()
     ensure_system_tool("dig", "dnsutils")
     install_dirsearch_kali_safe()

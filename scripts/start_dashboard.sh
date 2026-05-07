@@ -21,5 +21,5 @@ BACKEND_PID=$!
 echo "[*] Backend started with PID $BACKEND_PID"
 
 cd "$PROJECT_ROOT/breachconsole/frontend"
-echo "[*] Starting Frontend on port 3000..."
-npm run dev -- --host 0.0.0.0 --port 3000
+echo "[*] Starting Frontend on port 1337..."
+npm run dev -- --host 0.0.0.0 --port 1337
