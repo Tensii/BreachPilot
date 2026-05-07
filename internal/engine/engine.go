@@ -24,6 +24,7 @@ import (
 	configpkg "breachpilot/internal/config"
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/browsercapture"
+	"breachpilot/internal/exploit/fireprox"
 	"breachpilot/internal/exploit/discovery"
 	"breachpilot/internal/exploit/filter"
 	"breachpilot/internal/exploit/httppolicy"
@@ -172,6 +173,9 @@ type Options struct {
 	BrowserCaptureScrollSteps      int
 	BrowserCaptureMaxRoutesPerPage int
 	BrowserCapturePath             string
+	FireProxEnabled                bool
+	FireProxURL                    string
+	AWSRegion                      string
 	SharedState                    *exploit.SharedState
 }
 
@@ -588,6 +592,57 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 	sharedState := exploit.NewSharedState()
 	opt.SharedState = sharedState
+
+	var fireProxURL string
+	var targetHost string
+	if opt.FireProxEnabled && job.Target != "" && job.Target != "from-summary" {
+		turl := job.Target
+		if !strings.HasPrefix(turl, "http") {
+			turl = "https://" + turl
+		}
+		u, err := url.Parse(turl)
+		if err == nil {
+			targetHost = strings.ToLower(u.Host)
+			fm := fireprox.NewManager(job.Target, opt.AWSRegion)
+			emit(models.RuntimeEvent{
+				Kind:    "stage",
+				Stage:   "exploit.fireprox",
+				Status:  "started",
+				Message: fmt.Sprintf("exploit.fireprox engaging IP rotation for target: %s", turl),
+				Target:  job.Target,
+			})
+			furl, err := fm.CreateGateway()
+			if err == nil {
+				fireProxURL = furl
+				emit(models.RuntimeEvent{
+					Kind:    "stage",
+					Stage:   "exploit.fireprox",
+					Status:  "ready",
+					Message: fmt.Sprintf("exploit.fireprox gateway active: %s", furl),
+					Target:  job.Target,
+				})
+				defer func() {
+					emit(models.RuntimeEvent{
+						Kind:    "stage",
+						Stage:   "exploit.fireprox",
+						Status:  "cleanup",
+						Message: "exploit.fireprox tearing down gateway",
+						Target:  job.Target,
+					})
+					_ = fm.DeleteGateway()
+				}()
+			} else {
+				emit(models.RuntimeEvent{
+					Kind:    "stage",
+					Stage:   "exploit.fireprox",
+					Status:  "warning",
+					Message: fmt.Sprintf("exploit.fireprox failed to engage: %v", err),
+					Target:  job.Target,
+				})
+			}
+		}
+	}
+
 	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
 	httpRuntime := httppolicy.NewRuntime(ctx, httppolicy.Config{
 		RateLimitRPS:            opt.RateLimitRPS,
@@ -596,6 +651,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		CircuitBreakerThreshold: opt.HTTPCircuitBreakerThreshold,
 		CircuitBreakerCooldown:  time.Duration(opt.HTTPCircuitBreakerCooldownMS) * time.Millisecond,
 		WaitOnCircuitOpen:       opt.HTTPCircuitBreakerWait,
+		FireProxURL:             fireProxURL,
+		TargetHost:              targetHost,
 		AdaptiveEvent: func(event httppolicy.AdaptiveEvent) {
 			emit(models.RuntimeEvent{
 				Kind:    "stage",

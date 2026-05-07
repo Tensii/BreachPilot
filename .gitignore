@@ -27,6 +27,7 @@ artifacts/
 *.log
 .breachpilot.state
 recon/
+/breachconsole/backend/history.json
 
 # Local configuration with secrets
 breachpilot.env

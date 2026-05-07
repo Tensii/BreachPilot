@@ -222,6 +222,35 @@ Providing context massively improves authenticated modules (e.g. IDOR, session a
 - `BREACHPILOT_BROWSER_CAPTURE`: Set to `true` to enable screenshot evidence capture.
 - `BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES`: Limit the number of pages to capture per run.
 - `BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS`: Number of scrolls to capture full-page data.
+- `BREACHPILOT_BROWSER_PATH`: Optional explicit path to a browser binary.
+
+## 🕵️ Stealth & IP Rotation (Ghost Mode)
+
+BreachPilot features a built-in **"Ghost-by-Default"** infrastructure designed to bypass IP-based WAF blocking, rate-limiting, and geo-fencing.
+
+### AWS FireProx IP Rotation
+When AWS credentials are detected, BreachPilot automatically creates a temporary **AWS API Gateway** for your target. 
+- **Every HTTP request** originates from a different, rotating AWS IP address.
+- The gateway is automatically torn down when the scan completes.
+- **Cleanup**: If a scan is interrupted, you can manually purge orphaned gateways using: `breachpilot fireprox-cleanup`.
+- Supported in both `reconHarvest` and the Go-based exploit engine.
+
+### Configuration
+You can configure stealth settings in your `breachpilot.env` file:
+```env
+# Enable FireProx (auto-enabled if AWS keys are found)
+BREACHPILOT_FIREPROX=true
+
+# Optional: Provide explicit keys (otherwise auto-detected from ~/.aws/credentials)
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+```
+
+### Client-Side Stealth
+In addition to IP rotation, BreachPilot performs **Advanced User-Agent Rotation**:
+- A pool of 30+ modern browser strings (Chrome, Firefox, Safari, Edge) across Windows, macOS, Linux, iOS, and Android.
+- Randomly selected for every request to reduce fingerprinting consistency.
 
 
 ## Outputs

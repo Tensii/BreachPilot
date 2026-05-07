@@ -73,6 +73,9 @@ type Config struct {
 	BrowserCaptureScrollSteps      int
 	BrowserCaptureMaxRoutesPerPage int
 	BrowserCapturePath             string
+	FireProxEnabled                bool
+	FireProxURL                    string
+	AWSRegion                      string
 }
 
 func Load() Config {
@@ -83,6 +86,16 @@ func Load() Config {
 	exploitWH := mergeEnvURLs("BREACHPILOT_WEBHOOK_EXPLOIT", "BREACHPILOT_WEBHOOK")
 	interactshWH := mergeEnvURLs("BREACHPILOT_WEBHOOK_INTERACTSH", "BREACHPILOT_WEBHOOK")
 	legacyWH := os.Getenv("BREACHPILOT_WEBHOOK")
+
+	awsPresent := os.Getenv("AWS_ACCESS_KEY_ID") != ""
+	if !awsPresent {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			if _, err := os.Stat(home + "/.aws/credentials"); err == nil {
+				awsPresent = true
+			}
+		}
+	}
 
 	cfg := Config{
 		WebhookURL:                     legacyWH,
@@ -147,6 +160,8 @@ func Load() Config {
 		BrowserCaptureScrollSteps:      getEnvInt("BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS", 3),
 		BrowserCaptureMaxRoutesPerPage: getEnvInt("BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE", 10),
 		BrowserCapturePath:             getEnv("BREACHPILOT_BROWSER_PATH", ""),
+		FireProxEnabled:                getEnvBool("BREACHPILOT_FIREPROX", awsPresent),
+		AWSRegion:                      getEnv("AWS_REGION", "us-east-1"),
 	}
 	cfg.ReportFormats = normalizeReportFormats(cfg.ReportFormats)
 	return cfg
@@ -309,8 +324,8 @@ func (c Config) RedactedSummary() string {
 	if strings.TrimSpace(c.AuthAdminCookie) != "" || strings.TrimSpace(c.AuthAdminHeaders) != "" {
 		ctxCount++
 	}
-	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s interactshWebhook=%s retries=%d webhookReliableMode=%t webhookQueueBlockTimeoutMs=%d webhookSpoolPath=%s nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s",
-		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), redact(c.InteractshWebhookURL), c.WebhookRetries, c.WebhookReliableMode, c.WebhookQueueBlockTimeoutMS, redact(c.WebhookSpoolPath), c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride)
+	return fmt.Sprintf("config: reconWebhook=%s exploitWebhook=%s interactshWebhook=%s retries=%d webhookReliableMode=%t webhookQueueBlockTimeoutMs=%d webhookSpoolPath=%s nucleiBin=%s reconTimeout=%ds nucleiTimeout=%ds artifacts=%s minSeverity=%s skipModules=%s onlyModules=%s validationOnly=%t aggressive=%t boundless=%t proofMode=%t proofAllowlist=%s oobHttpPublicBase=%s authContexts=%d previousReport=%s reportFormats=%s scanProfile=%s maxParallel=%d rateLimitRPS=%d httpJitterMs=%d httpCircuitBreakerThreshold=%d httpCircuitBreakerCooldownMs=%d httpCircuitBreakerWait=%t moduleTimeout=%ds webhookFindingsCap=%d scoring=%t chains=%t exposureOverride=%s criticalityOverride=%s fireprox=%t aws_region=%s",
+		redact(c.ReconWebhookURL), redact(c.ExploitWebhookURL), redact(c.InteractshWebhookURL), c.WebhookRetries, c.WebhookReliableMode, c.WebhookQueueBlockTimeoutMS, redact(c.WebhookSpoolPath), c.NucleiBin, c.ReconTimeoutSec, c.NucleiTimeoutSec, c.ArtifactsRoot, minSev, skipMods, onlyMods, c.ValidationOnly, c.AggressiveMode, c.BoundlessMode, c.ProofMode, redact(c.ProofTargetAllowlist), redact(c.OOBHTTPPublicBaseURL), ctxCount, prevReport, reportFormats, c.ScanProfile, c.MaxParallel, c.RateLimitRPS, c.HTTPJitterMS, c.HTTPCircuitBreakerThreshold, c.HTTPCircuitBreakerCooldownMS, c.HTTPCircuitBreakerWait, c.ModuleTimeoutSec, c.WebhookFindingsCap, c.ScoringEnabled, c.ChainAnalysisEnabled, c.ExposureOverride, c.CriticalityOverride, c.FireProxEnabled, c.AWSRegion)
 }
 
 func normalizeReportFormats(raw string) string {

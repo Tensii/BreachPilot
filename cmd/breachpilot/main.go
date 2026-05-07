@@ -119,6 +119,12 @@ func main() {
 		}
 		return
 	}
+	if len(args) == 1 && args[0] == "fireprox-cleanup" {
+		if err := runFireProxCleanup(ctx, cfg); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	jsonOut := false
 	aggressiveFlag := false
@@ -313,6 +319,9 @@ func buildEngineOptions(cfg config.Config) engine.Options {
 		BrowserCaptureScrollSteps:      cfg.BrowserCaptureScrollSteps,
 		BrowserCaptureMaxRoutesPerPage: cfg.BrowserCaptureMaxRoutesPerPage,
 		BrowserCapturePath:             cfg.BrowserCapturePath,
+		FireProxEnabled:                cfg.FireProxEnabled,
+		FireProxURL:                    cfg.FireProxURL,
+		AWSRegion:                      cfg.AWSRegion,
 	}
 }
 
@@ -651,7 +660,10 @@ func persistJobReport(job *models.Job) error {
 }
 
 func runDoctor(ctx context.Context, cfg config.Config, opt engine.Options) error {
-	fmt.Println("[doctor] running checks...")
+	red := "\x1b[31m"
+	green := "\x1b[32m"
+	reset := "\x1b[0m"
+	fmt.Printf("[*] Starting BreachPilot doctor checks...\n")
 	ok := true
 	check := func(name string, err error) {
 		if err != nil {
@@ -679,6 +691,23 @@ func runDoctor(ctx context.Context, cfg config.Config, opt engine.Options) error
 	check("exploit webhook reachable", checkWebhookReachable(cfg.ExploitWebhookURL))
 	if strings.TrimSpace(cfg.InteractshWebhookURL) != "" {
 		check("interactsh webhook reachable", checkWebhookReachable(cfg.InteractshWebhookURL))
+	}
+
+	if cfg.FireProxEnabled {
+		if _, err := exec.LookPath("aws"); err != nil {
+			fmt.Printf("%s[FAIL]%s 'aws' CLI not found in PATH (required for FireProx)\n", red, reset)
+			ok = false
+		} else {
+			fmt.Printf("%s[PASS]%s 'aws' CLI found\n", green, reset)
+			// Check credentials
+			credsCmd := exec.CommandContext(ctx, "aws", "sts", "get-caller-identity", "--region", cfg.AWSRegion)
+			if err := credsCmd.Run(); err != nil {
+				fmt.Printf("%s[FAIL]%s AWS credentials invalid or not configured for region %s\n", red, reset, cfg.AWSRegion)
+				ok = false
+			} else {
+				fmt.Printf("%s[PASS]%s AWS credentials verified for region %s\n", green, reset, cfg.AWSRegion)
+			}
+		}
 	}
 
 	if !ok {
@@ -1092,6 +1121,7 @@ func printUsage() {
 		  breachpilot resume <path/to/.breachpilot.state> [json] [aggressive] [boundless]
 	  breachpilot list-modules
 	  breachpilot doctor
+	  breachpilot fireprox-cleanup
 
 	Examples:
 		  breachpilot full example.com aggressive
@@ -1204,6 +1234,45 @@ func resumeJob(ctx context.Context, args []string, opt engine.Options, nf *notif
 	}
 	for _, ln := range formatCLISummary(job, job.Mode) {
 		fmt.Println(ln)
+	}
+	return nil
+}
+
+func runFireProxCleanup(ctx context.Context, cfg config.Config) error {
+	fmt.Printf("[*] Starting FireProx cleanup in region: %s\n", cfg.AWSRegion)
+	cmd := exec.CommandContext(ctx, "aws", "apigateway", "get-rest-apis", "--region", cfg.AWSRegion)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to list APIs: %w (output: %s)", err, string(out))
+	}
+
+	var apis struct {
+		Items []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &apis); err != nil {
+		return fmt.Errorf("failed to parse APIs JSON: %w", err)
+	}
+
+	found := 0
+	for _, api := range apis.Items {
+		if strings.HasPrefix(api.Name, "fireprox-") {
+			fmt.Printf("[!] Deleting orphaned gateway: %s (%s)\n", api.Name, api.ID)
+			delCmd := exec.CommandContext(ctx, "aws", "apigateway", "delete-rest-api", "--rest-api-id", api.ID, "--region", cfg.AWSRegion)
+			if delOut, delErr := delCmd.CombinedOutput(); delErr != nil {
+				fmt.Printf("[?] Error deleting %s: %v (output: %s)\n", api.ID, delErr, string(delOut))
+			} else {
+				found++
+			}
+		}
+	}
+
+	if found == 0 {
+		fmt.Println("[+] No orphaned gateways found.")
+	} else {
+		fmt.Printf("[+] Cleaned up %d gateway(s).\n", found)
 	}
 	return nil
 }

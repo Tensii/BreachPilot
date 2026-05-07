@@ -96,6 +96,30 @@ atexit.register(_close_log_handle)
 # Ensure common user bin paths are always resolvable (go/pipx installs).
 os.environ["PATH"] = f"{Path.home() / 'go/bin'}:{Path.home() / '.local/bin'}:{os.environ.get('PATH','')}"
 
+def load_env_file(path_str: str) -> None:
+    p = Path(path_str)
+    if not p.is_file():
+        return
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
+# Load config from breachpilot.env or .env if present
+load_env_file("breachpilot.env")
+load_env_file(".env")
+
 _SCORE_KEYWORDS = frozenset(["admin","login","signin","signup","oauth","sso","callback","redirect","api","graphql","swagger","openapi","actuator","console","upload","download","export","import","backup","debug","test","staging","internal",".git",".env","config","old","dev"])
 _SCORE_PARAM_RX = re.compile(r"\b(id|token|redirect|url|next|callback|file|path|key|api_key|auth)\b")
 _FP_PATTERNS = [re.compile(p, re.I) for p in [r"404\.html$", r"default\.html$", r"index\.html$", r"/error/?$", r"nginx_status", r"apple-app-site-association"]]
@@ -490,8 +514,24 @@ def _download_js(url: str, output_path: Path, timeout: int = 12) -> bool:
 
 
 _JS_USER_AGENTS = [
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
 ]
 
 
@@ -906,7 +946,7 @@ def safe_name_for_host(host: str) -> str:
     return f"{host}__{digest}"
 
 
-@dataclass(frozen=True)
+@dataclass
 class ReconConfig:
     ffuf_threads: int = 50
     ffuf_timeout: int = 5
@@ -940,6 +980,7 @@ class ReconConfig:
     stop_on_error: bool = True
     scan_profile: str = "balanced"
     target_profile: str = "waf-safe"
+    fireprox: bool = False
     nuclei_rate_limit: int = 50
     nuclei_concurrency: int = 50
     nuclei_max_host_error: int = 100
@@ -1059,6 +1100,67 @@ assert all(
 ), "Stage definitions drifted; keep STAGE_ORDER and PIPELINE_STAGES aligned."
 
 
+class FireProxManager:
+    def __init__(self, target_url: str):
+        self.target_url = target_url.rstrip("/")
+        self.api_id = None
+        self.proxy_url = None
+        try:
+            import boto3
+            from botocore.config import Config
+            self.boto_available = True
+            # Use us-east-1 as requested
+            my_config = Config(region_name='us-east-1')
+            self.client = boto3.client('apigateway', config=my_config)
+        except ImportError:
+            self.boto_available = False
+
+    def create_gateway(self) -> str | None:
+        if not self.boto_available:
+            log("[!] boto3 not installed. Cannot use FireProx.")
+            return None
+        
+        try:
+            # Simple FireProx implementation: Create a REST API that proxies all requests
+            log(f"[*] Creating FireProx Gateway for {self.target_url}...")
+            api = self.client.create_rest_api(name=f"fireprox-{int(time.time())}", endpointConfiguration={'types': ['REGIONAL']})
+            self.api_id = api['id']
+            root_id = self.client.get_resources(restApiId=self.api_id)['items'][0]['id']
+            
+            # Create proxy resource
+            resource = self.client.create_resource(restApiId=self.api_id, parentId=root_id, pathPart='{proxy+}')
+            resource_id = resource['id']
+            
+            # Setup ANY method
+            for r_id in [root_id, resource_id]:
+                self.client.put_method(restApiId=self.api_id, resourceId=r_id, httpMethod='ANY', authorizationType='NONE')
+                self.client.put_integration(
+                    restApiId=self.api_id, 
+                    resourceId=r_id, 
+                    httpMethod='ANY', 
+                    type='HTTP_PROXY',
+                    integrationHttpMethod='ANY',
+                    uri=f"{self.target_url}/{{proxy}}" if r_id == resource_id else self.target_url,
+                    passthroughBehavior='WHEN_NO_MATCH'
+                )
+            
+            self.client.create_deployment(restApiId=self.api_id, stageName='fireprox')
+            self.proxy_url = f"https://{self.api_id}.execute-api.us-east-1.amazonaws.com/fireprox/"
+            log(f"[bold green][+][/bold green] FireProx Active: {self.proxy_url}")
+            return self.proxy_url
+        except Exception as e:
+            log(f"[!] FireProx Setup Failed: {e}")
+            return None
+
+    def delete_gateway(self):
+        if self.api_id:
+            try:
+                log(f"[*] Cleaning up FireProx Gateway {self.api_id}...")
+                self.client.delete_rest_api(restApiId=self.api_id)
+            except Exception:
+                pass
+
+
 class Runner:
     def __init__(self, target: str, workdir: Path, parallel: int, config: ReconConfig | None = None, dashboard: NullDashboard | HackerDashboard | None = None, *, skip_nuclei: bool = False, skip_gau: bool = False, skip_secrets: bool = False, skip_takeover: bool = False, force_update_templates: bool = False, nuclei_severity: str = "", nuclei_tags: str = ""):
         self.target = normalize_target(target)
@@ -1103,12 +1205,28 @@ class Runner:
         self._webhook_sent_ok: int = 0
         self._webhook_events_dropped: int = 0
         self._webhook_queue: deque[dict] = deque()
+        self.fireprox = None
+        self.fireprox_url = None
         self._webhook_lock = threading.Lock()
         self._webhook_signal = threading.Event()
         self._webhook_stop = threading.Event()
         self._webhook_worker: threading.Thread | None = None
         self._last_command_context: dict | None = None
         self._latest_stage_status: dict[str, dict] = {}
+        
+        # FireProx Initialization (Auto-detect AWS keys)
+        self.fireprox_manager = None
+        aws_keys_present = os.environ.get("AWS_ACCESS_KEY_ID") or Path("~/.aws/credentials").expanduser().exists()
+        
+        if getattr(config, 'fireprox', True) and not getattr(self.config, 'no_fireprox', False) and aws_keys_present:
+            target_url = f"https://{self.target}"
+            self.fireprox_manager = FireProxManager(target_url)
+            self.fireprox_url = self.fireprox_manager.create_gateway()
+            if self.fireprox_url:
+                log(f"[*] FireProx tunneling active for {self.target} (Auto-engaged)")
+            else:
+                log("[!] FireProx auto-init failed. Falling back to direct IP.")
+
         for d in (self.state, self.logs, self.ffuf, self.dirsearch, self.urls, self.intel, self.reports, self.cache, self.raw):
             d.mkdir(parents=True, exist_ok=True)
         self.commands_md.write_text("", encoding="utf-8")
@@ -1195,6 +1313,16 @@ class Runner:
 
     def mark_done(self, name: str) -> None:
         (self.state / f"{name}.done").write_text("", encoding="utf-8")
+
+    def get_target_url(self, host: str | None = None) -> str:
+        """Returns the FireProx URL if available for the target, otherwise the direct URL."""
+        target_host = host or self.target
+        if self.fireprox_url and target_host == self.target:
+            return self.fireprox_url
+        
+        # Fallback to standard URL formation
+        scheme = "https" # Default
+        return f"{scheme}://{target_host}"
 
     def record_stage_status(self, stage: str, status: str, detail: str = "", metrics: dict | None = None, duration_seconds: float | None = None) -> None:
         if self.resume_mode and status in {"started", "completed", "skipped"}:
@@ -2081,7 +2209,8 @@ class Runner:
             ds_log.write_text("[!] dirsearch missing\n", encoding="utf-8")
             return False
         self._per_host_state(host, "dirsearch", "running")
-        r = self.run_tool("dirsearch host", [self.dirsearch_bin, "-u", host, "-w", str(self.dirsearch_wordlist), "-e", "php,html,js,txt,asp,aspx,jsp", "-t", str(max(5, self.config.dirsearch_threads)), "--timeout", str(self.config.dirsearch_timeout), "--delay", str(self.config.dirsearch_delay), "-O", "plain", "-o", str(ds_out)], timeout=600, retries=1, stdout_path=ds_log, stderr_path=ds_log, allow_failure=True)
+        base_url = self.get_target_url(host)
+        r = self.run_tool("dirsearch host", [self.dirsearch_bin, "-u", base_url, "-w", str(self.dirsearch_wordlist), "-e", "php,html,js,txt,asp,aspx,jsp", "-t", str(max(5, self.config.dirsearch_threads)), "--timeout", str(self.config.dirsearch_timeout), "--delay", str(self.config.dirsearch_delay), "-O", "plain", "-o", str(ds_out)], timeout=600, retries=1, stdout_path=ds_log, stderr_path=ds_log, allow_failure=True)
         ok = (r.returncode == 0)
         self._per_host_state(host, "dirsearch", "completed" if ok else "failed")
         return ok
@@ -2110,6 +2239,8 @@ class Runner:
             return True, {"requests_sent": 0, "matches": 0, "ratio_403": 0.0, "ratio_timeout": 0.0, "rate_limited_429": 0}, "skipped"
 
         self._per_host_state(host, phase, "running")
+        base_url = self.get_target_url(host)
+        host_base = base_url.rstrip("/")
         cmd = [self.ffuf_bin, "-noninteractive", "-u", f"{host_base}/FUZZ", "-w", str(wordlist), "-t", str(threads), "-timeout", str(self.config.ffuf_timeout), "-rate", str(rate), "-maxtime-job", str(self.config.ffuf_maxtime_job), "-mc", "200,204,301,302,307,401,403", "-of", "csv", "-o", str(out)]
         if self.config.ffuf_delay:
             cmd.extend(["-p", str(self.config.ffuf_delay)])
@@ -4749,7 +4880,8 @@ class Runner:
         lock=threading.Lock()
         def _probe(host: str):
             nonlocal attempts, negative_http, transport_errors, timeouts
-            url=host.rstrip("/")
+            base_url = self.get_target_url(host)
+            url = base_url.rstrip("/")
             for hdrs in bypass_headers:
                 with lock:
                     attempts += 1
@@ -4869,17 +5001,24 @@ class Runner:
             for path in _GRAPHQL_PATHS:
                 if SHUTTING_DOWN:
                     break
-                url = host.rstrip("/") + path
+                base_url = self.get_target_url(host)
+                url = base_url.rstrip("/") + path
                 for attempt in range(1, 3):
                     local_attempts += 1
                     try:
                         req = urllib.request.Request(url, data=q.encode("utf-8"), headers={"Content-Type":"application/json","User-Agent":_JS_USER_AGENTS[0]})
                         with urllib.request.urlopen(req, timeout=max(5, int(self.config.graphql_timeout))) as resp:
-                            body = resp.read().decode("utf-8", errors="ignore")
-                            if "__schema" in body or "types" in body:
-                                sf = schema_dir / (safe_name_for_host(url)+".json")
-                                sf.write_text(body, encoding="utf-8")
-                                return ({"url":url,"introspection":True,"schema_file":str(sf)}, local_attempts, local_negative_http, local_transport_errors, local_timeouts)
+                            if resp.status == 200:
+                                body = resp.read().decode("utf-8", errors="ignore")
+                                try:
+                                    data = json.loads(body)
+                                    # Strict validation: data.__schema must exist for true introspection
+                                    if isinstance(data, dict) and "data" in data and "__schema" in data["data"]:
+                                        sf = schema_dir / (safe_name_for_host(url)+".json")
+                                        sf.write_text(body, encoding="utf-8")
+                                        return ({"url":url,"introspection":True,"schema_file":str(sf)}, local_attempts, local_negative_http, local_transport_errors, local_timeouts)
+                                except json.JSONDecodeError:
+                                    pass
                     except urllib.error.HTTPError:
                         local_negative_http += 1
                         if attempt == 1:
@@ -5297,7 +5436,8 @@ class Runner:
                     if u.strip(): urls.add(u.strip())
 
         # Exploit/Finding specific stream (if applicable)
-        if is_exploit or sev in {"HIGH", "CRITICAL"}:
+        exploit_stages = {"exploit", "nuclei", "xss", "dalfox", "sqli", "rce", "lfi", "ssrf"}
+        if is_exploit or (stage in exploit_stages and sev in {"HIGH", "CRITICAL"}):
             for k in ["BREACHPILOT_WEBHOOK_EXPLOIT", "BREACHPILOT_WEBHOOK"]:
                 val = os.environ.get(k, "").strip()
                 if val:
@@ -5817,6 +5957,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--debug-artifacts", action="store_true")
     p.add_argument("--doctor", action="store_true", help="Run environment/tool diagnostics and exit")
     p.add_argument("--max-report-files", type=int, default=12)
+    p.add_argument("--no-fireprox", action="store_true", help="Disable AWS API Gateway rotation even if keys are present")
+    p.add_argument("--fireprox", action="store_true", help=argparse.SUPPRESS) # Legacy flag, now default
     p.set_defaults(katana_js_crawl=True, stop_on_error=None)
     return p.parse_args()
 
@@ -6073,28 +6215,26 @@ def _setup_runner(
         nuclei_tags=args.nuclei_tags,
     )
 
-
 def _execute_runner(r: Runner, args: argparse.Namespace, script_name: str) -> None:
-    workdir = r.workdir
-    target = r.target
-    r.resume_mode = bool(args.resume)
-    r.write_run_commands_script(sys.argv, script_name)
-    log(f"[*] Generated: {workdir / 'run_commands.sh'}")
-    if args.run:
-        log(f"[*] Running recon for {target}…")
-        if args.resume:
-            r._notify("🟢 Resume mode enabled — continuing from existing run state", status="completed", stage="pipeline", severity="HIGH", log_file=str(r.logs / "stage_status.jsonl"))
-        try:
+    try:
+        workdir = r.workdir
+        target = r.target
+        r.resume_mode = bool(args.resume)
+        r.write_run_commands_script(sys.argv, script_name)
+        log(f"[*] Generated: {workdir / 'run_commands.sh'}")
+        if args.run:
+            log(f"[*] Running recon for {target}…")
+            if args.resume:
+                r._notify("🟢 Resume mode enabled — continuing from existing run state", status="completed", stage="pipeline", severity="HIGH", log_file=str(r.logs / "stage_status.jsonl"))
             r.execute()
             log(f"[*] Done (validated). Summary: {workdir / 'reports' / 'summary.md'}")
-        except GracefulInterrupt:
-            r.record_stage_status("shutdown", "interrupted", "user pressed Ctrl+C")
-            log(f"[!] Interrupted by user. Partial results were saved in: {workdir}")
-            raise
-    else:
-        log(f"[*] Workspace ready: {workdir}")
-        log("[*] To run:")
-        log(f"    python3 {script_name} --resume \"{workdir}\" --run")
+        else:
+            log(f"[*] Workspace ready: {workdir}")
+            log("[*] To run:")
+            log(f"    python3 {script_name} --resume \"{workdir}\" --run")
+    finally:
+        if hasattr(r, 'fireprox_manager') and r.fireprox_manager:
+            r.fireprox_manager.delete_gateway()
 
 def process_target(target: str, args: argparse.Namespace, recon_config: ReconConfig, script_name: str, dashboard_enabled: bool) -> None:
     out_base = Path("outputs")
@@ -6236,6 +6376,9 @@ def main():
         args.skip_portscan = True
 
     recon_config = build_recon_config(args, cfg)
+    # Engage fireprox by default unless explicitly disabled
+    recon_config.fireprox = not args.no_fireprox
+    
     tool_versions = build_tool_versions(args, cfg)
     script_name = Path(sys.argv[0]).name or "reconharvest.py"
     dashboard_enabled = (not args.no_ui) and RICH_AVAILABLE and sys.stdout.isatty()
