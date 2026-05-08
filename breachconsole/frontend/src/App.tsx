@@ -99,8 +99,20 @@ const App: React.FC = () => {
   const allTargets = useMemo(() => {
     const targets = new Set<string>();
     events.forEach(e => {
-      const t = e.payload?.target || e.job?.target || e.payload?.event?.target || e.payload?.job_target;
-      if (t && typeof t === 'string' && t !== 'unknown') targets.add(t);
+      // Prioritize structured base target fields
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
+      
+      // Fallback to payload.target but exclude finding-specific URLs/endpoints
+      if (!t && e.payload?.target) {
+        const candidate = String(e.payload.target);
+        if (!candidate.includes('://') && !candidate.includes('?') && !candidate.includes(' ')) {
+          t = candidate;
+        }
+      }
+
+      if (t && typeof t === 'string' && t !== 'unknown' && t.trim() !== '') {
+        targets.add(t);
+      }
     });
     return ['All Targets', ...Array.from(targets).sort()];
   }, [events]);
@@ -111,9 +123,15 @@ const App: React.FC = () => {
     const now = new Date().getTime();
     events.slice(0, 50).forEach(e => {
       const ts = new Date(e.ts).getTime();
-      const target = e.payload?.target || e.job?.target;
-      if (target && (now - ts) < 60000) {
-        active.add(target);
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
+      if (!t && e.payload?.target) {
+        const candidate = String(e.payload.target);
+        if (!candidate.includes('://') && !candidate.includes('?') && !candidate.includes(' ')) {
+          t = candidate;
+        }
+      }
+      if (t && (now - ts) < 60000) {
+        active.add(t);
       }
     });
     return active;
@@ -121,7 +139,17 @@ const App: React.FC = () => {
 
   const targetEvents = useMemo(() => {
     if (selectedTarget === 'All Targets') return events;
-    return events.filter(e => (e.payload?.target || e.job?.target) === selectedTarget);
+    return events.filter(e => {
+      const t = e.job?.target || e.payload?.job_target || e.payload?.event?.target || e.payload?.target;
+      if (!t) return false;
+      const sT = String(t);
+      if (sT === selectedTarget) return true;
+      // Map finding URLs back to the base target for filtering
+      if (sT.includes('://')) {
+        return sT.includes(`://${selectedTarget}`) || sT.includes(`.${selectedTarget}`);
+      }
+      return false;
+    });
   }, [events, selectedTarget]);
 
   const reconEvents = targetEvents.filter(e => typeof e?.event === 'string' && (
@@ -147,7 +175,16 @@ const App: React.FC = () => {
     const targetMap = new Map<string, any>();
     
     events.forEach(e => {
-      const t = e.payload?.target || e.job?.target || e.payload?.event?.target || e.payload?.job_target || 'unknown';
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
+      if (!t && e.payload?.target) {
+        const candidate = String(e.payload.target);
+        if (candidate.includes('://')) {
+          try { t = new URL(candidate).hostname; } catch { t = candidate; }
+        } else {
+          t = candidate;
+        }
+      }
+      if (!t) t = 'unknown';
       const s = e.payload?.stats;
       
       if (s) {
@@ -163,6 +200,40 @@ const App: React.FC = () => {
         current.high = Math.max(current.high, s.high_findings || 0);
         current.medium = Math.max(current.medium, s.medium_findings || 0);
         current.low = Math.max(current.low, s.low_findings || 0);
+      }
+
+      // Also check for severity_counts (exploit summary events)
+      const sc = e.payload?.severity_counts;
+      if (sc) {
+        if (!targetMap.has(t)) {
+          targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0 });
+        }
+        const current = targetMap.get(t);
+        current.critical = Math.max(current.critical, sc.CRITICAL || sc.critical || 0);
+        current.high = Math.max(current.high, sc.HIGH || sc.high || 0);
+        current.medium = Math.max(current.medium, sc.MEDIUM || sc.medium || 0);
+        current.low = Math.max(current.low, sc.LOW || sc.low || 0);
+      }
+
+      // Individual finding events (if no summary stats available yet)
+      const sev = e.payload?.severity;
+      if (sev && !s && !sc) {
+        if (!targetMap.has(t)) {
+          targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0, _individual_findings: new Set() });
+        }
+        const current = targetMap.get(t);
+        if (!current._individual_findings) current._individual_findings = new Set();
+        
+        // Use a fingerprint to avoid double counting individual finding events if they are sent multiple times
+        const fingerprint = `${e.event}_${e.payload?.title || ''}_${e.payload?.finding_target || e.payload?.target || ''}`;
+        if (!current._individual_findings.has(fingerprint)) {
+          current._individual_findings.add(fingerprint);
+          const sUpper = String(sev).toUpperCase();
+          if (sUpper === 'CRITICAL') current.critical++;
+          else if (sUpper === 'HIGH') current.high++;
+          else if (sUpper === 'MEDIUM') current.medium++;
+          else if (sUpper === 'LOW') current.low++;
+        }
       }
     });
 
@@ -365,8 +436,12 @@ const App: React.FC = () => {
               <strong>{events.length}</strong>
             </div>
             <div className="stat-item">
-              <span>Heat Map</span>
-              <strong style={{color: 'var(--danger)'}}>{exploitEvents.length}</strong>
+              <span>High Risk</span>
+              <strong style={{color: 'var(--critical)'}}>{globalStats.critical + globalStats.high}</strong>
+            </div>
+            <div className="stat-item">
+              <span>Heartbeat</span>
+              <strong style={{fontSize: '0.75rem'}}>{events.length > 0 ? formatTime(events[0].ts) : '---'}</strong>
             </div>
             <button 
               className="clear-btn"
@@ -488,7 +563,7 @@ const App: React.FC = () => {
                       </div>
                       
                       <div className="event-body">
-                        {ev.payload?.target && <div className="target-badge"><Globe size={12} style={{marginRight: '6px', verticalAlign: 'middle'}} />{ev.payload.target}</div>}
+                        {(ev.payload?.finding_target || ev.payload?.target) && <div className="target-badge"><Globe size={12} style={{marginRight: '6px', verticalAlign: 'middle'}} />{ev.payload.finding_target || ev.payload.target}</div>}
                         <h3 className="event-title">{ev.payload?.title || ev.event.split('.').pop()?.replace(/_/g, ' ')}</h3>
                         
                         {relevantStats.length > 0 && (

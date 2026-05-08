@@ -120,6 +120,69 @@ def load_env_file(path_str: str) -> None:
 load_env_file("breachpilot.env")
 load_env_file(".env")
 
+FIREPROX_URL = os.environ.get("FIREPROX_URL", "").strip()
+TARGET_HOST = ""  # Populated at runtime
+
+def ghost_request(url_or_req, timeout: int = 10):
+    """Wraps urllib.request with FireProx rewriting and UA rotation. 
+    Supports both URL strings and Request objects."""
+    global FIREPROX_URL, TARGET_HOST
+    
+    if isinstance(url_or_req, urllib.request.Request):
+        url = url_or_req.full_url
+        method = url_or_req.get_method()
+        data = url_or_req.data
+        headers = {k: v for k, v in url_or_req.headers.items()}
+    else:
+        url = url_or_req
+        method = "GET"
+        data = None
+        headers = {}
+
+    # UA Rotation
+    ua = random.choice(_JS_USER_AGENTS)
+    actual_headers = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "close",
+    }
+    if headers:
+        actual_headers.update(headers)
+        
+    request_url = url
+    if FIREPROX_URL:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            is_target = False
+            if TARGET_HOST:
+                req_host = (parsed.hostname or "").lower()
+                target_host = TARGET_HOST.lower()
+                is_target = (req_host == target_host or req_host.endswith("." + target_host))
+            
+            if is_target or not TARGET_HOST:
+                proxy_parsed = urllib.parse.urlparse(FIREPROX_URL)
+                new_path = proxy_parsed.path.rstrip("/") + parsed.path
+                if not new_path.startswith("/"):
+                    new_path = "/" + new_path
+                request_url = urllib.parse.urlunparse((
+                    proxy_parsed.scheme,
+                    proxy_parsed.netloc,
+                    new_path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment
+                ))
+        except Exception:
+            pass
+
+    try:
+        req = urllib.request.Request(request_url, data=data, headers=actual_headers, method=method)
+        return urllib.request.urlopen(req, timeout=timeout)
+    except Exception:
+        return None
+
+
 _SCORE_KEYWORDS = frozenset(["admin","login","signin","signup","oauth","sso","callback","redirect","api","graphql","swagger","openapi","actuator","console","upload","download","export","import","backup","debug","test","staging","internal",".git",".env","config","old","dev"])
 _SCORE_PARAM_RX = re.compile(r"\b(id|token|redirect|url|next|callback|file|path|key|api_key|auth)\b")
 _FP_PATTERNS = [re.compile(p, re.I) for p in [r"404\.html$", r"default\.html$", r"index\.html$", r"/error/?$", r"nginx_status", r"apple-app-site-association"]]
@@ -504,13 +567,15 @@ def calculate_entropy(data: str) -> float:
 
 def _download_js(url: str, output_path: Path, timeout: int = 12) -> bool:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": random.choice(_JS_USER_AGENTS)})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            content = r.read().decode("utf-8", errors="ignore")
-            output_path.write_text(content, encoding="utf-8")
-            return True
+        r = ghost_request(url, timeout=timeout)
+        if r:
+            with r:
+                content = r.read().decode("utf-8", errors="ignore")
+                output_path.write_text(content, encoding="utf-8")
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 _JS_USER_AGENTS = [
@@ -1164,9 +1229,19 @@ class FireProxManager:
 class Runner:
     def __init__(self, target: str, workdir: Path, parallel: int, config: ReconConfig | None = None, dashboard: NullDashboard | HackerDashboard | None = None, *, skip_nuclei: bool = False, skip_gau: bool = False, skip_secrets: bool = False, skip_takeover: bool = False, force_update_templates: bool = False, nuclei_severity: str = "", nuclei_tags: str = ""):
         self.target = normalize_target(target)
+        global TARGET_HOST
+        TARGET_HOST = self.target
+        
         self.workdir = workdir
         self.parallel = parallel
         self.config = config or ReconConfig()
+        
+        # Initial check for environment-provided FireProx
+        if self.config.fireprox and os.environ.get("FIREPROX_URL"):
+            log(f"[*] FireProx stealth active (via environment): {os.environ.get('FIREPROX_URL')}")
+            os.environ["HTTP_PROXY"] = os.environ["FIREPROX_URL"]
+            os.environ["HTTPS_PROXY"] = os.environ["FIREPROX_URL"]
+
         self.dashboard = dashboard or NullDashboard()
         self.skip_nuclei = skip_nuclei
         self.skip_gau = skip_gau
@@ -1223,6 +1298,10 @@ class Runner:
             self.fireprox_manager = FireProxManager(target_url)
             self.fireprox_url = self.fireprox_manager.create_gateway()
             if self.fireprox_url:
+                global FIREPROX_URL
+                FIREPROX_URL = self.fireprox_url
+                os.environ["HTTP_PROXY"] = self.fireprox_url
+                os.environ["HTTPS_PROXY"] = self.fireprox_url
                 log(f"[*] FireProx tunneling active for {self.target} (Auto-engaged)")
             else:
                 log("[!] FireProx auto-init failed. Falling back to direct IP.")
@@ -1403,6 +1482,24 @@ class Runner:
         with self._command_lock:
             with self.command_log_jsonl.open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"schema_version": SCHEMA_VERSION, **payload}, ensure_ascii=False) + "\n")
+
+    def _update_env_file(self, key: str, value: str) -> None:
+        """Updates a key in breachpilot.env or .env if it's currently empty."""
+        env_files = [Path("breachpilot.env"), Path(".env")]
+        for env_path in env_files:
+            if not env_path.exists():
+                continue
+            try:
+                content = env_path.read_text(encoding="utf-8")
+                # Look for key= followed by nothing or whitespace until end of line
+                pattern = re.compile(rf"^{re.escape(key)}\s*=\s*$", re.MULTILINE)
+                if pattern.search(content):
+                    new_content = pattern.sub(f"{key}={value}", content)
+                    env_path.write_text(new_content, encoding="utf-8")
+                    log(f"[*] Updated {env_path.name} with {key}={value}")
+                    return
+            except Exception as e:
+                log(f"[!] Failed to update {env_path.name}: {e}")
 
     def add_finding(self, stage: str, severity: str, target: str, title: str, evidence: str = "", confidence: int | None = None, tags: list[str] | None = None) -> None:
         row = {
@@ -2418,7 +2515,7 @@ class Runner:
             robots_url = f"{base}/robots.txt"
             try:
                 req = urllib.request.Request(robots_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with ghost_request(req, timeout=timeout) as r:
                     body = r.read(256000).decode("utf-8", errors="ignore")
                 for ln in body.splitlines():
                     m = _RX_ROBOTS_ALLOW.match(ln)
@@ -2438,7 +2535,7 @@ class Runner:
             for sitemap_url in sitemap_candidates:
                 try:
                     req = urllib.request.Request(sitemap_url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=timeout) as r:
+                    with ghost_request(req, timeout=timeout) as r:
                         body = r.read(1024000).decode("utf-8", errors="ignore")
                     for loc in _RX_SITEMAP_LOC.findall(body):
                         u = str(loc).strip()
@@ -2619,7 +2716,7 @@ class Runner:
             error = ""
             try:
                 req = urllib.request.Request(url, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with ghost_request(req, timeout=timeout) as resp:
                     status = int(resp.getcode() or 0)
                     final_url = str(resp.geturl() or url)
                     hdr = resp.headers or {}
@@ -4329,8 +4426,13 @@ class Runner:
                 "webhook_events_dropped": self._webhook_events_dropped,
                 "webhook_circuit_open_until": self._webhook_circuit_open_until,
             },
+            "fireprox_url": self.fireprox_url or "",
         }
         summary_json.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        
+        # Persist FireProx URL to breachpilot.env if it's currently empty
+        if self.fireprox_url:
+            self._update_env_file("FIREPROX_URL", self.fireprox_url)
 
     def write_run_commands_script(self, original_args: list[str], script_name: str) -> None:
         runfile = self.workdir / "run_commands.sh"
@@ -4887,7 +4989,7 @@ class Runner:
                     attempts += 1
                 try:
                     req=urllib.request.Request(url, headers={"User-Agent": _JS_USER_AGENTS[0], **hdrs})
-                    with urllib.request.urlopen(req, timeout=max(5, int(self.config.bypass_403_timeout))) as resp:
+                    with ghost_request(req, timeout=max(5, int(self.config.bypass_403_timeout))) as resp:
                         if resp.status < 400:
                             with lock: findings.append({"host":host,"bypass":"header","header":str(hdrs),"status":resp.status})
                             return
@@ -4913,7 +5015,7 @@ class Runner:
                     parsed=urllib.parse.urlsplit(url)
                     probe_url=urllib.parse.urlunsplit(parsed._replace(path=path))
                     req=urllib.request.Request(probe_url, headers={"User-Agent": _JS_USER_AGENTS[0]})
-                    with urllib.request.urlopen(req, timeout=max(5, int(self.config.bypass_403_timeout))) as resp:
+                    with ghost_request(req, timeout=max(5, int(self.config.bypass_403_timeout))) as resp:
                         if resp.status < 400:
                             with lock: findings.append({"host":host,"bypass":"path","path":path,"status":resp.status})
                             return
@@ -5007,7 +5109,7 @@ class Runner:
                     local_attempts += 1
                     try:
                         req = urllib.request.Request(url, data=q.encode("utf-8"), headers={"Content-Type":"application/json","User-Agent":_JS_USER_AGENTS[0]})
-                        with urllib.request.urlopen(req, timeout=max(5, int(self.config.graphql_timeout))) as resp:
+                        with ghost_request(req, timeout=max(5, int(self.config.graphql_timeout))) as resp:
                             if resp.status == 200:
                                 body = resp.read().decode("utf-8", errors="ignore")
                                 try:
@@ -5121,7 +5223,7 @@ class Runner:
                     "User-Agent": _JS_USER_AGENTS[0],
                 },
             )
-            with urllib.request.urlopen(_bogus_req, timeout=8) as _r:
+            with ghost_request(_bogus_req, timeout=8) as _r:
                 baseline_size = len(_r.read())
         except Exception:
             pass
@@ -5183,7 +5285,7 @@ class Runner:
             api = f"https://api.github.com/search/code?q={q}&per_page=10"
             try:
                 req = urllib.request.Request(api, headers=headers)
-                with urllib.request.urlopen(req, timeout=self.config.github_dork_timeout) as resp:
+                with ghost_request(req, timeout=self.config.github_dork_timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8", errors="ignore"))
                     for item in (data.get("items") or []):
                         findings.append({
@@ -5516,7 +5618,7 @@ class Runner:
                             "Accept": "application/json",
                         },
                     )
-                    with urllib.request.urlopen(req, timeout=8):
+                    with ghost_request(req, timeout=8):
                         pass
                     ok = True
                     break

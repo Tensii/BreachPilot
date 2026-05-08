@@ -158,6 +158,9 @@ type Options struct {
 	AuthAnonHeaders                string
 	AuthUserHeaders                string
 	AuthAdminHeaders               string
+	FireProxEnabled                bool
+	FireProxURL                    string
+	AWSRegion                      string
 	SSRFCanaryHost                 string
 	SSRFCanaryRedirect             bool
 	OpenRedirectCanaryHost         string
@@ -173,9 +176,6 @@ type Options struct {
 	BrowserCaptureScrollSteps      int
 	BrowserCaptureMaxRoutesPerPage int
 	BrowserCapturePath             string
-	FireProxEnabled                bool
-	FireProxURL                    string
-	AWSRegion                      string
 	SharedState                    *exploit.SharedState
 }
 
@@ -422,7 +422,65 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		Progress: runtimeStageProgress("targets", "targets", 0, nucleiTargetsTotal),
 	})
 
-	args := buildNucleiExecutionArgs(job, nucleiInput, outJSONL, outErrors, opt)
+	var fireProxURL string
+	var targetHost string
+
+	// Prioritize reusing a FireProx gateway created during the discovery/recon phase.
+	if rs.FireProxURL != "" {
+		fireProxURL = rs.FireProxURL
+	}
+
+	if opt.FireProxEnabled && job.Target != "" && job.Target != "from-summary" {
+		turl := job.Target
+		if !strings.HasPrefix(turl, "http") {
+			turl = "https://" + turl
+		}
+		u, err := url.Parse(turl)
+		if err == nil {
+			targetHost = strings.ToLower(u.Host)
+			if fireProxURL == "" {
+				fm := fireprox.NewManager(job.Target, opt.AWSRegion)
+				emit(models.RuntimeEvent{
+					Kind:    "stage",
+					Stage:   "exploit.fireprox",
+					Status:  "started",
+					Message: fmt.Sprintf("exploit.fireprox engaging IP rotation for target: %s", turl),
+					Target:  job.Target,
+				})
+				furl, err := fm.CreateGateway()
+				if err == nil {
+					fireProxURL = furl
+					emit(models.RuntimeEvent{
+						Kind:    "stage",
+						Stage:   "exploit.fireprox",
+						Status:  "ready",
+						Message: fmt.Sprintf("exploit.fireprox gateway active: %s", furl),
+						Target:  job.Target,
+					})
+					defer func() {
+						emit(models.RuntimeEvent{
+							Kind:    "stage",
+							Stage:   "exploit.fireprox",
+							Status:  "cleanup",
+							Message: "exploit.fireprox tearing down gateway",
+							Target:  job.Target,
+						})
+						_ = fm.DeleteGateway()
+					}()
+				} else {
+					emit(models.RuntimeEvent{
+						Kind:    "stage",
+						Stage:   "exploit.fireprox",
+						Status:  "warning",
+						Message: fmt.Sprintf("exploit.fireprox failed to engage: %v", err),
+						Target:  job.Target,
+					})
+				}
+			}
+		}
+	}
+
+	args := buildNucleiExecutionArgs(job, nucleiInput, outJSONL, outErrors, fireProxURL, opt)
 
 	stOut, errOut := os.Stat(outJSONL)
 	if opt.SkipNuclei {
@@ -593,56 +651,6 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	sharedState := exploit.NewSharedState()
 	opt.SharedState = sharedState
 
-	var fireProxURL string
-	var targetHost string
-	if opt.FireProxEnabled && job.Target != "" && job.Target != "from-summary" {
-		turl := job.Target
-		if !strings.HasPrefix(turl, "http") {
-			turl = "https://" + turl
-		}
-		u, err := url.Parse(turl)
-		if err == nil {
-			targetHost = strings.ToLower(u.Host)
-			fm := fireprox.NewManager(job.Target, opt.AWSRegion)
-			emit(models.RuntimeEvent{
-				Kind:    "stage",
-				Stage:   "exploit.fireprox",
-				Status:  "started",
-				Message: fmt.Sprintf("exploit.fireprox engaging IP rotation for target: %s", turl),
-				Target:  job.Target,
-			})
-			furl, err := fm.CreateGateway()
-			if err == nil {
-				fireProxURL = furl
-				emit(models.RuntimeEvent{
-					Kind:    "stage",
-					Stage:   "exploit.fireprox",
-					Status:  "ready",
-					Message: fmt.Sprintf("exploit.fireprox gateway active: %s", furl),
-					Target:  job.Target,
-				})
-				defer func() {
-					emit(models.RuntimeEvent{
-						Kind:    "stage",
-						Stage:   "exploit.fireprox",
-						Status:  "cleanup",
-						Message: "exploit.fireprox tearing down gateway",
-						Target:  job.Target,
-					})
-					_ = fm.DeleteGateway()
-				}()
-			} else {
-				emit(models.RuntimeEvent{
-					Kind:    "stage",
-					Stage:   "exploit.fireprox",
-					Status:  "warning",
-					Message: fmt.Sprintf("exploit.fireprox failed to engage: %v", err),
-					Target:  job.Target,
-				})
-			}
-		}
-	}
-
 	httpMaxInFlight := resolvedHTTPMaxInFlight(opt)
 	httpRuntime := httppolicy.NewRuntime(ctx, httppolicy.Config{
 		RateLimitRPS:            opt.RateLimitRPS,
@@ -658,7 +666,13 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				Kind:    "stage",
 				Stage:   "exploit.http",
 				Status:  "throttled",
-				Message: fmt.Sprintf("exploit.http adaptive throttle host=%s status=%d delay=%s", event.Host, event.StatusCode, event.Delay.Round(time.Millisecond)),
+				Message: func() string {
+					fp := ""
+					if event.FireProxEnabled {
+						fp = " (FireProx active)"
+					}
+					return fmt.Sprintf("exploit.http adaptive throttle host=%s status=%d delay=%s%s", event.Host, event.StatusCode, event.Delay.Round(time.Millisecond), fp)
+				}(),
 				Target:  job.Target,
 				Counts: map[string]int{
 					"status_code":          event.StatusCode,
@@ -1378,7 +1392,32 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				severityCounts[sev]++
 			}
 			if len(topFindings) < 5 && (sev == "CRITICAL" || sev == "HIGH") {
-				topFindings = append(topFindings, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": f.Target})
+				topFindings = append(topFindings, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": job.Target, "finding_target": f.Target})
+			}
+		}
+
+		// Include nuclei findings in severity counts
+		if nucleiPath := filepath.Join(artDir, "nuclei_findings.jsonl"); fileExists(nucleiPath) {
+			if f, err := os.Open(nucleiPath); err == nil {
+				s := bufio.NewScanner(f)
+				for s.Scan() {
+					var nf struct {
+						Info struct {
+							Severity string `json:"severity"`
+						} `json:"info"`
+						Severity string `json:"severity"`
+					}
+					if err := json.Unmarshal(s.Bytes(), &nf); err == nil {
+						sev := strings.ToUpper(nf.Severity)
+						if sev == "" {
+							sev = strings.ToUpper(nf.Info.Severity)
+						}
+						if _, ok := severityCounts[sev]; ok {
+							severityCounts[sev]++
+						}
+					}
+				}
+				f.Close()
 			}
 		}
 
@@ -1420,7 +1459,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 					opt.Notifier.SendGeneric("exploit.finding", map[string]any{
 						"_bp_finding_cap_checked": true,
 						"job_id":                  job.ID,
-						"target":                  f.Target,
+						"target":                  job.Target,
+						"finding_target":          f.Target,
 						"module":                  f.Module,
 						"severity":                sev,
 						"title":                   f.Title,
@@ -1435,7 +1475,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				if _, ok := batchCounts[sev]; ok {
 					batchCounts[sev]++
 					if len(batchSample) < 5 {
-						batchSample = append(batchSample, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": f.Target})
+						batchSample = append(batchSample, map[string]any{"severity": sev, "title": f.Title, "module": f.Module, "target": job.Target, "finding_target": f.Target})
 					}
 				}
 			}
@@ -1758,7 +1798,7 @@ func buildReconHarvestExecutionArgs(target, outputName, resumeDir string, partia
 	return args
 }
 
-func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors string, opt Options) []string {
+func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors, fireProxURL string, opt Options) []string {
 	args := []string{"-l", nucleiInput, "-jsonl", "-o", outJSONL, "-silent", "-no-color", "-stats", "-timeout", strconv.Itoa(defaultNucleiRequestTimeoutSec(job))}
 	if strings.TrimSpace(outErrors) != "" {
 		args = append(args, "-error-log", outErrors)
@@ -1779,6 +1819,9 @@ func buildNucleiExecutionArgs(job *models.Job, nucleiInput, outJSONL, outErrors 
 
 	if opt.RateLimitRPS > 0 {
 		args = append(args, "-rl", strconv.Itoa(opt.RateLimitRPS))
+	}
+	if fireProxURL != "" {
+		args = append(args, "-proxy", fireProxURL)
 	}
 	return args
 }

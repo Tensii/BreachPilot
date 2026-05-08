@@ -178,7 +178,11 @@ func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
 	icon := statusIcon(ev.Status)
 
 	// Specialized rendering for stages to be more dashboard-like
-	return fmt.Sprintf("%s%s %-12s%s %-20s %s", color, icon, status, "\x1b[0m", label, snapshot)
+	detail := ""
+	if strings.ToLower(ev.Status) == "throttled" && ev.Message != "" {
+		detail = " " + ev.Message
+	}
+	return fmt.Sprintf("%s%s %-12s%s %-20s%s %s", color, icon, status, "\x1b[0m", label, detail, snapshot)
 }
 
 func renderRuntimeModule(ev models.RuntimeEvent, snapshot string) string {

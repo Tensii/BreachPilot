@@ -1260,11 +1260,27 @@ func runFireProxCleanup(ctx context.Context, cfg config.Config) error {
 	for _, api := range apis.Items {
 		if strings.HasPrefix(api.Name, "fireprox-") {
 			fmt.Printf("[!] Deleting orphaned gateway: %s (%s)\n", api.Name, api.ID)
-			delCmd := exec.CommandContext(ctx, "aws", "apigateway", "delete-rest-api", "--rest-api-id", api.ID, "--region", cfg.AWSRegion)
-			if delOut, delErr := delCmd.CombinedOutput(); delErr != nil {
-				fmt.Printf("[?] Error deleting %s: %v (output: %s)\n", api.ID, delErr, string(delOut))
-			} else {
-				found++
+			success := false
+			for retries := 0; retries < 10; retries++ {
+				delCmd := exec.CommandContext(ctx, "aws", "apigateway", "delete-rest-api", "--rest-api-id", api.ID, "--region", cfg.AWSRegion)
+				if delOut, delErr := delCmd.CombinedOutput(); delErr != nil {
+					if strings.Contains(string(delOut), "TooManyRequestsException") {
+						fmt.Printf("[~] Rate limited deleting %s, retrying in 5s (attempt %d/10)...\n", api.ID, retries+1)
+						time.Sleep(5 * time.Second)
+						continue
+					}
+					fmt.Printf("[?] Error deleting %s: %v (output: %s)\n", api.ID, delErr, string(delOut))
+					break
+				} else {
+					success = true
+					found++
+					// Mandatory buffer after success
+					time.Sleep(2 * time.Second)
+					break
+				}
+			}
+			if !success {
+				fmt.Printf("[X] Failed to delete %s after retries.\n", api.ID)
 			}
 		}
 	}

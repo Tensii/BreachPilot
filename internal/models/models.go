@@ -108,9 +108,10 @@ type TechFingerprint struct {
 }
 
 type ReconSummary struct {
-	Target  string `json:"target"`
-	Workdir string `json:"workdir"`
-	Live    string `json:"live_hosts"`
+	Target      string `json:"target"`
+	Workdir     string `json:"workdir"`
+	FireProxURL string `json:"fireprox_url,omitempty"`
+	Live        string `json:"live_hosts"`
 	URLs    struct {
 		All string `json:"all"`
 	} `json:"urls"`
