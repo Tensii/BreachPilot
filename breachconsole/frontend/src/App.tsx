@@ -1,20 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Shield, 
-  Search, 
-  Activity, 
-  AlertTriangle, 
-  Terminal,
-  Globe,
-  Layers,
-  Zap,
-  Cpu,
-  Database,
-  Trash2,
-  ChevronRight,
-  Server
-} from 'lucide-react';
+import { Search, Database } from 'lucide-react';
 import './App.css';
+
+import Header from './components/Header';
+import Sidebar from './components/Sidebar';
+import StatsHero from './components/StatsHero';
+import PipelineStepper from './components/PipelineStepper';
+import EventCard from './components/EventCard';
+import Modal from './components/Modal';
 
 interface Event {
   event: string;
@@ -22,6 +15,19 @@ interface Event {
   job?: any;
   ts: string;
 }
+
+const PIPELINE_STAGES = [
+  { id: 'osint', label: 'OSINT' },
+  { id: 'subdomains', label: 'ENUM' },
+  { id: 'dnsx', label: 'DNS' },
+  { id: 'takeover', label: 'TAKEOVER' },
+  { id: 'httpx', label: 'PROBE' },
+  { id: 'portscan', label: 'PORTS' },
+  { id: 'screenshots', label: 'SCREENSHOTS' },
+  { id: 'discovery', label: 'SCAN' },
+  { id: 'nuclei', label: 'EXPLOIT' },
+  { id: 'completed', label: 'DONE' }
+];
 
 const App: React.FC = () => {
   const [events, setEvents] = useState<Event[]>([]);
@@ -43,73 +49,41 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.hostname}:8080/ws/events`);
+    // Use the same host as the frontend, but with port 8080
+    const wsHost = window.location.hostname;
+    const ws = new WebSocket(`${protocol}//${wsHost}:8080/ws/events`);
 
-    ws.onopen = () => {
-      setConnected(true);
-      console.log('Connected to BreachConsole WebSocket');
-    };
-
+    ws.onopen = () => setConnected(true);
+    ws.onclose = () => setConnected(false);
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        let safeData: Event;
-
-        if (typeof data === 'string') {
-          safeData = {
-            event: data,
-            payload: {},
-            ts: new Date().toISOString()
-          };
-        } else if (data && typeof data === 'object') {
-          let eventName = 'unknown';
-          if (typeof data.event === 'string') {
-            eventName = data.event;
-          } else if (data.event && typeof data.event === 'object' && data.event.type) {
-            eventName = data.event.type;
-          } else if (data.type) {
-            eventName = data.type;
-          }
-
-          safeData = {
-            event: String(eventName),
-            payload: data.payload || data,
-            job: data.job || {},
-            ts: data.ts || data.timestamp || (data.event && data.event.timestamp) || new Date().toISOString()
-          };
-        } else {
-          return;
-        }
-
+        const eventName = data.event || data.type || 'unknown';
+        const safeData: Event = {
+          event: String(eventName),
+          payload: data.payload || data,
+          job: data.job || {},
+          ts: data.ts || data.timestamp || new Date().toISOString()
+        };
         setEvents((prev) => [safeData, ...prev].slice(0, 1000));
       } catch (err) {
         console.error('Error processing message:', err);
       }
     };
 
-    ws.onclose = () => {
-      setConnected(false);
-      console.log('Disconnected from BreachConsole WebSocket');
-    };
-
     return () => ws.close();
   }, []);
 
-  // Extract unique targets from events
   const allTargets = useMemo(() => {
     const targets = new Set<string>();
     events.forEach(e => {
-      // Prioritize structured base target fields
       let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
-      
-      // Fallback to payload.target but exclude finding-specific URLs/endpoints
       if (!t && e.payload?.target) {
         const candidate = String(e.payload.target);
         if (!candidate.includes('://') && !candidate.includes('?') && !candidate.includes(' ')) {
           t = candidate;
         }
       }
-
       if (t && typeof t === 'string' && t !== 'unknown' && t.trim() !== '') {
         targets.add(t);
       }
@@ -117,22 +91,13 @@ const App: React.FC = () => {
     return ['All Targets', ...Array.from(targets).sort()];
   }, [events]);
 
-  // Identify targets that have received events in the last 60 seconds
   const activeTargets = useMemo(() => {
     const active = new Set<string>();
-    const now = new Date().getTime();
+    const now = Date.now();
     events.slice(0, 50).forEach(e => {
       const ts = new Date(e.ts).getTime();
       let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
-      if (!t && e.payload?.target) {
-        const candidate = String(e.payload.target);
-        if (!candidate.includes('://') && !candidate.includes('?') && !candidate.includes(' ')) {
-          t = candidate;
-        }
-      }
-      if (t && (now - ts) < 60000) {
-        active.add(t);
-      }
+      if (t && (now - ts) < 60000) active.add(t);
     });
     return active;
   }, [events]);
@@ -144,90 +109,58 @@ const App: React.FC = () => {
       if (!t) return false;
       const sT = String(t);
       if (sT === selectedTarget) return true;
-      // Map finding URLs back to the base target for filtering
-      if (sT.includes('://')) {
-        return sT.includes(`://${selectedTarget}`) || sT.includes(`.${selectedTarget}`);
-      }
+      if (sT.includes('://')) return sT.includes(`://${selectedTarget}`) || sT.includes(`.${selectedTarget}`);
       return false;
     });
   }, [events, selectedTarget]);
 
-  const reconEvents = targetEvents.filter(e => typeof e?.event === 'string' && (
-    e.event.startsWith('recon.') || 
-    e.event.includes('stage') ||
-    e.event.includes('subdomain') ||
-    e.event.includes('takeover') ||
-    e.event.includes('dns') ||
-    e.event === 'run_started' ||
-    e.event === 'run_completed'
-  ));
+  const filteredEvents = useMemo(() => {
+    const isReconTab = activeTab === 'recon';
+    const isExploitTab = activeTab === 'exploits';
+    
+    let pool = targetEvents;
+    if (isReconTab) {
+      pool = targetEvents.filter(e => e.event.startsWith('recon.') || e.event.includes('stage') || e.event.includes('subdomain') || e.event.includes('dns'));
+    } else if (isExploitTab) {
+      pool = targetEvents.filter(e => e.event.startsWith('exploit.') || e.event.startsWith('nuclei.') || e.event === 'finding.new' || e.payload?.severity);
+    }
 
-  const exploitEvents = targetEvents.filter(e => typeof e?.event === 'string' && (
-    e.event.startsWith('exploit.') || 
-    e.event.startsWith('nuclei.') ||
-    e.event === 'finding.new'
-  ));
+    if (!searchTerm) return pool;
+    const term = searchTerm.toLowerCase();
+    return pool.filter(e => 
+      String(e.payload?.target || '').toLowerCase().includes(term) || 
+      String(e.payload?.title || '').toLowerCase().includes(term) ||
+      String(e.event).toLowerCase().includes(term)
+    );
+  }, [activeTab, targetEvents, searchTerm]);
 
   const globalStats = useMemo(() => {
     const stats = { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0 };
-    
-    // Group by target to find peak stats per target
     const targetMap = new Map<string, any>();
     
     events.forEach(e => {
-      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
-      if (!t && e.payload?.target) {
-        const candidate = String(e.payload.target);
-        if (candidate.includes('://')) {
-          try { t = new URL(candidate).hostname; } catch { t = candidate; }
-        } else {
-          t = candidate;
-        }
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target || e.payload?.target || 'unknown';
+      if (String(t).includes('://')) {
+        try { t = new URL(String(t)).hostname; } catch { t = String(t); }
       }
-      if (!t) t = 'unknown';
-      const s = e.payload?.stats;
       
+      if (!targetMap.has(t)) {
+        targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0, _findings: new Set() });
+      }
+      const current = targetMap.get(t);
+      const s = e.payload?.stats;
       if (s) {
-        if (!targetMap.has(t)) {
-          targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0 });
-        }
-        const current = targetMap.get(t);
         current.subdomains = Math.max(current.subdomains, s.subdomains || 0);
         current.resolved = Math.max(current.resolved, s.resolved || 0);
         current.live = Math.max(current.live, s.live_hosts || 0);
         current.ports = Math.max(current.ports, s.ports || 0);
-        current.critical = Math.max(current.critical, s.critical_findings || 0);
-        current.high = Math.max(current.high, s.high_findings || 0);
-        current.medium = Math.max(current.medium, s.medium_findings || 0);
-        current.low = Math.max(current.low, s.low_findings || 0);
       }
-
-      // Also check for severity_counts (exploit summary events)
-      const sc = e.payload?.severity_counts;
-      if (sc) {
-        if (!targetMap.has(t)) {
-          targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0 });
-        }
-        const current = targetMap.get(t);
-        current.critical = Math.max(current.critical, sc.CRITICAL || sc.critical || 0);
-        current.high = Math.max(current.high, sc.HIGH || sc.high || 0);
-        current.medium = Math.max(current.medium, sc.MEDIUM || sc.medium || 0);
-        current.low = Math.max(current.low, sc.LOW || sc.low || 0);
-      }
-
-      // Individual finding events (if no summary stats available yet)
+      
       const sev = e.payload?.severity;
-      if (sev && !s && !sc) {
-        if (!targetMap.has(t)) {
-          targetMap.set(t, { subdomains: 0, resolved: 0, live: 0, ports: 0, critical: 0, high: 0, medium: 0, low: 0, _individual_findings: new Set() });
-        }
-        const current = targetMap.get(t);
-        if (!current._individual_findings) current._individual_findings = new Set();
-        
-        // Use a fingerprint to avoid double counting individual finding events if they are sent multiple times
-        const fingerprint = `${e.event}_${e.payload?.title || ''}_${e.payload?.finding_target || e.payload?.target || ''}`;
-        if (!current._individual_findings.has(fingerprint)) {
-          current._individual_findings.add(fingerprint);
+      if (sev) {
+        const fingerprint = `${e.event}_${e.payload?.title || ''}_${e.payload?.target || ''}`;
+        if (!current._findings.has(fingerprint)) {
+          current._findings.add(fingerprint);
           const sUpper = String(sev).toUpperCase();
           if (sUpper === 'CRITICAL') current.critical++;
           else if (sUpper === 'HIGH') current.high++;
@@ -238,158 +171,53 @@ const App: React.FC = () => {
     });
 
     if (selectedTarget === 'All Targets') {
-      // Sum peaks from ALL targets
-      targetMap.forEach(targetStats => {
-        stats.subdomains += targetStats.subdomains;
-        stats.resolved += targetStats.resolved;
-        stats.live += targetStats.live;
-        stats.ports += targetStats.ports;
-        stats.critical += targetStats.critical;
-        stats.high += targetStats.high;
-        stats.medium += targetStats.medium;
-        stats.low += targetStats.low;
+      targetMap.forEach(ts => {
+        Object.keys(stats).forEach(k => (stats as any)[k] += (ts as any)[k]);
       });
     } else {
-      // Only use the selected target's peaks
-      const targetStats = targetMap.get(selectedTarget) || stats;
-      return targetStats;
+      return targetMap.get(selectedTarget) || stats;
     }
-    
     return stats;
   }, [events, selectedTarget]);
 
-  const pipelineStages = [
-    { id: 'osint', label: 'OSINT' },
-    { id: 'subdomains', label: 'ENUM' },
-    { id: 'dnsx', label: 'DNS' },
-    { id: 'takeover', label: 'TAKEOVER' },
-    { id: 'httpx', label: 'PROBE' },
-    { id: 'portscan', label: 'PORTS' },
-    { id: 'screenshots', label: 'SCREENSHOTS' },
-    { id: 'discovery', label: 'SCAN' },
-    { id: 'nuclei', label: 'EXPLOIT' },
-    { id: 'completed', label: 'DONE' }
-  ];
-
   const currentStageIndex = useMemo(() => {
     let maxIdx = -1;
-    const latestStageDone = new Map<number, boolean>();
-
-    // We look through historical events (newest first)
     targetEvents.forEach(e => {
-      let stage = (e.payload?.event?.stage || e.payload?.stage || e.event || '').toLowerCase();
-      const status = (e.payload?.status || '').toLowerCase();
-      const msg = (e.payload?.msg || e.payload?.detail || '').toLowerCase();
-      const isDone = status === 'completed' || status === 'done' || msg.includes('done') || msg.includes('completed') || msg.includes('finish');
+      const stage = (e.payload?.stage || e.event || '').toLowerCase();
+      let idx = -1;
+      if (['osint', 'recon'].includes(stage)) idx = 0;
+      else if (['subdomains', 'subfinder'].includes(stage)) idx = 1;
+      else if (['dnsx', 'dns'].includes(stage)) idx = 2;
+      else if (stage.includes('takeover')) idx = 3;
+      else if (['httpx', 'probe'].includes(stage)) idx = 4;
+      else if (stage.includes('port')) idx = 5;
+      else if (stage.includes('screenshot')) idx = 6;
+      else if (['discovery', 'scan'].includes(stage)) idx = 7;
+      else if (['nuclei', 'exploit'].includes(stage)) idx = 8;
+      else if (stage.includes('done')) idx = 9;
       
-      let currentIdx = -1;
-      if (['osint', 'recon'].includes(stage)) currentIdx = 0;
-      else if (['subdomains', 'subfinder', 'assetfinder', 'bruteforce', 'dns_bruteforce'].includes(stage)) currentIdx = 1;
-      else if (['dnsx', 'dns', 'resolve'].includes(stage)) currentIdx = 2;
-      else if (['takeover', 'subzy'].includes(stage)) currentIdx = 3;
-      else if (['httpx', 'probe', 'tech'].includes(stage)) currentIdx = 4;
-      else if (['portscan', 'naabu'].includes(stage)) currentIdx = 5;
-      else if (['screenshots', 'screenshot', 'gowitness'].includes(stage)) currentIdx = 6;
-      else if (['discovery', 'dirsearch', 'ffuf', 'urls', 'param_discovery'].includes(stage)) currentIdx = 7;
-      else if (['nuclei', 'exploit', 'vuln', 'xss', 'bypass_403', 'graphql', 'secrets', 'github_dork'].includes(stage)) currentIdx = 8;
-      else if (['completed', 'pipeline', 'done'].includes(stage)) currentIdx = 9;
-      
-      if (currentIdx !== -1) {
-        if (currentIdx > maxIdx) maxIdx = currentIdx;
-        // Since we go newest-first, the first time we see a stage index, it's the latest status
-        if (!latestStageDone.has(currentIdx)) {
-          latestStageDone.set(currentIdx, isDone);
-        }
-      }
+      if (idx > maxIdx) maxIdx = idx;
     });
-
-    // If the latest event for the furthest stage is "DONE", move to next highlight
-    if (maxIdx !== -1 && latestStageDone.get(maxIdx) && maxIdx < pipelineStages.length - 1) {
-      return maxIdx + 1;
-    }
-
     return maxIdx;
   }, [targetEvents]);
 
-  const filteredEvents = useMemo(() => {
-    const pool = activeTab === 'recon' ? reconEvents : activeTab === 'exploits' ? exploitEvents : targetEvents;
-    if (!searchTerm) return pool;
-    const term = searchTerm.toLowerCase();
-    
-    return pool.filter(e => {
-      const target = String(e.payload?.target || e.job?.target || '').toLowerCase();
-      const stage = String(e.payload?.stage || e.payload?.event?.stage || e.event || '').toLowerCase();
-      const msg = String(e.payload?.msg || e.payload?.detail || '').toLowerCase();
-      
-      // Specifically check findings/tech/ports without stringifying the whole history blob
-      const tech = String(e.payload?.tech || '').toLowerCase();
-      const ports = String(e.payload?.ports || '').toLowerCase();
-      const findings = String(e.payload?.findings || '').toLowerCase();
-      
-      return target.includes(term) || 
-             stage.includes(term) || 
-             msg.includes(term) ||
-             tech.includes(term) ||
-             ports.includes(term) ||
-             findings.includes(term);
-    });
-  }, [activeTab, targetEvents, reconEvents, exploitEvents, searchTerm]);
-
-  const getRelevantStats = (ev: Event) => {
-    const stage = (ev.payload?.event?.stage || ev.payload?.stage || ev.event || '').toLowerCase();
-    const stats = ev.payload?.stats || {};
-    const result: {label: string, value: any, icon: any}[] = [];
-
-    if (stage.includes('subdomain') || stage.includes('osint') || stage.includes('bruteforce')) {
-      if (stats.subdomains !== undefined) result.push({label: 'Subdomains', value: stats.subdomains, icon: Layers});
-    } else if (stage.includes('dnsx') || stage.includes('takeover')) {
-      if (stats.resolved !== undefined) result.push({label: 'Resolved', value: stats.resolved, icon: Zap});
-    } else if (stage.includes('httpx') || stage.includes('discovery') || stage.includes('vhost') || stage.includes('screenshot')) {
-      if (stats.live_hosts !== undefined) result.push({label: 'Live', value: stats.live_hosts, icon: Activity});
-    } else if (stage.includes('portscan')) {
-      if (stats.ports !== undefined) result.push({label: 'Ports', value: stats.ports, icon: Server});
-    } else {
-      if (stats.live_hosts) result.push({label: 'Live', value: stats.live_hosts, icon: Activity});
-      if (stats.ports) result.push({label: 'Ports', value: stats.ports, icon: Server});
+  const handleClearBuffer = async () => {
+    try {
+      await fetch(`http://${window.location.hostname}:8080/api/clear`, { method: 'POST' });
+      setEvents([]);
+    } catch (err) {
+      setEvents([]);
     }
-    
-    if (stats.ports > 0 && !result.find(r => r.label === 'Ports')) {
-      result.push({label: 'Ports', value: stats.ports, icon: Server});
-    }
-
-    return result;
   };
 
   return (
     <div className="dashboard">
-      <header className="header">
-        <div className="logo">
-          <Shield className="logo-icon" size={28} />
-          <h1>BREACH<span>CONSOLE</span></h1>
-        </div>
-        
-        <div className="header-controls">
-          <div className="desktop-only">
-            <div className="target-dropdown-container">
-              <Globe size={14} className="dropdown-icon" />
-              <select 
-                className="target-select"
-                value={selectedTarget}
-                onChange={(e) => setSelectedTarget(e.target.value)}
-              >
-                {allTargets.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="ready-indicator">Core // Armed</div>
-          <div className="status">
-            <div className={`status-indicator ${connected ? 'online' : 'offline'}`} />
-            <span className="status-text">{connected ? 'LINK' : 'OFFLINE'}</span>
-          </div>
-        </div>
-      </header>
+      <Header 
+        connected={connected} 
+        selectedTarget={selectedTarget} 
+        allTargets={allTargets} 
+        onTargetChange={setSelectedTarget} 
+      />
 
       <div className="mobile-only target-bar">
         <div className="target-chips">
@@ -407,224 +235,63 @@ const App: React.FC = () => {
       </div>
 
       <main className="main">
-        <aside className="sidebar">
-          <nav>
-            <button 
-              className={activeTab === 'recon' ? 'active' : ''} 
-              onClick={() => setActiveTab('recon')}
-            >
-              <Search size={18} /> <span>Recon</span>
-            </button>
-            <button 
-              className={activeTab === 'exploits' ? 'active' : ''} 
-              onClick={() => setActiveTab('exploits')}
-            >
-              <Zap size={18} /> <span>Exploits</span>
-            </button>
-            <button 
-              className={activeTab === 'raw' ? 'active' : ''} 
-              onClick={() => setActiveTab('raw')}
-            >
-              <Terminal size={18} /> <span>Logs</span>
-            </button>
-          </nav>
-          
-          <div className="stats-box">
-            <h3>Telemetry</h3>
-            <div className="stat-item">
-              <span>Sync Ops</span>
-              <strong>{events.length}</strong>
-            </div>
-            <div className="stat-item">
-              <span>High Risk</span>
-              <strong style={{color: 'var(--critical)'}}>{globalStats.critical + globalStats.high}</strong>
-            </div>
-            <div className="stat-item">
-              <span>Heartbeat</span>
-              <strong style={{fontSize: '0.75rem'}}>{events.length > 0 ? formatTime(events[0].ts) : '---'}</strong>
-            </div>
-            <button 
-              className="clear-btn"
-              onClick={async () => {
-                try {
-                  const host = window.location.hostname;
-                  await fetch(`http://${host}:8080/api/clear`, { method: 'POST' });
-                  setEvents([]);
-                } catch (err) {
-                  setEvents([]);
-                }
-              }}
-            >
-              <Trash2 size={14} style={{ marginRight: '8px' }} /> Clear Buffer
-            </button>
-          </div>
-        </aside>
+        <Sidebar 
+          activeTab={activeTab} 
+          setActiveTab={setActiveTab} 
+          eventCount={events.length} 
+          criticalHighCount={globalStats.critical + globalStats.high} 
+          lastHeartbeat={events.length > 0 ? formatTime(events[0].ts) : '---'}
+          onClearBuffer={handleClearBuffer}
+        />
 
         <section className="content">
-            {activeTab === 'recon' && (
-              <>
-                <div className="stats-hero">
-                    <div className="hero-stat" onClick={() => setSelectedDetails({title: 'Subdomains', data: targetEvents.find(e => e.payload?.subdomains_preview)?.payload?.subdomains_preview || []})}>
-                        <div className="hero-label">Subdomains</div>
-                        <div className="hero-value">{globalStats.subdomains}</div>
-                    </div>
-                    <div className="hero-stat">
-                        <div className="hero-label">Resolved</div>
-                        <div className="hero-value">{globalStats.resolved}</div>
-                    </div>
-                    <div className="hero-stat" onClick={() => setSelectedDetails({title: 'Live Hosts', data: targetEvents.find(e => e.payload?.httpx_preview)?.payload?.httpx_preview?.map((h: any) => h.url) || []})}>
-                        <div className="hero-label">Live Hosts</div>
-                        <div className="hero-value" style={{color: 'var(--success)'}}>{globalStats.live}</div>
-                    </div>
-                    <div className="hero-stat" onClick={() => setSelectedDetails({title: 'Open Ports', data: targetEvents.find(e => e.payload?.port_preview)?.payload?.port_preview || []})}>
-                        <div className="hero-label">Ports</div>
-                        <div className="hero-value" style={{color: 'var(--warning)'}}>{globalStats.ports}</div>
-                    </div>
-                </div>
+          <StatsHero 
+            stats={globalStats} 
+            activeTab={activeTab} 
+            onShowDetails={(title, data) => setSelectedDetails({title, data})}
+            targetEvents={targetEvents}
+          />
 
-                {selectedTarget !== 'All Targets' && (
-                  <div className="pipeline-stepper">
-                    <div className="stepper-line-bg" />
-                    <div className="stepper-line-fill" style={{ width: `${Math.max(0, (currentStageIndex / (pipelineStages.length - 1)) * 90)}%` }} />
-                    {pipelineStages.map((s, idx) => {
-                      const isActive = currentStageIndex === idx;
-                      const isCompleted = currentStageIndex > idx;
-                      return (
-                        <div key={s.id} className={`step ${isActive ? 'active' : ''} ${isCompleted ? 'completed' : ''}`}>
-                          <div className="step-dot">
-                            {isCompleted ? <Zap size={16} /> : (isActive ? <Cpu size={20} className="active-icon" /> : idx + 1)}
-                          </div>
-                          <div className="step-label">{s.label}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-            {activeTab === 'exploits' && (
-              <div className="stats-hero" style={{ gridTemplateColumns: '1fr' }}>
-                  <div className="scorecard">
-                    <div className="score-item">
-                      <div className="score-val" style={{color: 'var(--critical)'}}>{globalStats.critical}</div>
-                      <div className="score-lbl">Critical</div>
-                    </div>
-                    <div className="score-item">
-                      <div className="score-val" style={{color: 'var(--high)'}}>{globalStats.high}</div>
-                      <div className="score-lbl">High</div>
-                    </div>
-                    <div className="score-item">
-                      <div className="score-val" style={{color: 'var(--medium)'}}>{globalStats.medium}</div>
-                      <div className="score-lbl">Medium</div>
-                    </div>
-                    <div className="score-item">
-                      <div className="score-val" style={{color: 'var(--low)'}}>{globalStats.low}</div>
-                      <div className="score-lbl">Low</div>
-                    </div>
-                  </div>
-              </div>
-            )}
+          {activeTab === 'recon' && selectedTarget !== 'All Targets' && (
+            <PipelineStepper currentStageIndex={currentStageIndex} stages={PIPELINE_STAGES} />
+          )}
 
-            <div className="dashboard-controls">
-              <div style={{ position: 'relative' }}>
-                <Search size={18} style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
-                <input 
-                  type="text" 
-                  placeholder={`Search ${activeTab} metadata...`} 
-                  className="search-input"
-                  style={{ paddingLeft: '54px' }}
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
+          <div className="dashboard-controls">
+            <div style={{ position: 'relative' }}>
+              <Search size={18} style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+              <input 
+                type="text" 
+                placeholder={`Search ${activeTab} metadata...`} 
+                className="search-input"
+                style={{ paddingLeft: '54px' }}
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
             </div>
+          </div>
 
-            {filteredEvents.length === 0 ? (
-              <div className="empty-state">
-                <div style={{ padding: '40px', borderRadius: '50%', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)' }}>
-                  <Database size={48} style={{ opacity: 0.3 }} />
-                </div>
-                <p style={{ fontWeight: 600, letterSpacing: '0.05em' }}>WAITING FOR TELEMETRY...</p>
+          {filteredEvents.length === 0 ? (
+            <div className="empty-state">
+              <div style={{ padding: '40px', borderRadius: '50%', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)' }}>
+                <Database size={48} style={{ opacity: 0.3 }} />
               </div>
-            ) : (
-              <div className="event-grid">
-                {filteredEvents.map((ev, i) => {
-                  const isExploit = ev.event.includes('finding') || ev.payload?.severity;
-                  const relevantStats = getRelevantStats(ev);
-                  
-                  return (
-                    <div key={i} className={`event-card ${isExploit ? 'exploit' : ''}`}>
-                      <div className="event-header">
-                        <div className="event-type">
-                          {isExploit ? <Zap size={14} /> : <Activity size={14} />}
-                          {(ev.payload?.event?.stage || ev.payload?.stage || ev.event).toUpperCase().replace('_', ' ')}
-                        </div>
-                        <div className="event-time">{formatTime(ev.ts)}</div>
-                      </div>
-                      
-                      <div className="event-body">
-                        {(ev.payload?.finding_target || ev.payload?.target) && <div className="target-badge"><Globe size={12} style={{marginRight: '6px', verticalAlign: 'middle'}} />{ev.payload.finding_target || ev.payload.target}</div>}
-                        <h3 className="event-title">{ev.payload?.title || ev.event.split('.').pop()?.replace(/_/g, ' ')}</h3>
-                        
-                        {relevantStats.length > 0 && (
-                          <div className="stats-grid">
-                            {relevantStats.map((s, idx) => (
-                              <div key={idx} className="mini-stat">
-                                <span className="label">{s.label}</span>
-                                <span className="value"><s.icon size={14} style={{marginRight: '6px', opacity: 0.5}} />{s.value}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        
-                        {ev.payload?.severity && (
-                          <div className={`severity ${ev.payload.severity.toLowerCase()}`}>
-                            <AlertTriangle size={14} style={{marginRight: '8px'}} />
-                            {ev.payload.severity} // THREAT DETECTED
-                          </div>
-                        )}
+              <p style={{ fontWeight: 600, letterSpacing: '0.05em' }}>WAITING FOR TELEMETRY...</p>
+            </div>
+          ) : (
+            <div className="event-grid">
+              {filteredEvents.map((ev, i) => (
+                <EventCard key={i} event={ev} formatTime={formatTime} />
+              ))}
+            </div>
+          )}
 
-                        <div className="raw-details">
-                          <details>
-                            <summary><ChevronRight size={14} /> Payload Data</summary>
-                            <pre>{JSON.stringify(ev.payload || ev.job, null, 2)}</pre>
-                          </details>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {selectedDetails && (
-              <div className="modal-overlay" onClick={() => setSelectedDetails(null)}>
-                <div className="modal-content" onClick={e => e.stopPropagation()}>
-                  <div className="modal-header">
-                    <h3>DATA EXPLORER // {selectedDetails.title.toUpperCase()}</h3>
-                    <button className="close-modal" onClick={() => setSelectedDetails(null)}>&times;</button>
-                  </div>
-                  <div className="modal-body">
-                    {Array.isArray(selectedDetails.data) ? (
-                      <>
-                        <div style={{marginBottom: '20px', opacity: 0.6, fontSize: '0.85rem', fontFamily: 'var(--font-mono)'}}>
-                          ENTRIES: {selectedDetails.data.length}
-                        </div>
-                        <div className="preview-items">
-                          {selectedDetails.data.slice(0, 100).map((item: any, i: number) => (
-                            <span key={i} className="preview-item subdomain">
-                              {typeof item === 'string' ? item : JSON.stringify(item)}
-                            </span>
-                          ))}
-                        </div>
-                      </>
-                    ) : (
-                      <pre>{JSON.stringify(selectedDetails.data, null, 2)}</pre>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
+          {selectedDetails && (
+            <Modal 
+              title={selectedDetails.title} 
+              data={selectedDetails.data} 
+              onClose={() => setSelectedDetails(null)} 
+            />
+          )}
         </section>
       </main>
     </div>

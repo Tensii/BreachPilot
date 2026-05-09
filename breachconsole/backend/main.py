@@ -7,6 +7,8 @@ import asyncio
 import logging
 import datetime
 import re
+import sqlite3
+import hashlib
 from typing import List
 
 # Configure logging
@@ -32,7 +34,64 @@ clients: List[WebSocket] = []
 # Persistent history file (absolute path)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+DB_FILE = os.path.join(BASE_DIR, "events.db")
 ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.dirname(BASE_DIR)), "artifacts")
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS events
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  event_type TEXT,
+                  target TEXT,
+                  payload TEXT,
+                  timestamp TEXT,
+                  fingerprint TEXT UNIQUE)''')
+    conn.commit()
+    conn.close()
+
+def save_event_to_db(event):
+    payload = event.get('payload', {})
+    event_type = event.get('event', 'unknown')
+    target = payload.get('target', payload.get('job_target', event.get('job', {}).get('target', 'unknown')))
+    ts = event.get('ts', datetime.datetime.now(datetime.UTC).isoformat())
+    
+    # Create a unique fingerprint to avoid duplicates
+    payload_str = json.dumps(payload, sort_keys=True)
+    fingerprint = hashlib.md5(f"{ts}_{event_type}_{target}_{payload_str}".encode()).hexdigest()
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO events (event_type, target, payload, timestamp, fingerprint) VALUES (?, ?, ?, ?, ?)",
+                  (event_type, target, payload_str, ts, fingerprint))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass # Duplicate
+    finally:
+        conn.close()
+
+def get_recent_events(limit=10000):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT event_type, payload, timestamp FROM events ORDER BY timestamp ASC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    
+    events = []
+    for row in rows:
+        try:
+            events.append({
+                "event": row[0],
+                "payload": json.loads(row[1]),
+                "ts": row[2]
+            })
+        except:
+            continue
+    return events
+
+# Initialize database on module load
+init_db()
 
 # Store events for late joiners (last 10000 events)
 event_history = []
@@ -137,42 +196,48 @@ def bootstrap_from_artifacts():
     # Sort by timestamp
     found_events.sort(key=lambda x: x.get("ts", ""))
     
-    # Merge and deduplicate
-    existing_fingerprints = set()
-    for e in event_history:
-        fp = f"{e.get('ts')}_{e.get('event')}_{e.get('payload', {}).get('target')}"
-        existing_fingerprints.add(fp)
-
+    # Bulk insert into SQLite
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     for e in found_events:
-        fp = f"{e.get('ts')}_{e.get('event')}_{e.get('payload', {}).get('target')}"
-        if fp not in existing_fingerprints:
-            event_history.append(e)
-            existing_fingerprints.add(fp)
+        try:
+            payload = e.get('payload', {})
+            event_type = e.get('event', 'unknown')
+            target = payload.get('target', 'unknown')
+            ts = e.get('ts', '')
+            payload_str = json.dumps(payload, sort_keys=True)
+            fingerprint = hashlib.md5(f"{ts}_{event_type}_{target}_{payload_str}".encode()).hexdigest()
             
-    if len(event_history) > 10000:
-        event_history = event_history[-10000:]
+            c.execute("INSERT INTO events (event_type, target, payload, timestamp, fingerprint) VALUES (?, ?, ?, ?, ?)",
+                      (event_type, target, payload_str, ts, fingerprint))
+        except sqlite3.IntegrityError:
+            continue
+        except Exception as ex:
+            logger.error(f"Error bulk inserting event: {ex}")
+    conn.commit()
+    conn.close()
     
-    logger.info(f"Reconstructed {len(found_events)} events from artifacts.")
+    logger.info(f"Reconstructed and persisted {len(found_events)} events from artifacts.")
 
-# Load history from disk on startup
+# Migration: Load history from old JSON file if it exists
 if os.path.exists(HISTORY_FILE):
     try:
         with open(HISTORY_FILE, "r") as f:
-            event_history = json.load(f)
-        logger.info(f"Loaded {len(event_history)} events from history.json")
+            old_history = json.load(f)
+            logger.info(f"Migrating {len(old_history)} events from history.json to SQLite")
+            for e in old_history:
+                save_event_to_db(e)
+        # Rename so we don't migrate again
+        os.rename(HISTORY_FILE, HISTORY_FILE + ".migrated")
     except Exception as e:
-        logger.error(f"Error loading history: {e}")
-        event_history = []
+        logger.error(f"Error migrating history: {e}")
 
-# Also bootstrap from raw tool logs to catch anything missed while backend was down
+# Bootstrap from raw tool logs to catch anything missed while backend was down
 bootstrap_from_artifacts()
 
-def save_history():
-    try:
-        with open(HISTORY_FILE, "w") as f:
-            json.dump(event_history, f)
-    except Exception as e:
-        logger.error(f"Error saving history: {e}")
+# Load latest 10,000 events into memory for active clients
+event_history = get_recent_events(10000)
+logger.info(f"Ready with {len(event_history)} events in memory.")
 
 @app.get("/")
 async def root():
@@ -184,13 +249,13 @@ async def handle_webhook(request: Request):
         payload = await request.json()
         logger.info(f"Received event: {payload.get('event')}")
         
-        # Add to history
+        # Persist to database
+        save_event_to_db(payload)
+        
+        # Add to in-memory history for quick access
         event_history.append(payload)
         if len(event_history) > 10000:
             event_history.pop(0)
-        
-        # Persist to disk
-        save_history()
         
         # Broadcast to all connected clients
         disconnected = []
@@ -214,9 +279,17 @@ async def handle_webhook(request: Request):
 async def clear_history():
     global event_history
     event_history = []
+    
+    # Clear SQLite table
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM events")
+    conn.commit()
+    conn.close()
+    
     if os.path.exists(HISTORY_FILE):
         os.remove(HISTORY_FILE)
-    logger.info("Event history cleared and file removed")
+    logger.info("Event history cleared from memory and database")
     return {"status": "ok"}
 
 @app.websocket("/ws/events")

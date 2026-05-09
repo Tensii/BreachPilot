@@ -65,27 +65,6 @@ BreachPilot automatically loads `./breachpilot.env`. You can override it with `B
 - If they are `true` in `breachpilot.env`, you do not need to pass `aggressive` or `boundless` on every command.
 - If they are `false` in `breachpilot.env`, you can enable them only for the current run by adding `aggressive` and/or `boundless` to the CLI command.
 
-## Recommended Config
-For exploit-focused runs, these are the high-value settings:
-
-```env
-BREACHPILOT_SCAN_PROFILE=exploit
-BREACHPILOT_AGGRESSIVE=true
-BREACHPILOT_BOUNDLESS=false
-BREACHPILOT_PROOF_MODE=true
-
-BREACHPILOT_BROWSER_CAPTURE=true
-BREACHPILOT_BROWSER_CAPTURE_MAX_PAGES=6
-BREACHPILOT_BROWSER_CAPTURE_PER_PAGE_WAIT_MS=4000
-BREACHPILOT_BROWSER_CAPTURE_SETTLE_WAIT_MS=1500
-BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS=3
-BREACHPILOT_BROWSER_CAPTURE_MAX_ROUTES_PER_PAGE=10
-
-BREACHPILOT_AUTH_USER_COOKIE=
-BREACHPILOT_AUTH_ADMIN_COOKIE=
-```
-
-If you have authenticated user/admin context, provide it. That materially improves `idor-*`, `state-change`, `session-abuse`, and auth-differential modules.
 
 ## Scan Modes
 - `full <target>`: run vendored ReconHarvest, then exploit modules
@@ -198,7 +177,6 @@ BREACHPILOT_WEBHOOK=http://localhost:8080/api/webhooks/breachpilot
 ```
 
 ## ⚙️ Configuration & Environment
-... [rest of file]
 
 ### Scan Profiles & Behavior
 - `BREACHPILOT_SCAN_PROFILE`: Choose `quick`, `standard`, `exploit`, or `deep`.
@@ -224,33 +202,36 @@ Providing context massively improves authenticated modules (e.g. IDOR, session a
 - `BREACHPILOT_BROWSER_CAPTURE_SCROLL_STEPS`: Number of scrolls to capture full-page data.
 - `BREACHPILOT_BROWSER_PATH`: Optional explicit path to a browser binary.
 
-## 🕵️ Stealth & IP Rotation (Ghost Mode)
-
+### Multi-Cloud & Stealth Infrastructure (Ghost Mode)
 BreachPilot features a built-in **"Ghost-by-Default"** infrastructure designed to bypass IP-based WAF blocking, rate-limiting, and geo-fencing.
 
-### AWS FireProx IP Rotation
-When AWS credentials are detected, BreachPilot automatically creates a temporary **AWS API Gateway** for your target. 
-- **Every HTTP request** originates from a different, rotating AWS IP address.
-- The gateway is automatically torn down when the scan completes.
-- **Cleanup**: If a scan is interrupted, you can manually purge orphaned gateways using: `breachpilot fireprox-cleanup`.
-- Supported in both `reconHarvest` and the Go-based exploit engine.
+- **Multi-Cloud IP Rotation**: Expand beyond AWS to include Azure and GCP. Every HTTP request originates from a different, rotating cloud IP address.
+- **Provider Selection**: Switch between providers using `BREACHPILOT_STEALTH_PROVIDER` (options: `aws`, `azure`, `gcp`).
+- **JA3 Fingerprint Randomization**: Automatically matches TLS ClientHellos (via uTLS) to the randomized User-Agent, ensuring your TLS signature matches a real browser.
+- **Cleanup**: Manually purge orphaned gateways using: `breachpilot fireprox-cleanup`.
+
+### Dynamic Vulnerability Chaining
+BreachPilot now includes an active **Chaining Engine** that discovers and exploits complex, multi-step attack paths.
+- **Automated Escalation**: Discovering an Open Redirect automatically triggers SSRF probing; finding an IDOR triggers an API surface audit.
+- **Recursive Discovery**: Attack paths are dynamically updated as new findings are confirmed, allowing the engine to "pivot" through different vulnerability classes.
+
+### Real-Time Monitoring: BreachConsole
+The **BreachConsole** provides a high-performance web dashboard for real-time visualization.
+- **Persistent Intelligence**: Now backed by **SQLite** for instant scaling and historical analysis. Re-parsing of artifacts is now a background bootstrap process.
+- **Smart Screenshots**: Automated evidence collection that triggers full-page captures when sensitive keywords, new forms, or state changes are detected.
 
 ### Configuration
-You can configure stealth settings in your `breachpilot.env` file:
 ```env
-# Enable FireProx (auto-enabled if AWS keys are found)
-BREACHPILOT_FIREPROX=true
+# Stealth Provider (aws, azure, gcp)
+BREACHPILOT_STEALTH_PROVIDER=aws
 
-# Optional: Provide explicit keys (otherwise auto-detected from ~/.aws/credentials)
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
+# Azure Settings
+AZURE_RESOURCE_GROUP=
+AZURE_APP_NAME=
+
+# GCP Settings
+GCP_PROJECT_ID=
 ```
-
-### Client-Side Stealth
-In addition to IP rotation, BreachPilot performs **Advanced User-Agent Rotation**:
-- A pool of 30+ modern browser strings (Chrome, Firefox, Safari, Edge) across Windows, macOS, Linux, iOS, and Android.
-- Randomly selected for every request to reduce fingerprinting consistency.
 
 
 ## Outputs
@@ -269,8 +250,3 @@ Common files:
 If `BREACHPILOT_PREVIOUS_REPORT` is set, the report also includes a diff against the earlier run.
 
 `bbmd` and `bbpdf` outputs are always enforced so bug bounty markdown/PDF packs and per-finding PDFs are generated every run.
-
-## Notes
-- Use `recon/summary.json` as the input for `file` mode, not files under `recon/reports/`.
-- `proof_mode` should be used only on owned or explicitly approved targets.
-- `exploit` profile is the best default when you want real exploit candidates instead of mostly hardening findings.

@@ -24,8 +24,9 @@ import (
 	configpkg "breachpilot/internal/config"
 	"breachpilot/internal/exploit"
 	"breachpilot/internal/exploit/browsercapture"
-	"breachpilot/internal/exploit/fireprox"
+	"breachpilot/internal/exploit/chaining"
 	"breachpilot/internal/exploit/discovery"
+	"breachpilot/internal/exploit/fireprox"
 	"breachpilot/internal/exploit/filter"
 	"breachpilot/internal/exploit/httppolicy"
 	adminsurface "breachpilot/internal/exploit/modules/adminsurface"
@@ -809,6 +810,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		OOBProvider:                    oobProvider,
 		OOBSweepWaitSec:                opt.OOBSweepWaitSec,
 	}
+	chainEngine := chaining.NewEngine()
 
 	scoutFindings := make([]models.ExploitFinding, 0, 64)
 	scoutTelemetry := make([]models.ExploitModuleTelemetry, 0, len(authBootstrapModules)+len(scoutModules))
@@ -858,10 +860,8 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	enrichReconSummaryFromSharedState(artDir, &rs, sharedState)
 	enrichURLCorpusFromSharedState(&rs, sharedState)
 
-	// --- Second-Pass Discovery Refresh ---
-	// If schemaprobe or OpenAPI discovery populated new high-value schema endpoints,
-	// we immediately re-run high-value injection modules to ensure they target the
-	// newly discovered API surface.
+	// --- Second-Pass Discovery Refresh & Dynamic Chaining ---
+	// 1. Schema discovery refresh
 	if len(sharedState.GetAll("schema.endpoint.")) > 0 {
 		var refreshModules []exploit.Module
 		for _, m := range scoutModules {
@@ -881,6 +881,24 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 			refreshFindings, refreshTelemetry := exploit.RunModules(ctx, job, &rs, exploitOpt, refreshModules)
 			scoutFindings = append(scoutFindings, refreshFindings...)
 			scoutTelemetry = append(scoutTelemetry, refreshTelemetry...)
+		}
+	}
+
+	// 2. Active Chaining Trigger (Scout Findings -> Proof Modules)
+	chainTriggers := chainEngine.AnalyzeFindings(scoutFindings)
+	if len(chainTriggers) > 0 {
+		emit(models.RuntimeEvent{
+			Kind:    "module",
+			Stage:   "exploit.chain",
+			Status:  "triggered",
+			Message: fmt.Sprintf("exploit.chain detected potential attack paths, unlocking modules: %s", strings.Join(chainTriggers, ",")),
+			Target:  job.Target,
+		})
+		// We'll prioritize these in the upcoming proofStages building
+		for _, nextMod := range chainTriggers {
+			if m := findRegisteredModule(nextMod); m != nil {
+				proofModules = append(proofModules, m)
+			}
 		}
 	}
 	scoutSignals := buildCorrelationSignals(scoutFindings)
@@ -991,6 +1009,29 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				// Prioritize and append as a new stage.
 				nowReady = prioritizeProofModules(nowReady, liveSignals, rs, precisionPriors)
 				proofStages = append(proofStages, nowReady)
+			}
+
+			// 2. Active Chaining Trigger (Proof Findings -> New Proof Modules)
+			liveChainTriggers := chainEngine.AnalyzeFindings(stageFindings)
+			if len(liveChainTriggers) > 0 {
+				var nowReadyChained []exploit.Module
+				for _, nextMod := range liveChainTriggers {
+					if _, done := executedProof[strings.ToLower(nextMod)]; !done {
+						if m := findRegisteredModule(nextMod); m != nil {
+							nowReadyChained = append(nowReadyChained, m)
+							emit(models.RuntimeEvent{
+								Kind:    "module",
+								Stage:   "exploit.chain",
+								Status:  "triggered",
+								Message: fmt.Sprintf("exploit.chain wave2.live-trigger %s based on new findings", m.Name()),
+								Target:  job.Target,
+							})
+						}
+					}
+				}
+				if len(nowReadyChained) > 0 {
+					proofStages = append(proofStages, nowReadyChained)
+				}
 			}
 		}
 	}
@@ -1190,6 +1231,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 				SettleWait:       time.Duration(opt.BrowserCaptureSettleWaitMs) * time.Millisecond,
 				ScrollSteps:      opt.BrowserCaptureScrollSteps,
 				MaxRoutesPerPage: opt.BrowserCaptureMaxRoutesPerPage,
+				ScreenshotDir:    filepath.Join(opt.ArtifactsRoot, job.ID, "screenshots"),
 			}
 			var startURLs []string
 			if p := strings.TrimSpace(rs.URLs.All); p != "" {
