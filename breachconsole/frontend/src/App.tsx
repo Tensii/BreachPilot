@@ -48,43 +48,79 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Use the same host as the frontend, but with port 8080
-    const wsHost = window.location.hostname;
-    const ws = new WebSocket(`${protocol}//${wsHost}:8080/ws/events`);
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const eventName = data.event || data.type || 'unknown';
-        const safeData: Event = {
-          event: String(eventName),
-          payload: data.payload || data,
-          job: data.job || {},
-          ts: data.ts || data.timestamp || new Date().toISOString()
-        };
-        setEvents((prev) => [safeData, ...prev].slice(0, 1000));
-      } catch (err) {
-        console.error('Error processing message:', err);
-      }
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/events`;
+      
+      console.log(`Connecting to WebSocket: ${wsUrl}`);
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        setConnected(true);
+        // Clear events on connection because the backend will send the full history
+        setEvents([]);
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected, retrying in 3s...');
+        setConnected(false);
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        ws?.close();
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.event === 'history' && data.payload?.events) {
+            const historyEvents = data.payload.events.map((e: any) => ({
+              event: String(e.event || e.type || 'unknown'),
+              payload: e.payload || e,
+              job: e.job || {},
+              ts: e.ts || e.timestamp || new Date().toISOString()
+            }));
+            setEvents(historyEvents.reverse().slice(0, 1000));
+            return;
+          }
+
+          const eventName = data.event || data.type || 'unknown';
+          const safeData: Event = {
+            event: String(eventName),
+            payload: data.payload || data,
+            job: data.job || {},
+            ts: data.ts || data.timestamp || new Date().toISOString()
+          };
+          setEvents((prev) => [safeData, ...prev].slice(0, 1000));
+        } catch (err) {
+          console.error('Error processing message:', err);
+        }
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    return () => {
+      if (ws) ws.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
   }, []);
 
   const allTargets = useMemo(() => {
     const targets = new Set<string>();
     events.forEach(e => {
-      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
-      if (!t && e.payload?.target) {
-        const candidate = String(e.payload.target);
-        if (!candidate.includes('://') && !candidate.includes('?') && !candidate.includes(' ')) {
-          t = candidate;
-        }
-      }
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target || e.payload?.target;
       if (t && typeof t === 'string' && t !== 'unknown' && t.trim() !== '') {
+        if (t.includes('://')) {
+          try { t = new URL(t).hostname; } catch { }
+        }
         targets.add(t);
       }
     });
@@ -96,8 +132,13 @@ const App: React.FC = () => {
     const now = Date.now();
     events.slice(0, 50).forEach(e => {
       const ts = new Date(e.ts).getTime();
-      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target;
-      if (t && (now - ts) < 60000) active.add(t);
+      let t = e.job?.target || e.payload?.job_target || e.payload?.event?.target || e.payload?.target;
+      if (t && (now - ts) < 60000) {
+        if (typeof t === 'string' && t.includes('://')) {
+          try { t = new URL(t).hostname; } catch { }
+        }
+        active.add(String(t));
+      }
     });
     return active;
   }, [events]);
@@ -109,7 +150,7 @@ const App: React.FC = () => {
       if (!t) return false;
       const sT = String(t);
       if (sT === selectedTarget) return true;
-      if (sT.includes('://')) return sT.includes(`://${selectedTarget}`) || sT.includes(`.${selectedTarget}`);
+      if (sT.includes(selectedTarget)) return true;
       return false;
     });
   }, [events, selectedTarget]);
@@ -120,7 +161,27 @@ const App: React.FC = () => {
     
     let pool = targetEvents;
     if (isReconTab) {
-      pool = targetEvents.filter(e => e.event.startsWith('recon.') || e.event.includes('stage') || e.event.includes('subdomain') || e.event.includes('dns'));
+      pool = targetEvents.filter(e => {
+        const type = e.event.toLowerCase();
+        return type.startsWith('recon.') || 
+               type.includes('stage') || 
+               type.includes('subdomain') || 
+               type.includes('dns') ||
+               type.includes('osint') ||
+               type.includes('portscan') ||
+               type.includes('httpx') ||
+               type.includes('discovery') ||
+               type.includes('tech') ||
+               type.includes('screenshot') ||
+               type.includes('endpoint') ||
+               type.includes('url') ||
+               type.includes('vhost') ||
+               type.includes('github') ||
+               type.includes('param') ||
+               type.includes('graphql') ||
+               type.includes('secrets') ||
+               type.includes('bypass');
+      });
     } else if (isExploitTab) {
       pool = targetEvents.filter(e => e.event.startsWith('exploit.') || e.event.startsWith('nuclei.') || e.event === 'finding.new' || e.payload?.severity);
     }
@@ -203,7 +264,7 @@ const App: React.FC = () => {
 
   const handleClearBuffer = async () => {
     try {
-      await fetch(`http://${window.location.hostname}:8080/api/clear`, { method: 'POST' });
+      await fetch('/api/clear', { method: 'POST' });
       setEvents([]);
     } catch (err) {
       setEvents([]);

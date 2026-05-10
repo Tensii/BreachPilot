@@ -179,7 +179,8 @@ func renderRuntimeStage(ev models.RuntimeEvent, snapshot string) string {
 
 	// Specialized rendering for stages to be more dashboard-like
 	detail := ""
-	if strings.ToLower(ev.Status) == "throttled" && ev.Message != "" {
+	lowerStatus := strings.ToLower(ev.Status)
+	if (lowerStatus == "throttled" || lowerStatus == "warning" || lowerStatus == "error" || lowerStatus == "failed" || lowerStatus == "ready" || lowerStatus == "resumed" || lowerStatus == "completed" || lowerStatus == "success") && ev.Message != "" {
 		detail = " " + ev.Message
 	}
 	return fmt.Sprintf("%s%s %-12s%s %-20s%s %s", color, icon, status, "\x1b[0m", label, detail, snapshot)

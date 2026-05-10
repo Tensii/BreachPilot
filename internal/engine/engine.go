@@ -429,6 +429,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 	// Prioritize reusing a FireProx gateway created during the discovery/recon phase.
 	if rs.FireProxURL != "" {
 		fireProxURL = rs.FireProxURL
+		if !isFireProxAlive(fireProxURL) {
+			fireProxURL = ""
+		}
 	}
 
 	if opt.FireProxEnabled && job.Target != "" && job.Target != "from-summary" {
@@ -440,7 +443,7 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 		if err == nil {
 			targetHost = strings.ToLower(u.Host)
 			if fireProxURL == "" {
-				fm := fireprox.NewManager(job.Target, opt.AWSRegion)
+				fm := fireprox.NewManager(turl, opt.AWSRegion)
 				emit(models.RuntimeEvent{
 					Kind:    "stage",
 					Stage:   "exploit.fireprox",
@@ -504,6 +507,9 @@ func Process(ctx context.Context, job *models.Job, opt Options) error {
 
 			// Use native nuclei resume
 			resumeArgs := []string{"-resume", resumeCfg}
+			if fireProxURL != "" {
+				resumeArgs = append(resumeArgs, "-proxy", fireProxURL)
+			}
 			cmd := exec.CommandContext(nucleiCtx, opt.NucleiBin, resumeArgs...)
 			logFile, err := os.OpenFile(outLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
@@ -2020,6 +2026,24 @@ func nucleiTargetHost(line string) string {
 		}
 	}
 	return ""
+}
+
+func isFireProxAlive(proxyURL string) bool {
+	if strings.TrimSpace(proxyURL) == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "HEAD", proxyURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return true
 }
 
 func countLinesSafe(path string) int {

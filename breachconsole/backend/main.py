@@ -58,16 +58,36 @@ def save_event_to_db(event):
     
     # Create a unique fingerprint to avoid duplicates
     payload_str = json.dumps(payload, sort_keys=True)
-    fingerprint = hashlib.md5(f"{ts}_{event_type}_{target}_{payload_str}".encode()).hexdigest()
+    fingerprint = hashlib.md5(f"{event_type}_{target}_{payload_str}".encode()).hexdigest()
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
+        # Check if an identical event (type, target, payload) was received recently (within 5 seconds)
+        # We ignore the timestamp for this check to catch multi-notifier sends.
+        c.execute("""SELECT timestamp FROM events 
+                     WHERE event_type = ? AND target = ? AND payload = ? 
+                     ORDER BY timestamp DESC LIMIT 1""", 
+                  (str(event_type), str(target), payload_str))
+        row = c.fetchone()
+        if row:
+            try:
+                last_ts = datetime.datetime.fromisoformat(row[0].replace('Z', '+00:00'))
+                this_ts = datetime.datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                if abs((this_ts - last_ts).total_seconds()) < 5:
+                    return False # Skip recent duplicate
+            except:
+                pass
+
         c.execute("INSERT INTO events (event_type, target, payload, timestamp, fingerprint) VALUES (?, ?, ?, ?, ?)",
-                  (event_type, target, payload_str, ts, fingerprint))
+                  (str(event_type), str(target), payload_str, str(ts), fingerprint))
         conn.commit()
+        return True
     except sqlite3.IntegrityError:
-        pass # Duplicate
+        return False # Duplicate fingerprint
+    except Exception as e:
+        logger.error(f"Error saving event to DB: {e}")
+        return False
     finally:
         conn.close()
 
@@ -118,6 +138,7 @@ def bootstrap_from_artifacts():
             fallback_ts = datetime.datetime.fromtimestamp(mod_time, datetime.UTC).isoformat()
             
             with open(log_path, "r") as f:
+                seen_stages = set()
                 for line in f:
                     # Look for stage transitions: [*] Stage: name [STARTED/DONE]
                     match = re.search(r"\[\*\] Stage: ([a-z0-9_]+) \[(STARTED|DONE)\]", line)
@@ -125,6 +146,11 @@ def bootstrap_from_artifacts():
                         stage = match.group(1)
                         status = match.group(2).lower()
                         
+                        # Avoid duplicates within the same file for the same stage/status
+                        if (stage, status) in seen_stages:
+                            continue
+                        seen_stages.add((stage, status))
+
                         # Map internal stages to dashboard stages
                         mapped_stage = stage
                         if stage.startswith("discovery_"): mapped_stage = "discovery"
@@ -193,8 +219,20 @@ def bootstrap_from_artifacts():
         except Exception as e:
             logger.error(f"Error parsing json log {log_path}: {e}")
     
-    # Sort by timestamp
-    found_events.sort(key=lambda x: x.get("ts", ""))
+    # De-duplicate events before sorting and inserting
+    unique_events = []
+    seen_fingerprints = set()
+    for e in found_events:
+        p = e.get("payload", {})
+        ts = e.get("ts", "")
+        # Create a simple unique key for bootstrap de-duplication
+        key = f"{e.get('event')}_{p.get('target')}_{p.get('status')}_{ts}"
+        if key not in seen_fingerprints:
+            unique_events.append(e)
+            seen_fingerprints.add(key)
+    
+    unique_events.sort(key=lambda x: x.get("ts", ""))
+    found_events = unique_events
     
     # Bulk insert into SQLite
     conn = sqlite3.connect(DB_FILE)
@@ -209,7 +247,7 @@ def bootstrap_from_artifacts():
             fingerprint = hashlib.md5(f"{ts}_{event_type}_{target}_{payload_str}".encode()).hexdigest()
             
             c.execute("INSERT INTO events (event_type, target, payload, timestamp, fingerprint) VALUES (?, ?, ?, ?, ?)",
-                      (event_type, target, payload_str, ts, fingerprint))
+                      (str(event_type), str(target), payload_str, str(ts), fingerprint))
         except sqlite3.IntegrityError:
             continue
         except Exception as ex:
@@ -250,7 +288,8 @@ async def handle_webhook(request: Request):
         logger.info(f"Received event: {payload.get('event')}")
         
         # Persist to database
-        save_event_to_db(payload)
+        if not save_event_to_db(payload):
+            return {"status": "ignored", "message": "duplicate event"}
         
         # Add to in-memory history for quick access
         event_history.append(payload)
@@ -298,12 +337,13 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("New WebSocket client connected")
     clients.append(websocket)
     
-    # Send history to new client
-    for event in event_history:
+    # Send history to new client as a single batch to avoid proxy issues and UI lag
+    if event_history:
         try:
-            await websocket.send_json(event)
-        except:
-            break
+            await websocket.send_json({"event": "history", "payload": {"events": event_history}})
+        except Exception as e:
+            logger.error(f"Error sending history to client: {e}")
+            return
         
     try:
         while True:

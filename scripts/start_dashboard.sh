@@ -20,7 +20,7 @@ pkill -f "uvicorn main:app" || true
 
 echo "[*] Starting Backend on port 8080..."
 # Start backend in background
-uvicorn main:app --host 0.0.0.0 --port 8080 --http h11 --ws wsproto --loop asyncio > backend.log 2>&1 &
+uvicorn main:app --host 0.0.0.0 --port 8080 --loop asyncio > backend.log 2>&1 &
 BACKEND_PID=$!
 echo "[*] Backend started with PID $BACKEND_PID"
 
